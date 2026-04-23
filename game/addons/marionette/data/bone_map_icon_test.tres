@@ -1,0 +1,6 @@
+[gd_resource type="BoneMap" load_steps=2 format=3]
+
+[ext_resource type="SkeletonProfile" path="res://addons/marionette/data/bone_map_icon_test_profile.tres" id="1_profile"]
+
+[resource]
+profile = ExtResource("1_profile")

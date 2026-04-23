@@ -1,0 +1,6 @@
+[gd_resource type="SkeletonProfile" script_class="MarionetteBoneMapIconTest" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/marionette/resources/bone_map_icon_test_profile.gd" id="1_profile"]
+
+[resource]
+script = ExtResource("1_profile")

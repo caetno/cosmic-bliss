@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" fill="#f1c40f"/>
+  <rect x="8" y="8" width="240" height="240" fill="none" stroke="#111111" stroke-width="6"/>
+  <text x="128" y="140" text-anchor="middle" font-family="sans-serif" font-size="36" fill="#111111" font-weight="bold">L HAND</text>
+  <text x="128" y="190" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#111111">custom</text>
+</svg>
