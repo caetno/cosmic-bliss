@@ -7,8 +7,7 @@ extends MeshInstance3D
 ## A single StandardMaterial3D with vertex_color_use_as_albedo = true and
 ## SHADING_MODE_UNSHADED encodes color in vertices. No per-line materials.
 
-const PINNED_COLOR := Color(1.0, 0.2, 0.2)   # red
-const FREE_COLOR := Color(1.0, 1.0, 1.0)     # white
+const _Colors := preload("res://addons/tentacletech/scripts/debug/colors.gd")
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -46,9 +45,7 @@ func update_from(p_tentacle: Node3D, p_size: float) -> void:
 	for i in n:
 		var p: Vector3 = positions[i]
 		var w: float = inv_masses[i] if i < inv_masses.size() else 1.0
-		# inv_mass: 0 = pinned (red), 1 = free (white). Clamp in case w > 1.
-		var t: float = clampf(w, 0.0, 1.0)
-		var c: Color = PINNED_COLOR.lerp(FREE_COLOR, t)
+		var c: Color = _Colors.particle_color(w)
 		_imesh.surface_set_color(c)
 
 		_imesh.surface_set_color(c); _imesh.surface_add_vertex(p + Vector3(half, 0, 0))

@@ -57,17 +57,20 @@ if [[ -f "$EXT_DIR/plugin.gd" ]]; then
 fi
 
 # GDScript: scripts/ subdir for mixed addons, flat for pure-GDScript.
+# --exclude='*.uid' on --delete syncs preserves Godot-generated UID sidecars at
+# the deployed location (they live in addons/, not in source) — without it,
+# every rebuild deletes UIDs and breaks `uid://` references.
 if [[ -d "$EXT_DIR/gdscript" ]]; then
     if $HAS_CPP; then
         mkdir -p "$ADDON_DIR/scripts"
-        rsync -a --delete "$EXT_DIR/gdscript/" "$ADDON_DIR/scripts/"
+        rsync -a --delete --exclude='*.uid' "$EXT_DIR/gdscript/" "$ADDON_DIR/scripts/"
     else
         rsync -a "$EXT_DIR/gdscript/" "$ADDON_DIR/"
     fi
 fi
 
 if [[ -d "$EXT_DIR/shaders" ]]; then
-    rsync -a --delete "$EXT_DIR/shaders/" "$ADDON_DIR/shaders/"
+    rsync -a --delete --exclude='*.uid' "$EXT_DIR/shaders/" "$ADDON_DIR/shaders/"
 fi
 
 echo "built: $NAME -> $ADDON_DIR"

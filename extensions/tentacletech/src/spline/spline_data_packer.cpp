@@ -26,8 +26,17 @@ PackedFloat32Array SplineDataPacker::pack(
 		const Ref<CatmullSpline> &p_spline,
 		const Array &p_per_point_scalars) {
 	PackedFloat32Array out;
+	pack_into(p_spline, p_per_point_scalars, out);
+	return out;
+}
+
+void SplineDataPacker::pack_into(
+		const Ref<CatmullSpline> &p_spline,
+		const Array &p_per_point_scalars,
+		PackedFloat32Array &r_out) {
 	if (p_spline.is_null()) {
-		return out;
+		r_out.resize(0);
+		return;
 	}
 
 	int point_count = p_spline->get_point_count();
@@ -38,8 +47,10 @@ PackedFloat32Array SplineDataPacker::pack(
 
 	int total = compute_packed_size(
 			segment_count, dist_lut_size, bn_lut_size, channel_count, point_count);
-	out.resize(total);
-	float *ptr = out.ptrw();
+	if (r_out.size() != total) {
+		r_out.resize(total);
+	}
+	float *ptr = r_out.ptrw();
 	int offset = 0;
 
 	// Header.
@@ -86,8 +97,6 @@ PackedFloat32Array SplineDataPacker::pack(
 			ptr[offset++] = (i < chan_n) ? cp[i] : 0.0f;
 		}
 	}
-
-	return out;
 }
 
 Ref<ImageTexture> SplineDataPacker::create_texture(

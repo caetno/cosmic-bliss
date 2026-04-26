@@ -1,13 +1,33 @@
 #include "tentacle.h"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/core/class_db.hpp>
 
+#include "../spline/spline_data_packer.h"
+
 using namespace godot;
+
+namespace {
+// Channel order in the packed spline data, agreed with tentacle_lib.gdshaderinc.
+constexpr int CHANNEL_GIRTH_SCALE = 0;
+constexpr int CHANNEL_ASYM_X = 1;
+constexpr int CHANNEL_ASYM_Y = 2;
+constexpr int CHANNEL_COUNT = 3;
+constexpr int REST_GIRTH_TEXTURE_WIDTH = 256;
+const char *SHADER_RES_PATH = "res://addons/tentacletech/shaders/tentacle.gdshader";
+const char *UNIFORM_SPLINE_DATA = "spline_data_texture";
+const char *UNIFORM_SPLINE_DATA_WIDTH = "spline_data_width";
+const char *UNIFORM_REST_GIRTH = "rest_girth_texture";
+const char *UNIFORM_MESH_ARC_AXIS = "mesh_arc_axis";
+const char *UNIFORM_MESH_ARC_OFFSET = "mesh_arc_offset";
+} // namespace
 
 Tentacle::Tentacle() {
 	solver.instantiate();
 	solver->initialize_chain(particle_count, segment_length);
+	render_spline.instantiate();
 }
 
 Tentacle::~Tentacle() {}
@@ -17,6 +37,12 @@ void Tentacle::_ready() {
 	// runs in the editor too so the overlay can render a static rest pose
 	// while the scene is being authored.
 	rebuild_chain();
+
+	_ensure_mesh_instance();
+	_allocate_render_resources();
+	_refresh_mesh_instance();
+	_refresh_shader_material_bindings();
+	_update_spline_data_texture();
 
 	if (Engine::get_singleton()->is_editor_hint()) {
 		// Editor: no physics, but track transform changes so moving the node
@@ -39,6 +65,7 @@ void Tentacle::_physics_process(double p_delta) {
 		solver->set_anchor(0, get_global_transform());
 	}
 	solver->tick((float)p_delta);
+	_update_spline_data_texture();
 }
 
 void Tentacle::_notification(int p_what) {
@@ -138,6 +165,12 @@ void Tentacle::rebuild_chain() {
 	}
 	solver->set_anchor(0, xform);
 	anchor_override = false;
+
+	// Particle count may have changed; resize the per-tick buffers and the
+	// data texture to match the new chain. Safe to call before _ready (does
+	// nothing if the texture isn't allocated yet) and re-runs from _ready.
+	_allocate_render_resources();
+	_update_spline_data_texture();
 }
 
 // -- Target pull ------------------------------------------------------------
@@ -251,6 +284,287 @@ Dictionary Tentacle::get_anchor_state() const {
 	return d;
 }
 
+// -- Render plumbing --------------------------------------------------------
+
+void Tentacle::set_tentacle_mesh(const Ref<Mesh> &p_mesh) {
+	tentacle_mesh = p_mesh;
+	_refresh_mesh_instance();
+}
+Ref<Mesh> Tentacle::get_tentacle_mesh() const { return tentacle_mesh; }
+
+void Tentacle::set_mesh_arc_axis(int p_axis) {
+	if (p_axis < 0) p_axis = 0;
+	if (p_axis > 2) p_axis = 2;
+	mesh_arc_axis = p_axis;
+	if (shader_material.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_MESH_ARC_AXIS, mesh_arc_axis);
+	}
+}
+int Tentacle::get_mesh_arc_axis() const { return mesh_arc_axis; }
+
+void Tentacle::set_mesh_arc_offset(float p_offset) {
+	mesh_arc_offset = p_offset;
+	if (shader_material.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_MESH_ARC_OFFSET, mesh_arc_offset);
+	}
+}
+float Tentacle::get_mesh_arc_offset() const { return mesh_arc_offset; }
+
+Ref<ShaderMaterial> Tentacle::get_shader_material() const { return shader_material; }
+void Tentacle::set_shader_material(const Ref<ShaderMaterial> &p_mat) {
+	shader_material = p_mat;
+	_refresh_mesh_instance();
+	_refresh_shader_material_bindings();
+}
+
+Ref<ImageTexture> Tentacle::get_spline_data_texture() const { return spline_data_texture; }
+int Tentacle::get_spline_data_texture_width() const { return spline_data_width; }
+Ref<Image> Tentacle::get_spline_data_image() const { return spline_data_image; }
+Ref<ImageTexture> Tentacle::get_rest_girth_texture() const { return rest_girth_texture; }
+
+void Tentacle::set_rest_girth_texture(const Ref<ImageTexture> &p_tex) {
+	rest_girth_texture = p_tex;
+	if (shader_material.is_valid() && rest_girth_texture.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_REST_GIRTH, rest_girth_texture);
+	}
+}
+
+PackedVector3Array Tentacle::get_spline_samples(int p_count) const {
+	PackedVector3Array out;
+	if (render_spline.is_null() || p_count < 2) {
+		return out;
+	}
+	out.resize(p_count);
+	Vector3 *ptr = out.ptrw();
+	for (int i = 0; i < p_count; i++) {
+		float t = (float)i / (float)(p_count - 1);
+		ptr[i] = render_spline->evaluate_position(t);
+	}
+	return out;
+}
+
+Array Tentacle::get_spline_frames(int p_count) const {
+	Array out;
+	if (render_spline.is_null() || p_count < 2) {
+		return out;
+	}
+	out.resize(p_count);
+	for (int i = 0; i < p_count; i++) {
+		float t = (float)i / (float)(p_count - 1);
+		Vector3 pos = render_spline->evaluate_position(t);
+		Vector3 tan, nrm, binormal;
+		render_spline->evaluate_frame(t, tan, nrm, binormal);
+		Dictionary d;
+		d["position"] = pos;
+		d["tangent"] = tan;
+		d["normal"] = nrm;
+		d["binormal"] = binormal;
+		out[i] = d;
+	}
+	return out;
+}
+
+void Tentacle::update_render_data() {
+	_update_spline_data_texture();
+}
+
+void Tentacle::_ensure_mesh_instance() {
+	if (mesh_instance != nullptr) {
+		return;
+	}
+	mesh_instance = memnew(MeshInstance3D);
+	mesh_instance->set_name("TentacleMesh");
+	// INTERNAL_MODE_FRONT keeps it out of the scene tree dock and out of the
+	// .tscn file when @tool causes _ready() to fire at edit time.
+	add_child(mesh_instance, false, Node::INTERNAL_MODE_FRONT);
+}
+
+void Tentacle::_refresh_mesh_instance() {
+	if (mesh_instance == nullptr) {
+		return;
+	}
+	mesh_instance->set_mesh(tentacle_mesh);
+	if (shader_material.is_valid()) {
+		mesh_instance->set_material_override(shader_material);
+	}
+}
+
+void Tentacle::_refresh_shader_material_bindings() {
+	if (shader_material.is_null()) {
+		// Try to load the shared shader resource lazily — it may not exist
+		// until sub-step A's shader files are deployed. Quietly skip if it
+		// fails (renders as no-mesh + null material; data textures still
+		// update in case external code wants to read them).
+		ResourceLoader *rl = ResourceLoader::get_singleton();
+		if (rl != nullptr && rl->exists(SHADER_RES_PATH)) {
+			Ref<Shader> shader = rl->load(SHADER_RES_PATH);
+			if (shader.is_valid()) {
+				shader_material.instantiate();
+				shader_material->set_shader(shader);
+				if (mesh_instance != nullptr) {
+					mesh_instance->set_material_override(shader_material);
+				}
+			}
+		}
+	}
+	if (shader_material.is_null()) {
+		return;
+	}
+	if (spline_data_texture.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_SPLINE_DATA, spline_data_texture);
+	}
+	shader_material->set_shader_parameter(UNIFORM_SPLINE_DATA_WIDTH, spline_data_width);
+	if (rest_girth_texture.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_REST_GIRTH, rest_girth_texture);
+	}
+	shader_material->set_shader_parameter(UNIFORM_MESH_ARC_AXIS, mesh_arc_axis);
+	shader_material->set_shader_parameter(UNIFORM_MESH_ARC_OFFSET, mesh_arc_offset);
+}
+
+void Tentacle::_allocate_render_resources() {
+	// Lay out the per-tick scratch buffers and the data texture sized for the
+	// current chain. Called from _ready() and rebuild_chain(). After this,
+	// _update_spline_data_texture() is alloc-free as long as particle_count
+	// stays constant.
+
+	if (render_spline.is_null()) {
+		render_spline.instantiate();
+	}
+
+	// Pre-resize the local-space points buffer; an initial straight chain
+	// gives the spline a valid first build for the placeholder data.
+	if (spline_points_buffer.size() != particle_count) {
+		spline_points_buffer.resize(particle_count);
+	}
+	for (int i = 0; i < particle_count; i++) {
+		spline_points_buffer.set(i, Vector3(0.0f, 0.0f, -segment_length * (float)i));
+	}
+	render_spline->build_from_points(spline_points_buffer);
+
+	// Resize per-channel buffers; channel layout is fixed by namespace
+	// constants above.
+	if (girth_channel_buffer.size() != particle_count) {
+		girth_channel_buffer.resize(particle_count);
+	}
+	if (asym_x_channel_buffer.size() != particle_count) {
+		asym_x_channel_buffer.resize(particle_count);
+	}
+	if (asym_y_channel_buffer.size() != particle_count) {
+		asym_y_channel_buffer.resize(particle_count);
+	}
+
+	// Compute total packed float count and pre-resize the packed buffer.
+	int segment_count = render_spline->get_segment_count();
+	int dist_lut = render_spline->get_distance_lut_sample_count();
+	int bn_lut = render_spline->get_binormal_lut_sample_count();
+	int total = SplineDataPacker::compute_packed_size(
+			segment_count, dist_lut, bn_lut, CHANNEL_COUNT, particle_count);
+	if (spline_packed_buffer.size() != total) {
+		spline_packed_buffer.resize(total);
+	}
+
+	// One RGBA32F pixel = 4 floats. Width = ceil(total / 4); height = 1.
+	// Pad-zeroed so width * height * 4 ≥ total.
+	int floats_per_pixel = 4;
+	int pixels = (total + floats_per_pixel - 1) / floats_per_pixel;
+	if (pixels < 1) pixels = 1;
+	int padded_floats = pixels * floats_per_pixel;
+	int padded_bytes = padded_floats * (int)sizeof(float);
+	if (spline_byte_buffer.size() != padded_bytes) {
+		spline_byte_buffer.resize(padded_bytes);
+	}
+
+	bool size_changed = (spline_data_width != pixels) || (spline_data_height != 1);
+	spline_data_width = pixels;
+	spline_data_height = 1;
+
+	if (spline_data_image.is_null() || size_changed) {
+		spline_data_image = Image::create_empty(spline_data_width, spline_data_height, false, Image::FORMAT_RGBAF);
+	}
+	if (spline_data_texture.is_null()) {
+		spline_data_texture = ImageTexture::create_from_image(spline_data_image);
+	} else if (size_changed) {
+		// Texture must be resized: re-create from the new image.
+		spline_data_texture->set_image(spline_data_image);
+	}
+
+	// Placeholder rest girth texture — uniform 1.0. Sub-step B replaces this
+	// with the auto-bake output. Allocated once; we don't rebuild it on
+	// chain rebuilds (the bake doesn't depend on particle_count).
+	if (rest_girth_texture.is_null()) {
+		PackedByteArray rg_bytes;
+		rg_bytes.resize(REST_GIRTH_TEXTURE_WIDTH * (int)sizeof(float));
+		float *rg_floats = (float *)rg_bytes.ptrw();
+		for (int i = 0; i < REST_GIRTH_TEXTURE_WIDTH; i++) {
+			rg_floats[i] = 1.0f;
+		}
+		Ref<Image> img = Image::create_from_data(REST_GIRTH_TEXTURE_WIDTH, 1, false, Image::FORMAT_RF, rg_bytes);
+		rest_girth_texture = ImageTexture::create_from_image(img);
+	}
+
+	// Material binding may have been set up before resources existed; refresh.
+	_refresh_shader_material_bindings();
+}
+
+void Tentacle::_update_spline_data_texture() {
+	if (solver.is_null() || render_spline.is_null() || spline_data_image.is_null()) {
+		return;
+	}
+	int n = solver->get_particle_count();
+	if (n < 2 || spline_points_buffer.size() != n) {
+		return;
+	}
+
+	// Pull world-space particle positions; transform into tentacle-local space
+	// so the resulting spline sits in the same frame as the MeshInstance3D's
+	// vertex shader. No allocation: we mutate the pre-resized buffer in place.
+	Transform3D world_to_local = is_inside_tree() ? get_global_transform().affine_inverse() : Transform3D();
+	for (int i = 0; i < n; i++) {
+		Vector3 world_pos = solver->get_particle_position(i);
+		spline_points_buffer.set(i, world_to_local.xform(world_pos));
+	}
+	render_spline->build_from_points(spline_points_buffer);
+
+	// Per-particle channel data from the solver.
+	for (int i = 0; i < n; i++) {
+		girth_channel_buffer.set(i, solver->get_particle_girth_scale(i));
+		Vector2 a = solver->get_particle_asymmetry(i);
+		asym_x_channel_buffer.set(i, a.x);
+		asym_y_channel_buffer.set(i, a.y);
+	}
+
+	// Pack into the pre-sized buffer. The Array allocation here is small (3
+	// Variant entries) and falls under the Phase-2 1KB drift budget.
+	Array channels;
+	channels.push_back(girth_channel_buffer);
+	channels.push_back(asym_x_channel_buffer);
+	channels.push_back(asym_y_channel_buffer);
+	SplineDataPacker::pack_into(render_spline, channels, spline_packed_buffer);
+
+	// Copy floats → bytes into the pre-sized byte buffer. Pre-sized to the
+	// texture's full pixel-aligned size; trailing bytes stay as previously
+	// written (pad bytes are read by the shader only when sampling beyond
+	// the meaningful data, which never happens in normal use).
+	int total_floats = spline_packed_buffer.size();
+	int byte_capacity = spline_byte_buffer.size();
+	int copy_bytes = total_floats * (int)sizeof(float);
+	if (copy_bytes > byte_capacity) {
+		copy_bytes = byte_capacity;
+	}
+	const uint8_t *src = (const uint8_t *)spline_packed_buffer.ptr();
+	uint8_t *dst = spline_byte_buffer.ptrw();
+	for (int i = 0; i < copy_bytes; i++) {
+		dst[i] = src[i];
+	}
+
+	// Replace the image's data and push to the texture. set_data() reuses the
+	// Image instance (no Image realloc); ImageTexture::update() reuploads to
+	// GPU without recreating the texture handle.
+	spline_data_image->set_data(spline_data_width, spline_data_height, false,
+			Image::FORMAT_RGBAF, spline_byte_buffer);
+	spline_data_texture->update(spline_data_image);
+}
+
 // -- Binding ----------------------------------------------------------------
 
 void Tentacle::_bind_methods() {
@@ -291,10 +605,39 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_target_pull_state"), &Tentacle::get_target_pull_state);
 	ClassDB::bind_method(D_METHOD("get_anchor_state"), &Tentacle::get_anchor_state);
 
+	ClassDB::bind_method(D_METHOD("set_tentacle_mesh", "mesh"), &Tentacle::set_tentacle_mesh);
+	ClassDB::bind_method(D_METHOD("get_tentacle_mesh"), &Tentacle::get_tentacle_mesh);
+	ClassDB::bind_method(D_METHOD("set_shader_material", "material"), &Tentacle::set_shader_material);
+	ClassDB::bind_method(D_METHOD("get_shader_material"), &Tentacle::get_shader_material);
+	ClassDB::bind_method(D_METHOD("set_mesh_arc_axis", "axis"), &Tentacle::set_mesh_arc_axis);
+	ClassDB::bind_method(D_METHOD("get_mesh_arc_axis"), &Tentacle::get_mesh_arc_axis);
+	ClassDB::bind_method(D_METHOD("set_mesh_arc_offset", "offset"), &Tentacle::set_mesh_arc_offset);
+	ClassDB::bind_method(D_METHOD("get_mesh_arc_offset"), &Tentacle::get_mesh_arc_offset);
+
+	BIND_ENUM_CONSTANT(MESH_ARC_AXIS_X);
+	BIND_ENUM_CONSTANT(MESH_ARC_AXIS_Y);
+	BIND_ENUM_CONSTANT(MESH_ARC_AXIS_Z);
+	ClassDB::bind_method(D_METHOD("get_spline_data_texture"), &Tentacle::get_spline_data_texture);
+	ClassDB::bind_method(D_METHOD("get_spline_data_texture_width"), &Tentacle::get_spline_data_texture_width);
+	ClassDB::bind_method(D_METHOD("get_spline_data_image"), &Tentacle::get_spline_data_image);
+	ClassDB::bind_method(D_METHOD("get_rest_girth_texture"), &Tentacle::get_rest_girth_texture);
+	ClassDB::bind_method(D_METHOD("set_rest_girth_texture", "tex"), &Tentacle::set_rest_girth_texture);
+	ClassDB::bind_method(D_METHOD("get_spline_samples", "count"), &Tentacle::get_spline_samples);
+	ClassDB::bind_method(D_METHOD("get_spline_frames", "count"), &Tentacle::get_spline_frames);
+	ClassDB::bind_method(D_METHOD("update_render_data"), &Tentacle::update_render_data);
+
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "particle_count", PROPERTY_HINT_RANGE, "2,48,1"),
 			"set_particle_count", "get_particle_count");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "segment_length", PROPERTY_HINT_RANGE, "0.001,1.0,0.001,or_greater"),
 			"set_segment_length", "get_segment_length");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "tentacle_mesh", PROPERTY_HINT_RESOURCE_TYPE, "Mesh"),
+			"set_tentacle_mesh", "get_tentacle_mesh");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "shader_material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial"),
+			"set_shader_material", "get_shader_material");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_arc_axis", PROPERTY_HINT_ENUM, "X,Y,Z"),
+			"set_mesh_arc_axis", "get_mesh_arc_axis");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "mesh_arc_offset", PROPERTY_HINT_RANGE, "-10.0,10.0,0.001,or_lesser,or_greater"),
+			"set_mesh_arc_offset", "get_mesh_arc_offset");
 
 	ADD_GROUP("Solver", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iteration_count", PROPERTY_HINT_RANGE, "1,6,1"),

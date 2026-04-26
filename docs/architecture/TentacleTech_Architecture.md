@@ -343,6 +343,20 @@ External stimulation → linked orifices become wetter → subsequent entry is e
 
 ## 5. Spline and mesh deformation
 
+### 5.0 Layer responsibilities (partition rule)
+
+A single invariant governs the mesh / vertex shader / fragment shader split. Any new feature is tagged against this rule before being scoped:
+
+| Layer | Owns |
+|---|---|
+| **Mesh** (`TentacleMesh` resource, §10.2) | Silhouette and radial-profile changes — suckers, knots, ribs, fins, spines, mouth, tip variants. **Plus** the vertex-color / vertex-attribute masks driving sub-silhouette detail. |
+| **Vertex shader** (§5.3) | Only physics-driven deformation — spline curve, `girth_scale`, asymmetry. Never adds vertices, never punches holes, never moves authored features. The mesh is its input; the PBD solver is its driver. |
+| **Fragment shader** | Sub-silhouette surface detail — papillae bumps via normal map / parallax, emissive photophores, wetness, sheen variation. Reads the masks the mesh authored. |
+
+**Stated as one rule:** the mesh decides silhouette and authors masks; the fragment shader interprets masks; the vertex shader only deforms — never customizes. Any feature proposal must say which layer owns it before being approved.
+
+Sub-silhouette detail (papillae, scales, micro-warts) is shader-only — the polygon cost of expressing it as geometry is wasted on shapes the silhouette never reveals. Suckers, knots, ribs, fins are silhouette-defining and live in the mesh.
+
 ### 5.1 CatmullSpline
 
 Generic primitive (to be built in Phase 1 by scavenging DPG's math). Pure math, independent of TentacleTech-specific types.
@@ -435,9 +449,11 @@ The rest girth is **baked from mesh geometry automatically.** No `Curve` resourc
 
 The mesh's geometric detail (knots, ripples, bulbs) determines the girth profile implicitly. Physics and rendering are consistent because both derive from the same mesh.
 
-**Procedural generator** (GDScript) outputs both mesh and bakes the girth texture in one step. **Blender-imported** meshes have the bake run automatically at resource load time by a small helper class.
+**Procedural generator** (GDScript) outputs both mesh and bakes the girth texture in one step — see `TentacleMesh` in §10.2. **Blender-imported** meshes have the bake run automatically at resource load time by a small helper class.
 
-Surface detail (ribbing, veins, scales) is mesh geometry — rides along with the lateral XY offsets and is scaled by the runtime `girth_scale` and asymmetry. No detail texture needed; concavities and full 3D surface features work naturally.
+Surface detail (ribbing, veins, scales) is mesh geometry — rides along with the lateral XY offsets and is scaled by the runtime `girth_scale` and asymmetry. No detail texture needed; concavities and full 3D surface features work naturally. Sub-silhouette detail (papillae, photophores, wetness) lives in the fragment shader, masked by vertex color authored on the mesh — see §5.0.
+
+**Runtime regeneration policy.** Default workflow is **edit-time bake** to a `.tres` `ArrayMesh` (or to the `TentacleMesh` resource cache); shipping gameplay loads the static result. Runtime regeneration is *supported* (the `PrimitiveMesh`-style auto-rebuild path on property change works) but *not relied on for gameplay* — physics-driven motion is the spline shader's job, not mesh re-bake. Use cases for runtime mutation are limited to dev tooling, livecoding, and edit-time inspector dragging.
 
 ---
 
@@ -1102,23 +1118,100 @@ Within the masked region, skin fragments transition to a translucent fresnel-rim
 - Consistent radial vertex count per ring (8, 12, 16, or 24)
 - Cylindrical UV unwrap: V = arc-length, U = angle
 
-### 10.2 Procedural generator (GDScript, in `gdscript/procedural/`)
+### 10.2 TentacleMesh authoring resource (GDScript, in `gdscript/procedural/`)
 
-CSG-like node tree in editor:
+Authoring a tentacle is a **`Resource` with a base shape plus an array of features**. The `TentacleMesh` resource is `@tool`-driven: dragging a slider in the inspector rebakes the mesh at edit time; the result is saved as a static `ArrayMesh` referenced by `MeshInstance3D` at runtime. (Per §5.4 runtime regeneration is supported but not relied on for gameplay.)
+
+Supersedes the earlier modifier-tree sketch. The historical proposal lives at `docs/proposals/TentacleMesh_proposal.md`.
+
+#### Resource layout
 
 ```
-TentacleMeshRoot (Node3D, outputs ArrayMesh + bakes girth texture)
-├── base_length, base_radius, segment_count, radial_segments
-├── taper_curve (Curve resource)
-└── modifier children (operate on parent's vertex data)
-    ├── RippleModifier (start, end, frequency, amplitude, falloff)
-    ├── KnotModifier (position, type, size, count, spacing, size_falloff)
-    ├── TaperModifier
-    ├── TwistModifier
-    └── FlareModifier
+TentacleMesh : Resource
+├── length                                          (m)
+├── base_radius, tip_radius                         (m, range guidance 0.005–0.5)
+├── radius_curve : Curve                            (overrides linear taper when set)
+├── radial_segments, length_segments
+├── cross_section : enum                            (Circular / Ellipse(a:b) / NGon(n) / Lobed(count, depth))
+├── twist_total : float                             (rad; optional twist_curve overrides linear)
+├── seam_offset : float                             (radial angle owning the UV seam — placed dorsal, away from sucker rows)
+├── intrinsic_axis : Vector3                        (must be -Z to match Tentacle::initialize_chain)
+└── features : Array[TentacleFeature]               (applied in array order; vertex-color writes are last-writer-wins)
+
+TentacleFeature : Resource (abstract)
+├── enabled : bool
+└── _apply(bake_context : BakeContext) : void       (subclass override)
 ```
 
-Regenerates mesh live in editor. Bakes girth texture automatically (§5.4). Default presets provided: smooth, ribbed, bulbed, multi-bulb, barbed, ovipositor.
+A feature subclass declares which masks it writes (`_get_required_masks() -> PackedStringArray`); the bake validates ordering at edit time and warns if a feature reads a mask another feature later overwrites.
+
+#### Feature catalog
+
+**Geometry features** (modify topology / positions; only included when silhouette-defining):
+
+| Feature | Properties |
+|---|---|
+| `SuckerRowFeature` | `count`, `position_curve`, `size_curve`, `side` ∈ {OneSide, TwoSide, AllAround, Spiral}, `rim_height`, `cup_depth`, `double_row_offset` |
+| `KnotFieldFeature` | `count`, `spacing_curve`, `profile` ∈ {Gaussian, Sharp, Asymmetric}, `max_radius_multiplier` (modulates base radius; no extra topology) |
+| `RibsFeature` | `count`, `spacing_curve`, `depth`, `profile` ∈ {V, U} (circumferential grooves) |
+| `RibbonFeature` | `fin_count` (1/2/4), `radial_positions`, `width_curve`, `ruffle_frequency`, `ruffle_amplitude` |
+| `SpinesFeature` | `count`, `angle_radial`, `angle_axial`, `length_curve`, `base_width`, `sharpness` |
+| `WartClusterFeature` | `density` (per m²), `size_min/max`, `seed`, `axial_band`, `clustering_exponent` (geometry only for silhouette-meaningful sizes) |
+
+**Mask-only features** (no topology change; vertex color authored, fragment shader interprets):
+
+| Feature | Properties | Mask channel |
+|---|---|---|
+| `PapillaeFeature` | `density`, `axial_band`, `seed` | `COLOR.g` density |
+| `PhotophoreFeature` | `count`, `distribution`, `emit_color` | `COLOR.b` mask + UV1 disc-space |
+
+#### Tip and base
+
+`TipFeature` (one per mesh) is a discriminated union:
+
+- `Pointed(sharpness)` (default), `Rounded(radius)`, `Bulb(bulb_radius, bulb_length, neck_pinch)`
+- `Canal(canal_radius, internal_depth)` — open-ended, exposes interior geometry. Used by ovipositor and storage-container paths. **Geometry only**; physics for the cavity is owned by §6 and reads `COLOR.a`'s canal-interior flag (see bake contract below). Interactive internal physics defers to Phase 8.
+- `Flare(flare_radius, flare_length)`, `Mouth(petal_count, petal_curl, opening_radius)`
+
+`BaseFeature`: `Flush` / `Collar(radius, length)` / `Flange`.
+
+#### Bake-output contract (the channel layout shaders read)
+
+| Channel | Meaning |
+|---|---|
+| `UV0` | Longitudinal U (base→tip), circumferential V |
+| `UV1` | Per-feature local UVs (sucker disc-space, fin span). Multiple features share UV1; CUSTOM0 disambiguates. |
+| `COLOR.r` | Sucker mask |
+| `COLOR.g` | Wart / papillae density |
+| `COLOR.b` | Fin / photophore mask |
+| `COLOR.a` | Tip blend (smooth gradient, 0 mid-body → 1 at tip apex) |
+| `CUSTOM0.x` | Feature ID (uint cast to float; `0` = body, `1+` = feature-specific) |
+| `CUSTOM0.y` | Canal interior flag (binary, 1 inside canal lumen, 0 elsewhere) |
+| `CUSTOM0.zw` | Reserved per-feature scalars |
+
+**Reservation rule:** new features that need additional per-vertex data extend `CUSTOM1`/`CUSTOM2`; the bake header records which channels are in use, the fragment shader branches on `CUSTOM0.x` (feature ID).
+
+#### Authoring rules
+
+- **`SuckerRowFeature.side` interacts with `seam_offset`.** `seam_offset` defines the dorsal axis; "OneSide" / "TwoSide" radiate from it. The bake errors if suckers would land *on* the seam.
+- **`intrinsic_axis = -Z` is canonical.** Matches `Tentacle::initialize_chain`'s particle layout. A freshly authored `TentacleMesh` drops into a `Tentacle` Node3D with no orient transform.
+- **Feature ordering matters.** Features apply in array order; vertex-color writes are last-writer-wins per channel. Bake validates that no feature reads a channel a later feature overwrites.
+- **Single material with shader-branched feature look.** Suckers, photophores, papillae all read the same `tentacle.gdshader`; vertex masks + feature ID drive the branch. No multi-slot until profiling shows shader branching costs > batching savings (Phase 9 review).
+- **Silhouette-defining → geometry; sub-silhouette → shader mask** (per §5.0). Adding a "geometry" feature requires justifying the silhouette contribution.
+
+#### Bake language
+
+GDScript, in `gdscript/procedural/`. Edit-time only; no 60Hz cost. Sub-millisecond at typical density (~1k verts × ~5 features). C++ port deferred to Phase 9 if profiling shows inspector drag stalls.
+
+#### Default presets
+
+Provided as `.tres` resources under `gdscript/procedural/presets/`: `smooth.tres`, `ribbed.tres`, `bulbed.tres`, `multi_bulb.tres`, `barbed.tres`, `ovipositor.tres`. Phase-3 first cut ships only `smooth.tres` and `ribbed.tres`; the rest land per phase as the corresponding features are implemented.
+
+#### Non-goals
+
+- **LOD generation** — defer to Phase 9 polish.
+- **Composition of multiple `TentacleMesh` resources into one** (e.g., chained tentacles via mesh merge) — Phase 9 polish if motivated.
+- **Animating mesh-shape properties at runtime** — physics motion is the spline shader's job, not mesh rebakes.
 
 ### 10.3 Blender pipeline
 

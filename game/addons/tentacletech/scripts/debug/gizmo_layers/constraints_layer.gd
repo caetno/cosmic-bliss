@@ -11,15 +11,8 @@ extends MeshInstance3D
 ## Bending arcs are drawn at every middle particle of a triple in a fixed cyan
 ## tint; their *visible curvature* is the angle constraint's current state.
 
-const COMPRESSED := Color(0.2, 0.4, 1.0)
-const REST := Color(1.0, 1.0, 1.0)
-const STRETCHED := Color(1.0, 0.2, 0.2)
-const TARGET_COLOR := Color(0.4, 1.0, 0.4)
-const ANCHOR_COLOR := Color(1.0, 1.0, 0.2)
-const BENDING_COLOR := Color(0.4, 0.85, 1.0, 0.6)
+const _Colors := preload("res://addons/tentacletech/scripts/debug/colors.gd")
 
-const COMPRESSED_RATIO := 0.95
-const STRETCHED_RATIO := 1.05
 const ANCHOR_GIZMO_SIZE := 0.04
 const ARROW_HEAD_FRACTION := 0.18
 const ARROW_HEAD_PERP_FRACTION := 0.45
@@ -72,7 +65,7 @@ func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
 	# Distance constraints.
 	for i in n - 1:
 		var ratio: float = ratios[i] if i < ratios.size() else 1.0
-		var c: Color = _stretch_color(ratio)
+		var c: Color = _Colors.stretch_color(ratio)
 		_imesh.surface_set_color(c); _imesh.surface_add_vertex(positions[i])
 		_imesh.surface_set_color(c); _imesh.surface_add_vertex(positions[i + 1])
 
@@ -81,7 +74,7 @@ func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
 	if p_show_bending and bend_radius > 1e-5:
 		for i in range(1, n - 1):
 			_draw_bending_arc(positions[i - 1], positions[i], positions[i + 1],
-					bend_radius, BENDING_COLOR)
+					bend_radius, _Colors.BENDING)
 
 	# Target-pull arrow + small marker at the target.
 	var pull_state: Dictionary = p_tentacle.call(&"get_target_pull_state")
@@ -90,28 +83,16 @@ func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
 		if pidx >= 0 and pidx < n:
 			var from: Vector3 = positions[pidx]
 			var to: Vector3 = pull_state.get("target", from)
-			_draw_arrow(from, to, TARGET_COLOR)
-			_draw_cross(to, TARGET_MARKER_SIZE, TARGET_COLOR)
+			_draw_arrow(from, to, _Colors.TARGET)
+			_draw_sphere(to, TARGET_MARKER_SIZE, _Colors.TARGET_MARKER)
 
 	# Anchor sphere at the pinned particle.
 	var anchor_state: Dictionary = p_tentacle.call(&"get_anchor_state")
 	var anchor_idx: int = anchor_state.get("particle_index", -1)
 	if anchor_idx >= 0 and anchor_idx < n:
-		_draw_sphere(positions[anchor_idx], ANCHOR_GIZMO_SIZE, ANCHOR_COLOR)
+		_draw_sphere(positions[anchor_idx], ANCHOR_GIZMO_SIZE, _Colors.ANCHOR)
 
 	_imesh.surface_end()
-
-
-func _stretch_color(p_ratio: float) -> Color:
-	if p_ratio <= COMPRESSED_RATIO:
-		return COMPRESSED
-	if p_ratio >= STRETCHED_RATIO:
-		return STRETCHED
-	if p_ratio < 1.0:
-		var t: float = (p_ratio - COMPRESSED_RATIO) / (1.0 - COMPRESSED_RATIO)
-		return COMPRESSED.lerp(REST, t)
-	var t2: float = (p_ratio - 1.0) / (STRETCHED_RATIO - 1.0)
-	return REST.lerp(STRETCHED, t2)
 
 
 func _draw_arrow(p_from: Vector3, p_to: Vector3, p_color: Color) -> void:
@@ -132,12 +113,6 @@ func _draw_arrow(p_from: Vector3, p_to: Vector3, p_color: Color) -> void:
 	_imesh.surface_set_color(p_color); _imesh.surface_add_vertex(back + perp)
 	_imesh.surface_set_color(p_color); _imesh.surface_add_vertex(p_to)
 	_imesh.surface_set_color(p_color); _imesh.surface_add_vertex(back - perp)
-
-
-func _draw_cross(p_center: Vector3, p_half_extent: float, p_color: Color) -> void:
-	for axis in [Vector3.RIGHT, Vector3.UP, Vector3.FORWARD]:
-		_imesh.surface_set_color(p_color); _imesh.surface_add_vertex(p_center + axis * p_half_extent)
-		_imesh.surface_set_color(p_color); _imesh.surface_add_vertex(p_center - axis * p_half_extent)
 
 
 func _draw_sphere(p_center: Vector3, p_radius: float, p_color: Color) -> void:

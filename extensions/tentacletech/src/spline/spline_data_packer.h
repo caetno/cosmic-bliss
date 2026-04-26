@@ -46,6 +46,15 @@ public:
 			const godot::Ref<CatmullSpline> &p_spline,
 			const godot::Array &p_per_point_scalars);
 
+	// In-place variant for the per-tick path: writes the packed data into
+	// r_out, resizing only if necessary. When r_out is pre-sized to the
+	// expected packed size, no allocation occurs (PackedFloat32Array is
+	// CoW; resize-to-same-size is a no-op when refcount=1).
+	static void pack_into(
+			const godot::Ref<CatmullSpline> &p_spline,
+			const godot::Array &p_per_point_scalars,
+			godot::PackedFloat32Array &r_out);
+
 	// Creates an RGBA32F ImageTexture from packed data. Width is in pixels (1
 	// pixel = 4 floats); height = ceil(packed.size / (4 * width)). The packed
 	// array is zero-padded to a multiple of (4 × width) floats before upload.
