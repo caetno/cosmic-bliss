@@ -1,0 +1,13 @@
+[configuration]
+
+entry_symbol = "tentacletech_library_init"
+compatibility_minimum = "4.6"
+
+[libraries]
+
+linux.debug.x86_64   = "res://addons/tentacletech/bin/libtentacletech.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/tentacletech/bin/libtentacletech.linux.template_release.x86_64.so"
+windows.debug.x86_64   = "res://addons/tentacletech/bin/libtentacletech.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/tentacletech/bin/libtentacletech.windows.template_release.x86_64.dll"
+macos.debug   = "res://addons/tentacletech/bin/libtentacletech.macos.template_debug.framework"
+macos.release = "res://addons/tentacletech/bin/libtentacletech.macos.template_release.framework"

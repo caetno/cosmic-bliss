@@ -43,12 +43,17 @@ if [[ -f "$EXT_DIR/SConstruct" ]]; then
     (cd "$EXT_DIR" && scons "$@")
 fi
 
-# Addon manifest: .gdextension for C++, plugin.cfg for pure-GDScript.
+# Addon manifest: .gdextension for C++, plugin.cfg for pure-GDScript or mixed
+# C++/EditorPlugin addons. plugin.cfg references plugin.gd as a sibling, so
+# both are copied to the addon root.
 if [[ -f "$EXT_DIR/$NAME.gdextension" ]]; then
     cp "$EXT_DIR/$NAME.gdextension" "$ADDON_DIR/"
 fi
 if [[ -f "$EXT_DIR/plugin.cfg" ]]; then
     cp "$EXT_DIR/plugin.cfg" "$ADDON_DIR/"
+fi
+if [[ -f "$EXT_DIR/plugin.gd" ]]; then
+    cp "$EXT_DIR/plugin.gd" "$ADDON_DIR/"
 fi
 
 # GDScript: scripts/ subdir for mixed addons, flat for pure-GDScript.

@@ -160,9 +160,9 @@ for each particle i:
 **Asymmetry from orifice pressure** (computed during orifice tick, written to affected particles):
 ```
 for each particle near an active EntryInteraction:
-    for each ring direction d with nonzero pressure:
-        direction_local = world_to_particle_frame(ring_direction_d)
-        particle.asymmetry -= direction_local.xy × pressure_d × dt × responsiveness
+    for each ring r in orifice.rings with nonzero pressure_per_ring[r]:
+        direction_local = world_to_particle_frame(r.authored_radial_axis)
+        particle.asymmetry -= direction_local.xy × pressure_per_ring[r] × dt × responsiveness
     
     // Elastic decay toward zero
     particle.asymmetry *= (1.0 - recovery_rate × dt)
@@ -445,20 +445,29 @@ Surface detail (ribbing, veins, scales) is mesh geometry — rides along with th
 
 ### 6.1 Ring bone structure
 
-Per orifice on the hero, the rim is an edge loop of the continuous hero mesh at the point where the surface invaginates. Eight radial ring bones are placed at equal angular spacing around this rim loop, parented to a per-orifice center bone, which is parented to the nearest ragdoll bone. The rim is a single edge loop shared between the skin surface and the mucosa surface of the same mesh; skinning weights on that loop follow the ring bones, so ring-bone motion deforms skin and mucosa together at the rim.
+Per orifice on the hero, the rim is an edge loop of the continuous hero mesh at the point where the surface invaginates. Ring bones are **authored in Blender** along this rim loop (not generated in Godot) and ship with the hero GLB. The rim is a single edge loop shared between the skin surface and the mucosa surface of the same mesh; skinning weights on that loop follow the ring bones, so ring-bone motion deforms skin and mucosa together at the rim.
 
 ```
-<host_ragdoll_bone>                       (parent, e.g., "Pelvis")
-└── Orifice_<n>_Center                    (opening center, aligned with opening axis)
-    ├── Orifice_<n>_Ring_0                (8 radial bones at rest_radius)
-    ├── Orifice_<n>_Ring_1
+<host_deform_bone>                        (parent — pelvis/hip for pelvic orifices, jaw for oral)
+└── <Prefix>_Center                       (transform anchor; use_deform = False; no weights)
+    ├── <Prefix>_Ring_0                   (deform bones, arc-length-regular along rim)
+    ├── <Prefix>_Ring_1
     ...
-    └── Orifice_<n>_Ring_7
+    └── <Prefix>_Ring_{N-1}
 ```
 
-Ring bones are **driven, not simulated** — their positions are set directly by the orifice tick. No physics joints, no springs between bones.
+**Per-orifice ring count is variable.** Currently 8 on the shipped orifices, but not fixed — logic must be N-agnostic. Never hard-code 8 (or any count) in runtime code or profile schemas.
 
-Skin around the opening is weight-painted to the ring bones (angular interpolation between 2 nearest ring bones by angle, radial falloff outward). Moving a ring bone stretches the skin locally. See §10.4 for authoring.
+**Placement is arc-length-regular along the rim loop, not angular-regular at `i × 360/N`.** Rim loops are rarely circular — a jaw opening, a vulva, a sphincter are all irregular — and even arc-length spacing keeps skin-deform quality uniform around the opening. Each ring's actual angular position is recorded implicitly by its authored head offset from `<Prefix>_Center`. Physics lookups select the rings that *bracket* a pressure angle θ (binary-search or linear sweep over sorted authored angles), never `ring[floor(θ × N / 2π)]`.
+
+**Local frame**, consistent across every ring on every orifice (set by the Blender authoring script):
+- **Y** — radial outward (from Center toward the rim).
+- **Z** — along the opening axis (outward from the cavity).
+- **X** — tangent along the rim loop.
+
+Runtime drives each ring via **local-space translation** on Y (radial delta in/out) and Z (axial funnel offset, §6.4). Ring bones are **driven, not simulated** — their positions are set directly by the orifice tick. No physics joints, no springs between bones; the spring-damper dynamics are on the target radius, not on the bone itself.
+
+Skin around the opening is weight-painted (also in Blender) to the ring bones with angular interpolation between the two bracketing rings and radial falloff outward. See §10.4 for the Godot-side import workflow and §10.6 for the full Blender → Godot authoring pipeline.
 
 ### 6.2 EntryInteraction and persistent state
 
@@ -481,17 +490,19 @@ struct EntryInteraction {
     float      penetration_depth;         // arc-length of tentacle inside
     float      axial_velocity;
 
-    // Per-direction ring state (8 directions)
-    float      orifice_radius_per_dir[8];
-    float      orifice_radius_velocity[8];
+    // Per-ring state — sized to orifice.ring_count (N varies per orifice, §6.1).
+    // Indexed by authored ring index (Ring_0..Ring_{N-1}); angular position is looked
+    // up via the profile's sorted authored-angle table, never as i × 2π/N.
+    Vector<float>  orifice_radius_per_ring;
+    Vector<float>  orifice_radius_velocity;
 
     // Persistent state (hysteretic — reason the interaction object exists)
     float      grip_engagement;           // 0..1 ramps over time
     bool       in_stick_phase;            // friction state machine
-    float      damage_accumulated_per_dir[8];
+    Vector<float>  damage_accumulated_per_ring;
 
     // Forces computed this tick
-    float      radial_pressure_per_dir[8];
+    Vector<float>  radial_pressure_per_ring;
     float      axial_friction_force;
     Vector3    reaction_on_ragdoll;
 };
@@ -512,66 +523,72 @@ each tick:
 
 ### 6.3 Bilateral compliance
 
-Tentacle-and-orifice deformation share pressure based on relative stiffness:
+Tentacle-and-orifice deformation share pressure based on relative stiffness. Iteration is over the orifice's authored rings; the ring's direction vector is its authored radial axis in Center space (§6.1, local Y):
 
 ```
-for each ring direction d:
+for each ring r in orifice.rings:
+    dir_r = r.authored_radial_axis             // unit Y of ring's local basis in Center frame
     // Aggregate demand if multi-tentacle (§6.5)
-    required_radius_d = compute_aggregate_demand(d)  // max over all tentacles
+    required_radius_r = compute_aggregate_demand(r)  // max over all tentacles
     
-    gap = orifice.radius_per_dir[d] - required_radius_d
+    gap = orifice.radius_per_ring[r] - required_radius_r
     if gap >= 0:
-        // No contact in this direction
-        pressure_per_dir[d] = 0
+        // No contact at this ring
+        pressure_per_ring[r] = 0
     else:
         compression = -gap
         // Nonlinear stretch (tissue-like stiffening above rest)
-        stretch = max(0, orifice.radius_per_dir[d] - effective_rest_radius[d])
+        stretch = max(0, orifice.radius_per_ring[r] - r.effective_rest_radius)
         effective_orifice_k = orifice.stretch_stiffness × pow(
-            1.0 + stretch / rest_radius,
+            1.0 + stretch / r.rest_radius,
             orifice.stretch_nonlinearity - 1.0)
         
         // Springs in series
         effective_k = 1.0 / (1.0/tentacle.girth_stiffness + 1.0/effective_orifice_k)
-        pressure_per_dir[d] = compression × effective_k
+        pressure_per_ring[r] = compression × effective_k
         
         // Allocate deformation by stiffness ratio
         orifice_share = tentacle.girth_stiffness / (tentacle.girth_stiffness + effective_orifice_k)
         
         // Apply to orifice (target radius delta)
-        target_radius_per_dir[d] += pressure_per_dir[d] × orifice_share × dt
+        target_radius_per_ring[r] += pressure_per_ring[r] × orifice_share × dt
         
-        // Apply to tentacle (asymmetry delta, §3.4)
-        write_asymmetry_to_near_particles(d, pressure_per_dir[d] × (1 - orifice_share))
+        // Apply to tentacle (asymmetry delta, §3.4) along dir_r
+        write_asymmetry_to_near_particles(dir_r, pressure_per_ring[r] × (1 - orifice_share))
 ```
 
 A rigid tentacle against a soft orifice: orifice stretches a lot, tentacle barely compresses. Soft tentacle against rigid orifice: tentacle flattens, orifice barely stretches. Same equation.
 
 ### 6.4 Spring-damper ring dynamics
 
-Ring bones are NOT assigned directly to target radii. Each direction has its own spring-damper:
+Ring bones are NOT assigned directly to target radii. Each authored ring has its own spring-damper on its radial extent, and the bone is driven purely in its local frame (§6.1: Y = radial, Z = axial, X = tangent):
 
 ```
-for each ring direction d:
-    target_radius[d] = <from §6.3>
+for each ring r in orifice.rings:
+    target_radius[r] = <from §6.3>
     
     // Spring toward target
-    spring_force = (target_radius[d] - current_radius[d]) × ring_spring_k
-    damping_force = -current_radius_velocity[d] × ring_damping
+    spring_force  = (target_radius[r] - current_radius[r]) × ring_spring_k
+    damping_force = -current_radius_velocity[r] × ring_damping
     
-    current_radius_velocity[d] += (spring_force + damping_force) × dt
-    current_radius[d] += current_radius_velocity[d] × dt
+    current_radius_velocity[r] += (spring_force + damping_force) × dt
+    current_radius[r]          += current_radius_velocity[r] × dt
     
     // Hard clamp (runaway protection)
-    current_radius[d] = clamp(current_radius[d], rest_radius × 0.3, max_radius × 1.2)
-    if at clamp: current_radius_velocity[d] = 0
+    current_radius[r] = clamp(current_radius[r], r.rest_radius × 0.3, r.max_radius × 1.2)
+    if at clamp: current_radius_velocity[r] = 0
     
     // Optional axial drag from high friction (creates funnel deformation)
     axial_offset = compute_axial_drag(tentacle_friction_direction, drag_coupling)
     
-    // Drive the bone
-    bone_local_position = direction_vec[d] × current_radius[d] + orifice_axis × axial_offset
-    skeleton.set_bone_pose_position(ring_bone[d], bone_local_position)
+    // Drive the bone in its LOCAL frame (Y radial, Z axial, X tangent).
+    // No orifice-axis math at the callsite — the authored bone basis encodes it.
+    bone_local_translation = Vector3(
+        0,                                          // X: tangent, never driven
+        current_radius[r] - r.rest_radius,          // Y: radial delta outward
+        axial_offset                                // Z: along opening axis
+    )
+    skeleton.set_bone_pose_position(r.bone_idx, bone_local_translation)
 ```
 
 **This is where pull-out jiggle, retention, and wobble come from for free:**
@@ -585,19 +602,23 @@ for each ring direction d:
 
 ### 6.5 Multi-tentacle support
 
-An orifice holds a list of `EntryInteraction`s, not just one. For each ring direction:
+An orifice holds a list of `EntryInteraction`s, not just one. Aggregation iterates over the orifice's authored rings; each ring's radial axis is its authored local Y in Center space (§6.1), not an indexed angular slot:
 
 ```
-// Aggregate demand over all active interactions
-target_radius[d] = 0
-for each EntryInteraction in orifice.active_interactions:
-    tentacle_girth = EI.tentacle_girth_here
-    offset_component = dot(EI.center_offset_in_orifice, direction_vec[d])
-    reach = offset_component + tentacle_girth
-    target_radius[d] = max(target_radius[d], reach)
+// Aggregate demand over all active interactions, per authored ring.
+for each ring r in orifice.rings:
+    dir_r = r.authored_radial_axis
+    target_radius[r] = 0
+    for each EntryInteraction in orifice.active_interactions:
+        tentacle_girth = EI.tentacle_girth_here
+        offset_component = dot(EI.center_offset_in_orifice, dir_r)
+        reach = offset_component + tentacle_girth
+        target_radius[r] = max(target_radius[r], reach)
 ```
 
-`max` over the list — if two tentacles are on opposite sides of the orifice, each drives its own side independently. Compression per tentacle computed individually against the resulting ring radius via bilateral compliance.
+`max` over the list — if two tentacles are on opposite sides of the orifice, each drives its own side independently. Compression per tentacle is computed individually against the resulting ring radius via bilateral compliance.
+
+When a tentacle needs to resolve its own angular location against the authored rings (e.g. to deposit pressure at angle θ in Center-XY), find the two rings that *bracket* θ in the profile's sorted authored-angle table and interpolate between them. Never assume uniform angular spacing — irregular rim loops produce irregular authored angles.
 
 **Inter-tentacle separation inside an orifice:** type-5 (particle-particle) collision is always enabled for particles flagged as inside any orifice, even if disabled globally. This lets two tentacles jam in side-by-side and physically push each other apart.
 
@@ -1117,54 +1138,40 @@ Material assignment uses per-surface splits:
 
 Material boundaries are set at the rim edge loop or just inside it; the boundary doesn't have to align with the topological rim geometrically.
 
-**Blender pipeline.**
+**Blender pipeline.** Orifice ring bones and their skin weights are now authored in Blender (see §10.6 for the full pipeline and tooling). Summary:
 
-1. Model hero mesh with standard humanoid skeleton.
+1. Model hero mesh with standard humanoid skeleton (Auto-Rig Pro base; see §10.6).
 2. Model cavities as invaginations of the same mesh — extrude inward at each orifice to form tunnel volumes terminating at closed ends or connecting to other orifices.
 3. Assign skin material to exterior faces, mucosa materials to cavity faces. Material boundaries near the rim are fine either inside or on the edge loop.
 4. Do NOT flip cavity normals. Normals should be outward-from-the-surface everywhere. Use "recalculate outside" with the mesh as a single closed topology.
-5. For each orifice: place an empty object (`OrificeMarker`) at the opening center, with its local +Y axis aligned with the opening's outward axis. Parent to the nearest ragdoll bone.
-6. Optional: place empty objects as `TunnelMarker`s along internal paths if auto-derived centerlines need correction.
-7. Export GLB with skeleton, empties, and all material surfaces preserved.
+5. For each orifice, run the Blender authoring script (§10.6) on the selected rim edge loop. It places `<Prefix>_Center` (use_deform = False, parented to the appropriate host deform bone — pelvis/hip for pelvic orifices, jaw for oral) and N `<Prefix>_Ring_i` deform bones at arc-length-regular intervals along the loop, with the consistent local frame (Y radial, Z axial, X tangent) per §6.1. N is a parameter of the script (default 8).
+6. Paint rim and near-rim weights to the ring bones — also handled by the Blender authoring script (angular-bracket interpolation between nearest rings, radial falloff outward; innermost rim loop = full ring weight, no body bone).
+7. Optional: place empty objects as `TunnelMarker`s along internal paths if auto-derived centerlines need correction.
+8. Export GLB with skeleton, the authored orifice bones, tunnel markers, and all material surfaces preserved. ARP export settings: Standard naming, toe breakdown on, "Rename bones for Godot" **off** (matches `docs/marionette/arp_mapping.md`).
 
-**In Godot — auto-derivation (new).** A new `OrificeAutoBaker` tool (GDScript, editor plugin, extends the existing `ring_weight_generator`) runs at hero import time or on demand:
+**In Godot — `OrificeAutoBaker`.** Now a verification and struct-population pass, not a geometry-creation pass. Runs at hero import time or on demand:
 
-1. For each `OrificeMarker`: find the hero mesh edge loop nearest the marker, along the marker's local axis. This is the rim.
-2. Compute rim centroid and `rest_radius` (mean distance from centroid to rim vertices).
-3. Place 8 ring bones at equal angular intervals around the rim centroid, at rest radius, in the Skeleton3D. Parent to a per-orifice center bone parented to the marker's authored parent.
-4. Weight-paint rim vertices to ring bones (angular-nearest-two with radial falloff outward per §6.1). Innermost rim loop gets full ring weight; outer loops taper to body-bone weights.
-5. Skeletonize the cavity mesh volume downstream of the rim (medial-axis extraction); fit a Catmull spline to the medial curve. This is the tunnel centerline. Sample spacing tunable per-orifice.
-6. At each tunnel sample, cast perpendicular rays to find distance-to-wall; output a rest-radius profile along arc-length. This is the tunnel girth profile used for type-3 collision.
-7. Populate the orifice's `suppressed_bones` list with ragdoll capsules within N cm of the marker (N tunable, default 0.15 m). Author can override.
+1. **Verify** that each `OrificeProfile`'s authored bone references resolve in the imported skeleton: `<Prefix>_Center` exists, is non-deforming, and parents N `<Prefix>_Ring_i` deform bones (contiguous from 0 to N−1). Error with a clear message if any are missing — do not attempt to fabricate them.
+2. **Populate the profile's ring table** from authored data: for each ring, read its rest-pose head offset from Center and record `(authored_angle = atan2(offset.x, offset.?_tangent_of_center), rest_radius = offset.length(), bone_idx)`. Sort by angle; this sorted table is what runtime uses for angle-bracket lookup (§6.1, §6.5).
+3. **Derive the tunnel centerline** from the cavity mesh volume downstream of the rim (medial-axis extraction); fit a Catmull spline to the medial curve. Sample spacing tunable per-orifice.
+4. **Compute the tunnel girth profile**: at each tunnel sample, cast perpendicular rays to find distance-to-wall; output a rest-radius profile along arc-length for type-3 collision.
+5. **Populate `suppressed_bones`** with ragdoll capsules within N cm of Center (N tunable, default 0.15 m). Author can override.
 
-**Orifice ring weight painting** (computed per step 4 above; also available as a stand-alone helper for manual rigs):
+Steps 3–5 are the only parts that derive new data; 1–2 just cache authored values into the runtime-friendly shape.
 
-```
-For each vertex within orifice_influence_radius of opening:
-    W_total_ring = radial_falloff(distance_from_opening_axis)  // 1.0 at edge → 0 at radius
-    angle = atan2(vertex_local.y, vertex_local.x)
-    ring_float = (angle / 2π) × 8
-    ring_a = floor(ring_float) % 8
-    ring_b = (ring_a + 1) % 8
-    frac = fract(ring_float)
-    W_ring[ring_a] = W_total_ring × (1.0 - frac)
-    W_ring[ring_b] = W_total_ring × frac
-    W_body = 1.0 - W_total_ring
-```
+> **Reimport reminder.** Subresource assignments on the `OrificeProfile` live in memory only until Reimport is clicked. If the AutoBaker runs, remember to Reimport the scene so the populated ring table and tunnel data persist to disk.
 
-Innermost vertex loop must have `W_total_ring = 1.0` (no body bone weight) so it follows the ring bones fully.
-
-**Manual override hooks** (for weird topology — non-manifold cavities, non-clean rim loops, branching tunnels):
-- `OrificeProfile.manual_ring_bones: Array[NodePath]` — short-circuits rim detection.
-- `OrificeProfile.manual_tunnel_spline: Resource` — short-circuits centerline derivation.
-- `OrificeProfile.manual_suppressed_bones: Array[String]` — short-circuits auto-suppression.
+**Manual override hooks** (for weird topology — non-manifold cavities, branching tunnels, cases where the authored bones are wrong or missing and you want to patch without re-exporting):
+- `OrificeProfile.manual_ring_bones: Array[NodePath]` — short-circuits step 1–2; supplies ring bones (and authored angles are still read from their rest offsets).
+- `OrificeProfile.manual_tunnel_spline: Resource` — short-circuits step 3 centerline derivation.
+- `OrificeProfile.manual_suppressed_bones: Array[String]` — short-circuits step 5 auto-suppression.
 
 When any manual override is set, that step's auto-derivation is skipped; other steps still run.
 
-**In Godot — scene setup (unchanged parts):**
+**In Godot — scene setup:**
 - Instance the GLB, add `CharacterBody3D` + `Skeleton3D`.
 - Add `PhysicalBone3D` nodes per ragdoll bone with capsules.
-- Per orifice: add `Orifice` node referencing the `OrificeMarker`, assign the `OrificeProfile` (auto-baker populates ring bones and tunnel data at bake time; runtime reads them).
+- Per orifice: add `Orifice` node referencing the authored `<Prefix>_Center` bone, assign the `OrificeProfile` (the AutoBaker fills in the ring table, tunnel spline/girth profile, and suppressed bones at bake time; runtime reads them).
 - Configure `SkinBulgeDriver` on hero.
 - Assign hero shader (handles skin + mucosa surfaces via per-surface materials, includes `tentacle_lib.gdshaderinc` for bulger deform).
 
@@ -1180,6 +1187,50 @@ This is the mechanism enabling tentacles to go *inside* the body at the orifice 
 
 Auto-suppression per §10.4 populates this list from proximity at bake time; manual override remains available via `OrificeProfile.manual_suppressed_bones`.
 
+### 10.6 Authoring workflow — ARP + FaceIt + Godot export
+
+The hero asset is assembled in Blender across three rigging systems that each own a subset of the deform skeleton, then exported to Godot as a single GLB. TentacleTech consumes the result; it does not author the base rig or the face rig.
+
+**Base humanoid rig — Auto-Rig Pro (ARP).** Standard ARP is the canonical source for body bones (spine, limbs, fingers, toes). Marionette's humanoid profile maps against ARP's **Standard** naming (`.l`/`.r`/`.x` suffixes, `_stretch` on main limb segments) — the full ARP → profile table is in `docs/marionette/arp_mapping.md`. TentacleTech reads the same skeleton; it parents orifice Centers to ARP deform bones:
+
+- **Pelvic orifices** (anal, vaginal) — parent `<Prefix>_Center` to the pelvis/hip deform bone (`root.x` in ARP Standard).
+- **Oral orifice** — parent `<Prefix>_Center` to the jaw deform bone (owned by FaceIt, below).
+- Other orifices — parent to the nearest anatomically meaningful deform bone.
+
+**Face rig — FaceIt.** FaceIt owns the facial deform bones (jaw, eyes, blendshape drivers) and ARKit-compatible shape keys. TentacleTech's jaw orifice (§6.6) uses FaceIt's jaw bone as the hinge; the jaw is authored entirely by FaceIt and the `JawOrifice` reads `jaw_hinge_axis` / `jaw_rest_angle` / `jaw_max_angle` from the rig's rest pose. The oral orifice's `<Prefix>_Center` parents to the FaceIt jaw bone so the ring follows the mandible.
+
+**Orifice bones — Blender authoring script.** Ring bones and their skin weights are authored by a dedicated Blender script, run after ARP + FaceIt rigging is complete. For each rim edge loop selected by the author, the script:
+
+1. Creates `<Prefix>_Center` at the rim centroid (use_deform = False), parented to the author-specified host deform bone.
+2. Walks the rim loop at arc-length-regular intervals, placing N `<Prefix>_Ring_i` deform bones (default N = 8; override per orifice). Placement is along the loop geometry itself — no assumption of circularity.
+3. Aligns each ring's local frame to the §6.1 convention: Y radial outward, Z along the opening axis (Center's authored +Z), X tangent along the rim.
+4. Paints rim + near-rim vertex weights: innermost loop = 100% ring weight, angular interpolation between the two bracketing rings, radial falloff outward to the host deform bone.
+5. Validates: no `*_twist` / `*_leaf` bones under Center, Center is non-deforming, ring bones are contiguous from 0 to N−1.
+
+The script is canonical tooling for hero authoring — it will be pluginified (Blender addon) and committed under `tools/blender/` alongside its ARP/FaceIt integration notes. Until then, treat any ad-hoc ring placement as disposable; re-run the script rather than hand-editing.
+
+**Export conventions.**
+
+- **ARP Game Engine Export**, Standard naming, toe breakdown **on**, "Rename bones for Godot" **off** (matches `docs/marionette/arp_mapping.md`).
+- The authored orifice bones are appended to the ARP deform skeleton *before* export; they pass through the ARP exporter as ordinary deform bones because they are not in ARP's internal rename table.
+- FaceIt bones and shape keys are preserved via the FaceIt export path (GLB with shape keys + bone drivers).
+- Empties (`TunnelMarker`s) are exported as GLB nodes parented to the skeleton, not merged into the mesh.
+
+**Godot import.**
+
+- `OrificeAutoBaker` (§10.4) verifies the authored bones and populates the profile's ring table, tunnel spline, and suppressed-bones list. It does not create or move bones.
+- Subresource assignments on `OrificeProfile` are in-memory until **Reimport** is clicked — a known Godot gotcha. Always Reimport after AutoBaker runs or after any subresource assignment, or the populated ring table will be silently discarded on next project load.
+- BoneMap keys for Marionette retargeting use `bone_map/` (underscore) not `bonemap/` — wrong key is silently overwritten (another Godot gotcha).
+
+**Division of responsibility.**
+
+| System    | Owns                                                        |
+|-----------|-------------------------------------------------------------|
+| ARP       | Body skeleton (spine, limbs, fingers, toes). Retarget source for Marionette. |
+| FaceIt    | Face bones (jaw, eyes), ARKit shape keys. Source for `JawOrifice` rest data. |
+| Blender orifice script | `<Prefix>_Center` + N `<Prefix>_Ring_i` bones, rim/near-rim skin weights. |
+| Godot `OrificeAutoBaker` | Verification, ring-table population, tunnel centerline + girth profile, suppressed-bones list. |
+
 ---
 
 ## 11. File structure (C++/GDScript split)
@@ -1189,6 +1240,8 @@ extensions/tentacletech/
 ├── CLAUDE.md
 ├── SConstruct
 ├── tentacletech.gdextension
+├── plugin.cfg                           # added Phase 3 — registers as EditorPlugin (§15.5)
+├── plugin.gd                            # GDScript, registers EditorNode3DGizmoPlugins
 │
 ├── src/                                # C++ (math-heavy, hot path)
 │   ├── spline/
@@ -1233,7 +1286,20 @@ extensions/tentacletech/
 │   │   └── fluid_strand.gd
 │   ├── orifice/
 │   │   ├── orifice_setup.gd
-│   │   └── ring_weight_generator.gd     # editor plugin
+│   │   └── orifice_auto_baker.gd        # editor plugin — verification + profile struct population (§10.4)
+│   ├── debug/                              # §15.1–4 — runtime overlay
+│   │   ├── debug_gizmo_overlay.gd
+│   │   └── gizmo_layers/
+│   │       ├── particles_layer.gd
+│   │       ├── constraints_layer.gd
+│   │       ├── contacts_layer.gd        # phase 4+
+│   │       ├── orifice_layer.gd         # phase 5+
+│   │       ├── events_layer.gd          # phase 6+
+│   │       └── bulgers_layer.gd         # phase 7+
+│   ├── gizmo_plugin/                       # §15.5 — editor selection gizmos (added Phase 3)
+│   │   ├── tentacle_gizmo.gd
+│   │   ├── orifice_gizmo.gd             # phase 5+
+│   │   └── bulger_gizmo.gd              # phase 7+
 │   └── procedural/
 │       ├── tentacle_mesh_root.gd
 │       ├── ripple_modifier.gd
@@ -1293,13 +1359,15 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 **Phase 2 — PBD core**
 5. `TentacleParticle`, `PBDSolver` with distance, bending, anchor, target-pull constraints
 6. Basic single-tentacle `Tentacle` Node3D
-7. Acceptance: stable at 60 Hz, volume preservation visible, responds to target pull
+7. Phase-2 snapshot accessors and minimum gizmo overlay (§15.2, §15.3)
+8. Acceptance: stable at 60 Hz; volume preservation visible (gizmo color shift on stretch); responds to target pull (gizmo arrow tracks tip movement)
 
 **Phase 3 — Mesh rendering**
 8. Vertex shader + shader include (`tentacle_lib.gdshaderinc`)
 9. Auto-baked girth texture from mesh geometry
 10. Procedural generator (GDScript) with base presets
-11. Acceptance: mesh smoothly follows spline, squash/stretch visible, no twisting
+11. EditorPlugin (§15.5) — `plugin.cfg` + `plugin.gd` + `gdscript/gizmo_plugin/tentacle_gizmo.gd` for selection-time gizmos in the editor
+12. Acceptance: mesh smoothly follows spline, squash/stretch visible, no twisting; selecting a `Tentacle` in the editor draws its rest-pose gizmos
 
 **Phase 4 — Collision and friction**
 12. Ragdoll snapshot
@@ -1383,7 +1451,85 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 - Don't use `MultiMesh` for tentacle instancing (each needs unique deforming mesh)
 - Don't copy DPG's `Penetrator`/`Penetrable` naming (use `Tentacle`/`Orifice`)
 - Don't author girth profiles manually (auto-baked from mesh)
-- Don't generate Godot test scenes automatically — user creates them
+- Don't generate Godot test scenes without explicit user confirmation. Confirmed scenes must stay simple: node tree + scripts + a few `@export` numbers. No animation tracks, `AnimationPlayer`/`AnimationTree`, baked lighting, side-authored Resource files, or rigged characters — those need a separate explicit ask
+
+---
+
+## 15. Debug visualization
+
+A physics-driven emergent game cannot be developed blind. Debug gizmos are a cross-cutting system that grows with each phase, not a separate phase.
+
+### 15.1 Architecture
+
+- **C++ exposes read-only snapshot accessors.** Particle positions, segment stretch ratios, contact lists, ring extensions, bulger capsule transforms, etc. The same accessors that unit tests use.
+- **GDScript `DebugGizmoOverlay` reads accessors per-frame and rebuilds an `ImmediateMesh`** for line/point geometry; `Label3D` (or a pooled set) for floating annotations. One `MeshInstance3D` per overlay layer.
+- **Toggleable.** F-key by default; settings flag for persistent on. Layers individually maskable (particles/constraints/contacts/orifices/bulgers/events).
+- **Zero cost when off.** Overlay visibility flag short-circuits the per-frame rebuild. The C++ accessors are always available — emission cost is on the GDScript reader, not the solver.
+- **Never bake gizmo emission into the hot path.** No `if (debug) draw_line(...)` inside PBD iterations. Pull, never push.
+
+### 15.2 Accessor contract (per phase)
+
+Each phase that lands physics state also lands the snapshot accessors that gizmos and tests both consume. Naming convention: `Tentacle.get_*_snapshot()` returns a copy or `PackedArray` view; never live pointers into solver state.
+
+| Phase | Accessors |
+|---|---|
+| 2 — PBD core | `Tentacle.get_particle_positions()` → `PackedVector3Array`<br>`Tentacle.get_particle_inv_masses()` → `PackedFloat32Array`<br>`Tentacle.get_segment_stretch_ratios()` → `PackedFloat32Array`<br>`Tentacle.get_target_pull_state()` → `Dictionary { active, target, particle_index, force_dir }`<br>`Tentacle.get_anchor_state()` → `Dictionary { particle_index, world_xform }` |
+| 3 — Mesh | `CatmullSpline` is already a public class; overlay calls `evaluate_position` and `evaluate_frame` at sample t∈[0,1] |
+| 4 — Collision | `Tentacle.get_contact_snapshot()` → `Array[Dictionary]` per particle in contact: `{ point, normal, penetration_depth, friction_state ∈ STICK/SLIP/FREE, friction_displacement, surface_id }`<br>`Hero.get_ragdoll_capsules()` → `Array[Dictionary]` for wireframe rendering |
+| 5 — Orifice | `Orifice.get_ring_state()` → `Array[Dictionary]` per ring bone: `{ rest_radius, current_radius, spring_extension, pressure }`<br>`EntryInteraction.get_state()` → `Dictionary { tentacle_id, depth, ring_pressures, bilateral_phase }` |
+| 6 — Stimulus bus | `StimulusBus.get_recent_events(time_window)` → `Array[StimulusEvent]` (already public for Reverie) — overlay draws timed-fade `Label3D` at event position |
+| 7 / 7.5 — Bulgers | `BulgerSystem.get_active_bulgers()` → `Array[Dictionary]` per bulger: `{ capsule_a, capsule_b, radius, squish, priority_tier, source_kind }` |
+
+Snapshot accessors are part of phase acceptance, not optional polish. They land with the physics they describe.
+
+### 15.3 Gizmo set (cumulative)
+
+| Phase | Gizmos added |
+|---|---|
+| 2 — PBD core | Particles as spheres (color = `inv_mass`: red = pinned, white = free, gradient between); distance constraints as line segments (color hue = stretch ratio: blue = compressed, white = rest, red = stretched); bending angle arcs at every triple (subtle); target-pull arrow from particle to target; anchor markers at pinned particles; spline polyline (16 samples) with TBN frames at sample points |
+| 3 — Mesh | Girth profile read-back as a halo around the spline at each sample; mesh wireframe toggle |
+| 4 — Collision | Ragdoll capsule wireframes (yellow); contact points as spheres at hit location with normal arrows; friction cone wireframes per contact (cone half-angle = atan(μ_s)); friction displacement arrows; per-particle friction state badge (STICK = green, SLIP = orange, FREE = invisible) |
+| 5 — Orifice | Ring bones as 8-point circles, color hue = `current_radius / rest_radius`; spring extension as radial bar from rest to current radius; EntryInteraction tentacle-membership lines from tentacle particles to associated rings; bilateral compliance phase as concentric ring color pulse |
+| 6 — Stimulus bus | Stimulus events as floating `Label3D` at emission point, fade over 1s; modulation channel values as a corner HUD bar graph |
+| 7 / 7.5 — Bulgers | Capsule wireframes at bulger transforms, color = priority tier (storage = magenta, internal = cyan, external = green); squish factor as radius scale visible in wireframe; eviction-fade alpha follows §7.5 timing |
+
+### 15.4 Implementation rules
+
+- **Pull, never push.** The solver does not know the overlay exists.
+- **One `MeshInstance3D` per layer**, owning one `ImmediateMesh` rebuilt per `_process` (not `_physics_process`). Sub-tick interpolation is unnecessary for debug; visual lag of one frame is fine.
+- **Pool `Label3D`s** rather than create/free per emission. Stimulus event labels are the only floating text source; ~32 pooled instances suffice.
+- **Use a single `StandardMaterial3D` per layer** with `vertex_color_use_as_albedo = true`; encode color in vertices, not per-line materials.
+- **Layer masks expose individually** (particles, constraints, contacts, orifices, bulgers, events). Default-on layers depend on the active phase during development; everything off in shipped builds.
+- **Overlay lives in `gdscript/debug/`** — it is GDScript, not C++. No reason to put a debug renderer in the hot path's language.
+
+### 15.5 Editor gizmo plugin (companion to the runtime overlay)
+
+The runtime overlay covers debugging during simulation. For *authoring* — dropping a `Tentacle` or `Orifice` into a scene and seeing its structure in the editor on selection — TentacleTech also ships an `EditorPlugin` that registers an `EditorNode3DGizmoPlugin` per physics class. **All GDScript** in `gdscript/gizmo_plugin/`, alongside `plugin.cfg` + `plugin.gd` at the addon root.
+
+Two things to keep straight:
+
+| Concern | Runtime overlay (§15.1–4) | Editor gizmo plugin (§15.5) |
+|---|---|---|
+| When | Runs at simulation time | Editor selection only |
+| Surface | `DebugGizmoOverlay` Node3D added to a scene | Auto-renders when a registered class is selected in the editor |
+| Source of truth | Snapshot accessors (§15.2) | Same snapshot accessors |
+| Authoring concern | Useful during gameplay debugging | Useful at scene construction |
+| Registers via | Just sits in the scene tree | `EditorPlugin._enter_tree` adds an `EditorNode3DGizmoPlugin` subclass |
+
+**Gizmo plugin scope (cumulative, mirrors §15.3):**
+
+| Phase | Editor gizmo for |
+|---|---|
+| 3 | `Tentacle` — particles + constraint segments + spline polyline + TBN frame at samples |
+| 5 | `Orifice` — ring bones, bilateral compliance state |
+| 7 / 7.5 | Bulger emitters at authoring time (cavity capsules in rest pose) |
+
+**Implementation rules:**
+
+- One `EditorPlugin` (`plugin.gd`) owns registration; one `EditorNode3DGizmoPlugin` subclass per physics class type, in `gdscript/gizmo_plugin/<class>_gizmo.gd`.
+- Gizmo `_redraw(gizmo)` reads the same `Tentacle.get_*_snapshot()` accessors the overlay uses. No data path duplication.
+- Gizmo refresh on transform change is automatic; for live-updating during `@tool` simulation in editor, the node calls `update_gizmos()` after each tick. (Trivial; one line at the end of `_physics_process` gated by `Engine.is_editor_hint()`.)
+- Editor gizmos do **not** replace the runtime overlay. Both ship in the same addon. The user picks based on whether they're authoring or simulating.
 
 ---
 

@@ -82,7 +82,7 @@ Design updates that amend the canonical docs live in `docs/Cosmic_Bliss_Update_*
 - **Plan before large changes.** Read relevant architecture docs first.
 - **Short answers for short questions.** Don't pad responses.
 - **Flag bad patterns when noticed,** even if not asked. Coordinate space bugs, per-frame material allocation, MeshDataTool in hot paths, etc.
-- **Do not generate test scenes.** User creates test scenes.
+- **Test scenes need explicit confirmation, and stay simple.** A *simple* test scene is a small node tree plus scripts plus minimal `@export` properties — nothing else. **Do not** add animation tracks, `AnimationPlayer`/`AnimationTree` setups, baked lighting, multi-resource asset pipelines, custom `Resource` files authored on the side, or rigged characters. If anything beyond "node tree + scripts + a few exported numbers" seems necessary, ask first. Past failure mode: an agent helpfully built out animation/resource scaffolding the user didn't want and then hand-cleanup was painful — so the bar is low-effort scenes only, after the user OKs them.
 - **Do not write GDScript as C++ string literals** or vice versa. If a feature crosses the boundary, think about which side it belongs on.
 
 ## Never
@@ -93,4 +93,4 @@ Design updates that amend the canonical docs live in `docs/Cosmic_Bliss_Update_*
 - Godot's `SoftBody3D` for anything in this project
 - SSBOs in spatial shaders (4.6 still doesn't support this — use RGBA32F data textures)
 - Querying `PhysicalBone3D.global_transform` during PBD iterations (snapshot once per tick)
-- Generating Godot test scenes without explicit permission
+- Generating Godot test scenes without explicit permission, OR scenes containing animation tracks, baked lighting, custom Resource files, or rigged characters even with permission (those still require a separate explicit ask)

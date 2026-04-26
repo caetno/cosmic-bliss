@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://b4ujtq64ovvfk"]
+
+[ext_resource type="Script" uid="uid://bamo5eali48q" path="res://tests/tentacletech/scenes/test_solver_visual.gd" id="1_driver"]
+[ext_resource type="Script" uid="uid://rsth5g48i442" path="res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd" id="2_overlay"]
+
+[node name="TestSolverVisual" type="Node3D" unique_id=260726680]
+script = ExtResource("1_driver")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1944420277]
+transform = Transform3D(0.499997, -0.10179069, 0.8600243, 0, 0.993037, 0.1175338, -0.8660268, -0.05876838, 0.49653104, 2.426056, 1.5530202, 0.836602)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=680141214]
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866025, 0, -0.866025, 0.5, 0, 5, 0)
+light_energy = 0.8
+
+[node name="Tentacle" type="Tentacle" parent="." unique_id=707333082]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+
+[node name="DebugOverlay" type="Node3D" parent="." unique_id=1234331125 node_paths=PackedStringArray("tentacle")]
+script = ExtResource("2_overlay")
+tentacle = NodePath("../Tentacle")
+particle_gizmo_size = 0.025

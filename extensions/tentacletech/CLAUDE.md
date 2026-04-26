@@ -17,6 +17,7 @@ If you find older design docs (fragmented main plan, interaction detail, collisi
 ### In-scope
 - PBD particle solver: distance, bending, target-pull, anchor, collision, friction, attachment
 - Spline math: CatmullSpline with arc-length LUT, parallel-transport binormals, GPU data packing
+- Snapshot accessors and debug gizmo overlay (§15) — landed alongside the physics they describe, not deferred
 - Per-particle state: position, prev_position, inv_mass, girth_scale, asymmetry (vec2)
 - All 7 collision types with unified PBD friction cone projection
 - Ragdoll snapshot (once per tick) with surface material tags
@@ -60,43 +61,39 @@ If you find older design docs (fragmented main plan, interaction detail, collisi
 
 **Rule of thumb:** if it runs inside the 60 Hz physics tick and touches particles or constraints, it's C++. Everything else is GDScript.
 
-## Phase 1 task: scavenge DPG for spline math
+## Status
 
-The broken DPG port at `../dpg/` contains the most salvageable code: Catmull-Rom spline math, arc-length LUT construction, parallel transport binormals, GPU data packing. Phase 1 is to extract and generalize this into `src/spline/`.
+Authoritative phase plan: `TentacleTech_Architecture.md` §13. State at last update:
 
-### Steps
+| Phase | State | Notes |
+|---|---|---|
+| 1 — Spline primitives | **done** | `CatmullSpline` + `SplineDataPacker` registered, 7/7 tests pass at `game/tests/tentacletech/test_spline.gd` |
+| 2 — PBD core | **done** | `TentacleParticle`, `PBDSolver`, `Tentacle` Node3D registered. 7/7 tests at `game/tests/tentacletech/test_solver.gd`. Phase-2 snapshot accessors per §15.2. Debug overlay at `gdscript/debug/` with `particles_layer.gd` + `constraints_layer.gd`. **Tracked simplification:** bending constraint is chord-only between (i, i+2); spec form (3-particle angle) deferred to Phase 9 polish. **No `dt` clamp** in `tick()` — first-frame hiccup can spike gravity, address before shipping |
+| 3 — Mesh rendering | next | Vertex shader + `tentacle_lib.gdshaderinc` (§5.3), auto-baked girth (§5.4), procedural generator (GDScript), spline polyline + TBN gizmo additions per §15.3, **and EditorPlugin** (§15.5) — `plugin.cfg` + `plugin.gd` + `gdscript/gizmo_plugin/tentacle_gizmo.gd` so selection-time gizmos work in the editor |
+| 4 — Collision | blocked | |
+| 5 — Orifice | blocked | |
+| 6 — Stimulus bus | blocked | |
+| 7 / 7.5 — Bulgers + capsules + x-ray | blocked | |
+| 8 — Multi-tentacle, advanced | blocked | |
+| 9 — Polish | blocked | |
 
-1. **Read** the DPG spline code (`../dpg/src/catmull_spline.*` or equivalent) and any related GPU data packing code.
-2. **Read** `TentacleTech_Architecture.md` §5 (Spline and mesh deformation) for the intended API and behavior.
-3. **Identify** the reusable primitives in DPG:
-   - Catmull-Rom evaluation at parameter t
-   - Arc-length LUT construction + distance-to-parameter lookup
-   - Parallel-transport binormal chain (not Frenet — parallel transport is critical for preventing twist)
-   - GPU coefficient packing (polynomial form)
-   - RGBA32F texture encoding
-4. **Extract and generalize** into `src/spline/`:
-   - `catmull_spline.{h,cpp}` — pure math class, control-point agnostic
-     - `build_from_points(PackedVector3Array)`
-     - `evaluate_position(float t)`, `evaluate_tangent(float t)`, `evaluate_frame(t, out_tan, out_norm, out_binorm)`
-     - `get_arc_length()`, `parameter_to_distance(t)`, `distance_to_parameter(d)`
-     - `build_distance_lut(int sample_count)`, `build_binormal_lut(int sample_count)`
-   - `spline_data_packer.{h,cpp}` — standalone utility
-     - `pack(spline, per_point_scalars_arrays, out_float_array)`
-     - `create_texture(packed_data, width)` → `ImageTexture(FORMAT_RGBAF)`
-     - Supports arbitrary per-point scalar channels (for girth_scale, asymmetry later)
-5. **Do not** carry over DPG-specific type names or architecture. Use `CatmullSpline` and `SplineDataPacker` names. These are general-purpose primitives — TentacleTech uses them, future systems might too.
-6. **Write the new classes fresh,** referencing DPG's math but not copy-pasting its architecture. DPG is broken; replicating its bugs is not the goal.
-7. Expose to GDScript via standard GDExtension binding.
+Always re-read §13 before starting — this table can drift; the architecture doc is the source of truth.
 
-### Acceptance
+## Workflow
 
-- `CatmullSpline` constructs from `PackedVector3Array` in GDScript
-- `evaluate_position(t)` over t=0..1 returns a smooth curve
-- `get_arc_length()` returns within 0.1% of analytical arc length for a simple test curve (straight line, circle arc, helix)
-- `distance_to_parameter(arc_length × 0.5)` returns the parameter that evaluates to a position at half the arc length
-- `build_binormal_lut()` produces no twist on a planar S-curve (consecutive binormals differ only by rotation around tangent)
-- `SplineDataPacker.pack()` round-trips losslessly: packed → float array → read back via `texelFetch` → originals within float32 precision
-- User can create a test scene (user's responsibility, not yours) to draw the spline as a debug line strip and visually confirm smoothness
+You are a sub-Claude scoped to this extension. The repo's top-level Claude (started in `../..` at the repo root) holds cross-cutting context — architecture, build system, doc consistency, contracts between extensions.
+
+- **Implementation lives here.** You do the C++/GDScript work in `extensions/tentacletech/`.
+- **Reviews live up there.** When you finish a phase or a logical milestone, report back with: build artifact path, test pass count, files touched, any divergence from the spec. Do not self-grade — the user bounces up to the top-level Claude for review.
+- **Build and run tests before declaring done.** `./tools/build.sh tentacletech` from repo root, then headless tests per the Testing section. Append a tail of test output and the resulting `.so` size to your final report. Do not skip.
+- **Update the Status table at the top of this file before declaring a phase done.** Flip the row's state to **done**, replace the Notes cell with a one-line summary of key deliverables (class names, test file path + pass count, any deferred items). The table is the project's per-phase log — every future sub-Claude reads it on session start, so it must reflect reality. If you defer something, say so explicitly (`Notes: ... ; deferred: <thing>, see §X`).
+- **Spec divergences require explicit flagging.** If you find a reason to diverge from the architecture doc, flag it in your report so the top-level review can update §X — do not silently change behavior.
+- **Don't commit.** The user runs `git commit` at milestone boundaries after the top-level review approves. Leave changes uncommitted unless explicitly asked.
+- **Don't touch other extensions.** No edits to `extensions/marionette/`, `extensions/tenticles/`, `extensions/dpg/`. If a change there is needed, raise it in the report; the top-level handles it.
+
+## Snapshot accessors and debug gizmos
+
+§15 of the architecture doc is non-negotiable: every phase that lands physics state also lands the snapshot accessors that gizmos and tests both consume. Naming convention: `Tentacle.get_*_snapshot()` returns by-copy; never live pointers into solver state. The debug overlay in `gdscript/debug/` reads accessors per-frame and rebuilds an `ImmediateMesh`. **Pull, never push** — the C++ solver does not know the overlay exists. No `if (debug)` in `tick()`.
 
 ## Non-negotiable rules
 
@@ -115,7 +112,7 @@ The broken DPG port at `../dpg/` contains the most salvageable code: Catmull-Rom
 
 ## What not to do
 
-- Do not generate Godot test scenes. User creates these.
+- Do not generate Godot test scenes without explicit user confirmation. Even with confirmation, keep them simple: node tree + scripts + a few `@export` numbers. No animation tracks, no `AnimationPlayer`/`AnimationTree` setups, no baked lighting, no multi-resource asset pipelines, no rigged characters. If anything beyond that seems necessary, ask before creating it. (Background: past failure mode was agents helpfully scaffolding out animation/resource setups the user then had to hand-clean.)
 - Do not use `MeshDataTool` in hot paths.
 - Do not use Godot's `SoftBody3D`.
 - Do not use `MultiMesh` for tentacle instancing (each needs a unique deforming mesh).
@@ -135,6 +132,18 @@ Output: `../../game/addons/tentacletech/bin/libtentacletech.<platform>.<target>.
 
 GDScript files in `gdscript/` and shaders in `shaders/` are copied to `../../game/addons/tentacletech/scripts/` and `../../game/addons/tentacletech/shaders/` by the top-level build script.
 
+## Testing
+
+Headless tests live in `../../game/tests/tentacletech/`, invoked with:
+
+```
+godot --path ../../game --headless --script res://tests/tentacletech/test_<name>.gd
+```
+
+Pattern: `extends SceneTree`, run assertions in `_init()`, `quit(0)` on pass / `quit(2)` on fail. No gdUnit4 dependency.
+
+**Gotcha: GDScript parse-time class lookup.** When invoked via `--script`, the GDScript parser resolves identifiers before GDExtension classes are registered (registration runs at `MODULE_INITIALIZATION_LEVEL_SCENE`). `CatmullSpline.new()` fails at parse time even though `ClassDB.class_exists("CatmullSpline")` returns true at runtime. Tests must instantiate via `ClassDB.instantiate("CatmullSpline")`. Static methods bound with `bind_static_method` are callable through these instances. Won't bite normal in-project usage where scripts load via scenes/preload.
+
 ## Directory layout
 
 ```
@@ -142,11 +151,13 @@ extensions/tentacletech/
 ├── CLAUDE.md                  # this file
 ├── SConstruct
 ├── tentacletech.gdextension
+├── plugin.cfg                 # added Phase 3 — registers as EditorPlugin (§15.5)
+├── plugin.gd                  # registers per-class EditorNode3DGizmoPlugins
 ├── src/                       # C++
-│   ├── spline/                # Phase 1 — scavenge from dpg
+│   ├── spline/                # Phase 1 ✓
 │   │   ├── catmull_spline.{h,cpp}
 │   │   └── spline_data_packer.{h,cpp}
-│   ├── solver/                # Phase 2
+│   ├── solver/                # Phase 2 ✓
 │   ├── collision/             # Phase 4
 │   ├── orifice/               # Phase 5
 │   ├── bulger/                # Phase 7
@@ -158,6 +169,8 @@ extensions/tentacletech/
 │   ├── scenarios/
 │   ├── stimulus/
 │   ├── orifice/
+│   ├── debug/                 # §15.1–4 runtime overlay — grows with each phase
+│   ├── gizmo_plugin/          # §15.5 editor gizmos — added Phase 3
 │   └── procedural/
 └── shaders/
     ├── tentacle.gdshader
@@ -166,4 +179,4 @@ extensions/tentacletech/
     └── girth_bake.glsl
 ```
 
-Full phase plan is in `TentacleTech_Architecture.md` §13. Current focus: Phase 1.
+Full phase plan is in `TentacleTech_Architecture.md` §13. Current focus: Phase 3 (mesh rendering).
