@@ -166,12 +166,34 @@ No `AnimationTree`, no `AnimationPlayer`, no keyframe animation input. The full 
 
 - Poses (§12 — base and overlay pose targets)
 - Cyclic animations (breathing, shiver, tremor — evaluated procedurally)
+- Body-wide traveling waves (`TravelingWaveCyclic` — coherent disturbances parameterized by bone position along a `PropagationGraph`; see PLAN.md P7.9 / P2.14)
 - Emotional body overlays (transient response resources)
 - Motion macros (longer scripted procedural trajectories)
 - Reverie-driven anatomical targets (via `BodyAreaModulation.pose_target_offset`)
 - Attention-driven neck targets (via `CharacterModulation.attention_*`, consumed by `NeckAttentionDriver`; see `docs/architecture/Reverie_Planning.md §2.6`)
 
-All of these compose additively on SPD-driven bones. No external clip or pose-graph source. This makes the authoring UI load-bearing — pose and cyclic resources *are* the animation system, not a supplement to one.
+All of these compose additively on SPD-driven bones. No external clip or pose-graph source. This makes the authoring UI load-bearing — pose, cyclic, and wave resources *are* the animation system, not a supplement to one.
+
+### 14. Body rhythm shared clock (cross-extension contract)
+
+`Marionette` exposes a single phase variable that all cyclic / wave evaluation reads as its time argument:
+
+```
+@export var body_rhythm_frequency: float = 0.4    # Hz, settable by Reverie
+var body_rhythm_phase: float = 0.0                 # 0..TAU, advances every physics tick
+signal body_rhythm_cycle_completed(cycle_index: int)
+```
+
+- `body_rhythm_phase` is **integrated** (`phase += freq * TAU * delta`), never recomputed (`phase = freq * t`). Otherwise a frequency change snaps the phase, which is visible in both the body and in any tentacle locked to it.
+- `BoneOscillator.frequency_multiplier` and `TravelingWaveCyclic.temporal_frequency` are interpreted as multipliers on `body_rhythm_frequency`, not as absolute Hz.
+- TentacleTech's `RhythmSyncedProbe` (`docs/architecture/TentacleTech_Architecture.md §6.11`) reads `body_rhythm_phase` to lock tip drive to the body's rhythm at a configurable phase offset (`π` for pumping, `0` for yielding).
+- Reverie writes `body_rhythm_frequency` from arousal axis (`docs/architecture/Reverie_Planning.md §3.2`). Phase-continuity / ramp protection is Marionette's responsibility, not Reverie's.
+
+See PLAN.md P7.10 for tasks.
+
+### 15. Soft-tissue jiggle bones (non-rim regions)
+
+Per soft region (gluteus, breast, belly, jowls, etc.), 1–2 child bones with translation-only SPD parented to a host bone. Rotational SPD deferred to v2; gate on visible motion-quality shortfall. Authored once per hero in Blender — must exist in the skeleton hierarchy at modeling time, since skin weights are painted to them in Blender. The runtime `JiggleProfile` configures *parameters* of bones the model already exposes; it cannot create new ones. Closes the autonomous-dynamics gap on non-rim soft tissue (TentacleTech bulgers handle deformation during contact; jiggle bones own the post-contact wobble).
 
 ---
 

@@ -197,6 +197,16 @@ Global character:
 - `reaction_responsiveness_mult`
 - `xray_reveal_intensity` — 0..1, written up to ~0.7 at state peaks (high `Ecstatic`, high `Lost`, high `Aroused`). Player input can clamp higher on top. Consumed by hero skin shader for translucency / reveal.
 
+Per character / Marionette:
+- `body_rhythm_frequency` — Hz, written to `Marionette.body_rhythm_frequency` (`docs/marionette/Marionette_plan.md` P7.10). Driven by arousal axis (or whichever emotional output the implementation settles on); tuning curve is a Reverie internal detail. The shared clock advances on `Marionette` and is read by `BoneOscillator`, `TravelingWaveCyclic`, and TentacleTech's `RhythmSyncedProbe` (`docs/architecture/TentacleTech_Architecture.md` §6.11). Phase-continuity / ramp protection lives on `Marionette` (integrated phase, never recomputed); Reverie just sets the target frequency.
+
+  **Coupling loop end-to-end:**
+
+  1. Reverie's arousal axis → writes `body_rhythm_frequency` on `Marionette`.
+  2. Body produces hip + spinal motion at that frequency (P7.7 `hip_invite.tres`, P7.9 `spinal_undulation.tres`).
+  3. `RhythmSyncedProbe` (TentacleTech) locks tentacle drive to the same clock, offset by `π` or `0`.
+  4. Tentacle contact stimulus → feeds Reverie → raises arousal → raises frequency → loop.
+
 Defaults = identity. Physics works correctly with Reverie absent.
 
 ### 3.3 Reverie also reads its own modulation

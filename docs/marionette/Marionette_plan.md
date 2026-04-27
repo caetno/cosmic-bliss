@@ -174,12 +174,33 @@ demo/
   - Reference pose transform
   - Use axis terminology freely here — this is the developer's debugging view.
 - **P2.13** — Ship default `BoneProfile` for `MarionetteHumanoidProfile`. Generated once via the editor button, saved as `data/marionette_humanoid_bone_profile.tres`.
+- **P2.14** — `PropagationGraph` resource + authoring-time bake. Skeleton-static graph that assigns each bone a scalar position `s` along a propagation path plus per-bone anatomical axis weights. Used by `TravelingWaveCyclic` (P7.9) and any future system that needs a continuous "position along the body" coordinate. **Authoring-time only; runtime reads baked values.** Schema:
+
+  ```
+  PropagationGraph (Resource):
+    trunk_path: Array[StringName]      # base→tip, e.g. [Hips, Spine, Spine1, Chest, Neck, Head]
+    branches: Array[Branch]            # see below
+    # Baked at authoring time:
+    bone_s: Dictionary[StringName, float]            # arc length from trunk root
+    bone_axis_weights: Dictionary[StringName, Vector3]  # (flex, rot, abd) weights per bone
+    s_max: float                       # used for amplitude_curve normalization
+
+  Branch:
+    attach_bone: StringName            # bone on trunk where this branch starts
+    chain: Array[StringName]           # ordered, attach→tip
+    s_offset_from_trunk: float         # MUST equal bone_s[attach_bone] at bake time
+  ```
+
+  **Bake step.** Walk `trunk_path` accumulating rest-pose bone lengths into `bone_s`. For each branch, set `s_offset_from_trunk` to the trunk's `s` at `attach_bone`, then continue accumulating along `chain`. `bone_axis_weights` come from a per-region default (trunk = (1,0,0) flex; arms = (0.5,0,1) abd-leaning; legs = (1,0,0) flex) with per-bone overrides allowed in the inspector.
+
+  **Pitfall.** If `s_offset_from_trunk` is zero (each branch starts its own coordinate from zero), waves passing through the body look like four separate limb wiggles instead of a single coherent disturbance. The bake step must inherit from the trunk.
 
 ### Milestone
 
 - Opening a `BoneProfile` in the inspector and clicking "Generate from Skeleton" fills all 84 entries for `MarionetteHumanoidProfile` without errors.
 - Gizmos render in the viewport for a test character: red arrows perpendicular to the sagittal plane on limb bones, along-bone green arrows running down each limb, abduction blue arrows perpendicular.
 - Diagnostic panel shows permutation details for the selected bone using axis terminology.
+- `PropagationGraph` baked from `MarionetteHumanoidProfile`: trunk + 4 limb branches, branch `s_offset_from_trunk` matches trunk `s` at attach point, total path length sane (1.5–2 m typical for human-scale).
 - Unit tests pass: archetype solvers across T-pose, A-pose, bent-knee reference skeletons; permutation matcher picks identity for well-rigged input and non-identity for known-rolled input.
 - Video artifact: `docs/videos/phase_2_milestone.mp4` showing generation action + gizmo review across 3 rest-pose variants.
 
@@ -191,11 +212,13 @@ addons/marionette/
 │   ├── bone_archetype.gd
 │   ├── signed_axis.gd
 │   ├── bone_entry.gd
-│   └── bone_profile.gd
+│   ├── bone_profile.gd
+│   └── propagation_graph.gd
 ├── runtime/
 │   ├── muscle_frame_builder.gd
 │   ├── permutation_matcher.gd
 │   ├── archetype_defaults.gd
+│   ├── propagation_graph_baker.gd
 │   └── archetype_solvers/
 │       ├── ball_solver.gd
 │       ├── hinge_solver.gd
@@ -213,7 +236,8 @@ addons/marionette/
 │   └── bone_profile_inspector.gd
 ├── data/
 │   ├── humanoid_archetype_map.tres
-│   └── marionette_humanoid_bone_profile.tres
+│   ├── marionette_humanoid_bone_profile.tres
+│   └── marionette_humanoid_propagation_graph.tres
 tests/
 ├── test_archetype_solvers.gd
 ├── test_permutation_matcher.gd
@@ -495,8 +519,104 @@ addons/marionette/
 - **P7.4** — `RagdollCyclicAnimation` resource: period, amplitude, blend_mode enum (`Additive, Override, Multiplicative`), oscillators array.
 - **P7.5** — Cyclic evaluator: per tick, for each oscillator in active cyclic, compute value via waveform, add to bone's anatomical target.
 - **P7.6** — `Marionette.play_cyclic(cyclic)` and `stop_cyclic()` API. Multiple cyclics can be active concurrently via the emotion overlay system (Phase 8); the raw API supports one primary cyclic.
-- **P7.7** — Cyclic authoring UI in Muscle Test tab: per-bone-axis oscillator controls (frequency, amplitude, phase, waveform). Live preview when Ragdoll Test mode is active. "Capture Oscillator Set" saves as `.tres`.
-- **P7.8** — Preset library: `shiver.tres` (5-8 Hz, 2-4°, spine+shoulders+jaw-equivalent), `tremor_parkinsonian.tres` (4-6 Hz, hands+forearms), `breathing.tres` (0.25 Hz, thorax+abdomen), `shiver_cold.tres` (faster, tighter).
+- **P7.7** — Cyclic authoring UI in Muscle Test tab: per-bone-axis oscillator controls (frequency, amplitude, phase, waveform). Live preview when Ragdoll Test mode is active. "Capture Oscillator Set" saves as `.tres`. **Phase-relationship preview + Lissajous authoring mode.** Authoring against two raw `phase_offset` numbers is hard; authoring against a 2D Lissajous shape is easy. Add:
+  - A 2D phase-relationship preview widget: pick two oscillators (any two — same bone different axes, or different bones same axis), see their `(value_A, value_B)` plotted over one period as a Lissajous curve.
+  - A Lissajous-shape authoring mode: drag a shape (circle → ellipse → figure-8 → diagonal line) and have it set the phase offset and frequency multiplier of the second oscillator relative to the first.
+  - Reference shapes: 1:1 frequency ratio with 90° phase offset = ellipse; 2:1 ratio = figure-8; 1:1 ratio with 0° phase = diagonal line.
+- **P7.8** — Preset library: `shiver.tres` (5-8 Hz, 2-4°, spine+shoulders+jaw-equivalent), `tremor_parkinsonian.tres` (4-6 Hz, hands+forearms), `breathing.tres` (0.25 Hz, thorax+abdomen), `shiver_cold.tres` (faster, tighter), `hip_invite.tres` (`RagdollCyclicAnimation`, period 2.5 s — coupled pelvic ellipse + chest counter-rotation + alternating knee bob; arms deliberately absent so they pick up incidental motion from the chest):
+
+  ```
+  oscillators:
+    # Pelvic ellipse — coupled axes at 90°
+    - bone: Hips,  axis: Rotation,  amp: 10°, freq_mult: 1, phase: 0
+    - bone: Hips,  axis: Abduction, amp:  6°, freq_mult: 1, phase: π/2
+    # Anterior/posterior tilt
+    - bone: Hips,  axis: Flexion,   amp:  8°, freq_mult: 1, phase: π/4
+    # Counter-motion in chest, smaller, phase-flipped
+    - bone: Chest, axis: Rotation,  amp:  4°, freq_mult: 1, phase: π
+    - bone: Chest, axis: Abduction, amp:  2°, freq_mult: 1, phase: π + π/2
+    # Alternating knee bob
+    - bone: LeftKnee,  axis: Flexion, amp: 3°, freq_mult: 1, phase: 0
+    - bone: RightKnee, axis: Flexion, amp: 3°, freq_mult: 1, phase: π
+  ```
+
+  All amplitudes are starting points; tune against context (a `tense` state would halve them).
+
+### Sub-phase P7.9 — `TravelingWaveCyclic`
+
+Body-wide coherent motion produced by parameterizing oscillation by bone position along a `PropagationGraph` (P2.14). Same composition pipeline as `RagdollCyclicAnimation` (additive in anatomical space, ROM-clamped at the end). One sample per bone per active wave per tick.
+
+**Why it exists.** Per-joint independent noise looks dead — that's the failure mode. Sharing phase between neighboring bones via `(s, t)` parameterization makes motion look like a living thing. Coherent noise is the same evaluator with a different spatial sampler.
+
+```
+TravelingWaveCyclic (Resource):
+  graph: PropagationGraph
+  spatial_function: enum { Sine, Triangle, Noise2D, Curve }
+  custom_curve: Curve              # used when spatial_function == Curve
+  wavenumber: float                # cycles per meter along path
+  temporal_frequency: float        # Hz; wave speed = temporal_frequency / wavenumber
+  amplitude_curve: Curve           # input: s_normalized in [0,1], output: amplitude (rad)
+  blend_mode: enum { Additive, Override, Multiplicative }   # Additive default
+```
+
+Per-tick evaluator (pseudocode):
+
+```
+for bone_name in graph.bone_s:
+    s = graph.bone_s[bone_name]
+    s_norm = s / graph.s_max
+    phase = TAU * (wavenumber * s - temporal_frequency * t)
+    value = sample(spatial_function, phase) * amplitude_curve.sample_baked(s_norm)
+    target[bone_name] += value * graph.bone_axis_weights[bone_name]
+```
+
+For `spatial_function == Noise2D`: replace `sample(...)` with `noise2D(s * wavenumber, t * temporal_frequency)`. Bones close in `s` get correlated values — organic squirming, not jitter.
+
+**Composition.** Drops into the Phase 8 anatomical-additive pipeline alongside `RagdollCyclicAnimation`. ROM clamp at the end handles overshoot. Multiple waves coexist additively.
+
+**Don't merge with `BoneOscillator`.** `BoneOscillator` is for genuinely-per-bone phenomena (Parkinsonian hand tremor, jaw chatter). `TravelingWaveCyclic` is for body-wide propagating disturbances. Same composition pipeline, different authoring intent — keep them separate resources.
+
+**Pitfalls.**
+- Author `amplitude_curve` to fit within ROM at peak. The pipeline will clamp, but clamping looks bad if it happens mid-oscillation.
+- Wave speed = `temporal_frequency / wavenumber`. Authors will reach for "I want a wave at 1 m/s" — they get speed by ratio, not directly.
+
+Tasks:
+- **P7.9.1** — `TravelingWaveCyclic` resource definition (GDScript).
+- **P7.9.2** — Evaluator integrated into Phase 7 cyclic evaluator (uses `body_rhythm_phase` after P7.10 lands; until then, owns its own `t`).
+- **P7.9.3** — Sample preset `spinal_undulation.tres`: period ~3 s, wavenumber such that one full wavelength = total trunk length, amplitude ~5° flexion.
+- **P7.9.4** — Sample preset `coherent_squirm.tres`: `Noise2D` spatial function, full-body amplitude.
+
+### Sub-phase P7.10 — `body_rhythm_phase` shared clock
+
+A single phase variable on `Marionette` that all cyclic evaluation reads as its time argument. Lets external systems (TentacleTech, Reverie) sync to the body's internal rhythm without each running its own clock.
+
+API on `Marionette`:
+
+```
+@export var body_rhythm_frequency: float = 0.4    # Hz, settable by Reverie
+var body_rhythm_phase: float = 0.0                 # 0..TAU, advances every physics tick
+signal body_rhythm_cycle_completed(cycle_index: int)
+```
+
+Per-tick (in `_physics_process` or wherever the cyclic evaluator runs):
+
+```
+body_rhythm_phase += body_rhythm_frequency * TAU * delta
+if body_rhythm_phase >= TAU:
+    body_rhythm_phase = fmod(body_rhythm_phase, TAU)
+    cycle_index += 1
+    body_rhythm_cycle_completed.emit(cycle_index)
+```
+
+**Cyclic evaluator change.** All `BoneOscillator` and `TravelingWaveCyclic` evaluation reads `body_rhythm_phase` as the time argument, scaled by the resource's own `freq_mult` (oscillator) or `temporal_frequency` (wave) **relative to** `body_rhythm_frequency`. The resource specifies its frequency *as a multiple of the body's rhythm*, not in absolute Hz. This is the right semantics — the hip ellipse and the spinal undulation should slow down together when arousal drops, not drift apart.
+
+**Pitfall (mandatory).** `body_rhythm_phase` must be **integrated** (`phase += freq * dt`), not recomputed (`phase = freq * t`). Otherwise a frequency change snaps the phase, which is visible in both the body and in any tentacle locked to it (e.g. `RhythmSyncedProbe`, `TentacleTech_Architecture.md` §6.11).
+
+Tasks:
+- **P7.10.1** — Add `body_rhythm_frequency`, `body_rhythm_phase`, `body_rhythm_cycle_completed` to `Marionette`.
+- **P7.10.2** — Integrate phase per physics tick (integrated, never recomputed).
+- **P7.10.3** — Migrate `BoneOscillator` and `TravelingWaveCyclic` evaluators to read `body_rhythm_phase`.
+- **P7.10.4** — Resource fields renamed/repurposed: oscillator `frequency_multiplier` is now relative to `body_rhythm_frequency`; document the migration. `TravelingWaveCyclic.temporal_frequency` becomes a multiplier rather than absolute Hz.
 
 ### Milestone
 
@@ -505,6 +625,9 @@ addons/marionette/
 - `tremor_parkinsonian.tres` only: hands tremble at 4-6 Hz, rest of body calm.
 - Tune a new cyclic in the panel (set left shoulder abduction to 1 Hz, 15° amplitude), capture, reload: same visible motion reproduced.
 - Saved `.tres`: oscillator axis stored as `Flex`/`Rotation`/`Abduction` enum name in the serialized data.
+- `hip_invite.tres` produces a clean elliptical hip motion with synchronized chest counter-rotation; switching one pelvic axis from `freq_mult: 1` to `freq_mult: 2` in the authoring panel produces a figure-8 in the Lissajous preview in real time.
+- `spinal_undulation.tres` produces visible head-to-tail wave through the trunk. Side-by-side comparison with a manually-authored independent-noise version: the wave reads as a single coherent disturbance, the independent-noise version reads as four separate limb wiggles.
+- Changing `body_rhythm_frequency` from 0.4 → 1.6 Hz over 0.5 s produces a smooth speed-up of `hip_invite.tres` with no visible phase snap.
 - Video artifact: `docs/videos/phase_7_milestone.mp4`.
 
 ### Files
@@ -515,16 +638,22 @@ addons/marionette/
 │   ├── anatomical_axis.gd
 │   ├── waveform.gd
 │   ├── bone_oscillator.gd
-│   └── ragdoll_cyclic_animation.gd
+│   ├── ragdoll_cyclic_animation.gd
+│   └── traveling_wave_cyclic.gd
 ├── runtime/
-│   └── cyclic_evaluator.gd
+│   ├── cyclic_evaluator.gd
+│   └── body_rhythm_clock.gd
 ├── editor/
-│   └── cyclic_capture_controls.gd
+│   ├── cyclic_capture_controls.gd
+│   └── lissajous_preview_widget.gd
 ├── cyclic/
 │   ├── shiver.tres
 │   ├── shiver_cold.tres
 │   ├── tremor_parkinsonian.tres
-│   └── breathing.tres
+│   ├── breathing.tres
+│   ├── hip_invite.tres
+│   ├── spinal_undulation.tres
+│   └── coherent_squirm.tres
 ```
 
 ---
@@ -775,6 +904,47 @@ demo/
 
 - External developer produces working active ragdoll in under 15 minutes from an unfamiliar ARP character.
 - Documentation covers: profile authoring, ragdoll creation wizard, muscle test, pose/cyclic authoring, emotion states, balancing, common problems.
+
+---
+
+## Soft-tissue jiggle bone clusters
+
+Non-rim soft tissue regions (gluteus, breast, belly, jowls, etc.) currently have no autonomous dynamics: TentacleTech's bulger system (`docs/architecture/TentacleTech_Architecture.md` §7) deforms them while a contact is active, but bulger eviction fade is 2 frames (§7.5) — once contact ends, motion stops. Real fat tissue keeps wobbling for ~1 second after impact.
+
+**Solution: jiggle bone clusters.** Per soft region, 1–2 child bones with translation-only SPD (rotational SPD deferred — see below), parented to a host bone (hip / ribcage / pelvis). Authored once per hero in Blender; skin weights paint the soft region's vertices to the jiggle bone with falloff.
+
+```
+hip_L
+└── glute_L_jiggle    (offset from hip_L; SPD on translation)
+```
+
+Per tick:
+
+```
+for each jiggle bone j:
+    parent_world = j.parent.global_transform
+    target_world = parent_world * j.rest_local_offset
+    // SPD with parent acceleration as feed-forward
+    j.world_position = spd_step(j.world_position, target_world,
+                                j.velocity, j.k, j.d, dt)
+    j.local_position = parent_world.inverse() * j.world_position
+```
+
+Same SPD code Marionette already runs on the spine; copy with different parameters per region. Stiffness and damping authored per-hero (broader hip / fuller bust → softer).
+
+**Cost.** Trivial. ~10–20 jiggle bones per hero × SPD step = sub-microsecond.
+
+**Authoring gotcha (mandatory).** Jiggle bones must be in the skeleton hierarchy at *modeling time*. Skin weights are painted to them in Blender during the same pass that paints to body bones. Adding a jiggle bone at runtime does not retroactively skin existing geometry to it. The `JiggleProfile` resource configures *parameters* of jiggle bones the model already exposes; it cannot create new ones.
+
+**Rotational SPD (v2).** Real fat jiggle has rotational components — a glute swings as much as it translates relative to the parent hip. v1 ships translation-only because it covers most of the visible motion at lowest implementation cost; v2 adds a rotation-quaternion SPD on the same bone. Promotion to v2 is gated on visible motion-quality shortfall, not feature completeness.
+
+**Why not SoftBody3D.** Explicitly forbidden by repo convention (top-level `CLAUDE.md`).
+
+**Why not extend bulger eviction fade.** Bulgers are *displacement vectors* applied along the contact normal; freely 3D wobble (with inertia preserved across direction changes) requires a frame-of-reference (the parent bone), which a displacement vector lacks. Not a fade-time problem; a representation problem.
+
+**Authoring.** Jiggle bones are added by the same Blender script that authors orifice ring bones (`docs/architecture/TentacleTech_Architecture.md` §10.4 / §10.6), under a separate "soft regions" pass. Per-hero parameter overrides land on a `JiggleProfile` resource analogous to `OrificeProfile`.
+
+**Acceptance.** Slap the gluteus with a tentacle and detach. Visible wobble persists ≥ 0.6 s after detachment, decaying smoothly.
 
 ---
 

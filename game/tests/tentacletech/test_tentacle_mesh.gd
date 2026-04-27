@@ -137,20 +137,28 @@ func test_aabb_envelope() -> bool:
 	tm.radial_segments = 12
 	var result: Dictionary = tm.bake()
 	var mesh: ArrayMesh = result["mesh"]
-	var aabb: AABB = mesh.get_aabb()
+	# The mesh's get_aabb() returns custom_aabb (the worst-case spline-
+	# deformed envelope used for frustum culling); verify rest-pose extents
+	# directly from vertex positions instead.
+	var verts: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	var z_min := INF
+	var z_max := -INF
+	var lat_max := -INF
+	for v in verts:
+		if v.z < z_min: z_min = v.z
+		if v.z > z_max: z_max = v.z
+		var lat: float = sqrt(v.x * v.x + v.y * v.y)
+		if lat > lat_max: lat_max = lat
 
-	# intrinsic_axis_sign = -1 → mesh extends from z=0 to z=-length, with
-	# the apex slightly past length. Allow some slack.
-	if aabb.position.z > 0.0:
-		push_error("AABB starts at z=%f > 0" % aabb.position.z)
+	# intrinsic_axis_sign = +1 (§10.1 default) → mesh extends from z=0 to
+	# z≈length, with the apex slightly past length. Allow some slack.
+	if z_min < -1e-3:
+		push_error("rest-pose z_min=%f < 0 (expected ≈0)" % z_min)
 		return false
-	if aabb.size.z < tm.length * 0.99:
-		push_error("AABB z-size %f < expected ~%f" % [aabb.size.z, tm.length])
+	if z_max < tm.length * 0.99:
+		push_error("rest-pose z_max %f < expected ~%f" % [z_max, tm.length])
 		return false
-	# Lateral envelope: the body cap radius is base_radius. AABB spans
-	# 2 × base_radius in X and Y (cylinder cross-section).
-	var expected_lateral: float = tm.base_radius * 2.0
-	if aabb.size.x < expected_lateral * 0.95 or aabb.size.y < expected_lateral * 0.95:
-		push_error("AABB lateral size %f x %f < expected %f" % [aabb.size.x, aabb.size.y, expected_lateral])
+	if lat_max < tm.base_radius * 0.95:
+		push_error("rest-pose lateral max %f < expected ~%f" % [lat_max, tm.base_radius])
 		return false
 	return true

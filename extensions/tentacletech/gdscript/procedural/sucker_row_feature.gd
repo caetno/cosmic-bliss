@@ -60,7 +60,7 @@ func _apply(p_ctx: BakeContext) -> void:
 	var tip_radius: float = meta.get("tip_radius", 0.005)
 	var radius_curve: Curve = meta.get("radius_curve", null)
 	var seam_offset: float = meta.get("seam_offset", 0.0)
-	var intrinsic_axis_sign: float = meta.get("intrinsic_axis_sign", -1.0)
+	var intrinsic_axis_sign: float = meta.get("intrinsic_axis_sign", 1.0)
 
 	for i in count:
 		var t_normalized: float = float(i) / float(maxi(count - 1, 1))
@@ -112,8 +112,9 @@ func _emit_sucker(p_ctx: BakeContext, p_axial_t: float, p_radial_angle: float,
 		p_cup_radius: float, p_length: float, p_base_radius: float,
 		p_tip_radius: float, p_radius_curve: Curve,
 		p_intrinsic_axis_sign: float) -> void:
-	# Spine point in tentacle-local space. intrinsic_axis_sign = -1 for the
-	# canonical -Z layout (matches Tentacle::initialize_chain).
+	# Spine point in tentacle-local space. intrinsic_axis_sign = +1 for the
+	# canonical §10.1 +Z layout; sign=-1 supported for Blender-imported
+	# meshes that author along -Z.
 	var spine_pos := Vector3(0, 0, p_intrinsic_axis_sign * p_length * p_axial_t)
 	var body_radius: float = (p_radius_curve.sample(p_axial_t)
 			if p_radius_curve != null

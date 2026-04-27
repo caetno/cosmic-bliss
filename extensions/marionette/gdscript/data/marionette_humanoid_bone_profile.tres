@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="BoneProfile" load_steps=3 format=3]
+
+[ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/data/marionette_humanoid_profile.tres" id="1_skel"]
+[ext_resource type="Script" uid="uid://dbevicy4chs4i" path="res://addons/marionette/resources/bone_profile.gd" id="2_script"]
+
+[resource]
+script = ExtResource("2_script")
+skeleton_profile = ExtResource("1_skel")
+total_mass = 70.0
+bones = {}

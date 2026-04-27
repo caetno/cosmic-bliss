@@ -102,7 +102,10 @@ func add_ring(p_center: Vector3, p_radius: float, p_axis_a: Vector3,
 
 
 # Connect two rings with quad strips (2 triangles per quad). Both rings
-# must have the same length; ring_a is the "lower" ring (smaller axial_t).
+# must have the same length; ring_a is the "lower" ring (smaller axial_t,
+# i.e. closer to base for a +Z-extending mesh per §10.1). Winding produces
+# outward-facing triangles when the mesh extends along +Z and the rings'
+# vertices wind CCW around +Z (theta increases 0 → 2π).
 func connect_rings(p_ring_a: PackedInt32Array, p_ring_b: PackedInt32Array) -> void:
 	var n: int = p_ring_a.size()
 	if n != p_ring_b.size():
@@ -114,13 +117,13 @@ func connect_rings(p_ring_a: PackedInt32Array, p_ring_b: PackedInt32Array) -> vo
 		var a1: int = p_ring_a[i_next]
 		var b0: int = p_ring_b[i]
 		var b1: int = p_ring_b[i_next]
-		# Two triangles per quad. Winding: outward-facing for a +arc-axis
-		# spine with normals pointing radially out.
-		indices.push_back(a0); indices.push_back(b0); indices.push_back(a1)
-		indices.push_back(a1); indices.push_back(b0); indices.push_back(b1)
+		indices.push_back(a0); indices.push_back(a1); indices.push_back(b0)
+		indices.push_back(a1); indices.push_back(b1); indices.push_back(b0)
 
 
 # Triangle-fan a ring to a single apex vertex (used for the pointed tip cap).
+# Winding produces outward-facing triangles when the apex sits past the ring
+# in the +arc direction and the ring vertices wind CCW around the arc axis.
 func fan_ring_to_point(p_ring: PackedInt32Array, p_apex_idx: int) -> void:
 	var n: int = p_ring.size()
 	for i in n:

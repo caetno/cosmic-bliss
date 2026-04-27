@@ -4,7 +4,6 @@
 
 [resource]
 profile = ExtResource("1_profile")
-bonemap = null
 bone_map/Root = &""
 bone_map/Hips = &"root.x"
 bone_map/Spine = &"spine_01.x"

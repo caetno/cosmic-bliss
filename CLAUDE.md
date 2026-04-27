@@ -37,7 +37,9 @@ Everything else — AI, behavior, scenarios, control plumbing, stimulus consumpt
 - Communication between extensions uses:
   1. Signals / resources / nodes in the scene tree
   2. The **Stimulus Bus** (TentacleTech autoload) for physics state, events, and modulation
-  3. GDScript interfaces; never C++ coupling
+  3. The **`Marionette.body_rhythm_phase` shared clock** for body↔tentacle rhythm coupling (Reverie writes `body_rhythm_frequency`; TentacleTech `RhythmSyncedProbe` reads `body_rhythm_phase`). Phase is integrated, never recomputed. See `docs/marionette/Marionette_plan.md` P7.10 and `docs/architecture/TentacleTech_Architecture.md` §6.11.
+  4. GDScript interfaces; never C++ coupling
+- **Tenticles does not subscribe to the Stimulus Bus.** User-level GDScript glue reads the bus and writes Tenticles' public params; Tenticles stays self-contained per its scope boundary.
 
 ## Build
 
@@ -82,6 +84,7 @@ Design updates that amend the canonical docs live in `docs/Cosmic_Bliss_Update_*
 - **Plan before large changes.** Read relevant architecture docs first.
 - **Short answers for short questions.** Don't pad responses.
 - **Flag bad patterns when noticed,** even if not asked. Coordinate space bugs, per-frame material allocation, MeshDataTool in hot paths, etc.
+- **Soft physics over scripted levers.** If a behavior can't be expressed via stiffness, friction, grip, damage thresholds, or modulation channels, the fix is the physics — not a boolean reject or an angle gate. Stopgap levers, when they must exist, are flagged as such and retire when the underlying geometry / stiffness model catches up. Boolean rejects in particular get used everywhere a designer doesn't want to tune the physics; do not introduce them. (Established in `TentacleTech_Architecture.md §1`; cross-cutting because the same temptation will appear in Reverie reaction profiles and Marionette overlay logic.)
 - **Test scenes need explicit confirmation, and stay simple.** A *simple* test scene is a small node tree plus scripts plus minimal `@export` properties — nothing else. **Do not** add animation tracks, `AnimationPlayer`/`AnimationTree` setups, baked lighting, multi-resource asset pipelines, custom `Resource` files authored on the side, or rigged characters. If anything beyond "node tree + scripts + a few exported numbers" seems necessary, ask first. Past failure mode: an agent helpfully built out animation/resource scaffolding the user didn't want and then hand-cleanup was painful — so the bar is low-effort scenes only, after the user OKs them.
 - **Do not write GDScript as C++ string literals** or vice versa. If a feature crosses the boundary, think about which side it belongs on.
 

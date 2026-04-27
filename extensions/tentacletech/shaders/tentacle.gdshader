@@ -9,10 +9,18 @@ shader_type spatial;
 //   - Origin at base center; base ring in z=0 plane.
 //   - Vertex.z = arc-length from base; (x,y) = lateral offset from centerline.
 //
-// Compatibility for stock primitives: `mesh_arc_axis` selects which mesh-local
-// axis is the arc-length direction (X/Y/Z; default Z) and `mesh_arc_offset`
-// shifts a centered mesh into the base-at-zero convention. For Godot's stock
-// CylinderMesh (Y-up, centered): mesh_arc_axis = 1 (Y), mesh_arc_offset = h/2.
+// Compatibility for stock primitives and reversed conventions:
+//   - `mesh_arc_axis` selects which mesh-local axis is the arc-length direction
+//     (X/Y/Z; default Z).
+//   - `mesh_arc_sign` is multiplied with the chosen axis (default +1.0). Set to
+//     -1.0 if the mesh extends *backward* along that axis (e.g. TentacleMesh's
+//     §10.1 -Z convention: tip at z=-length, base at z=0).
+//   - `mesh_arc_offset` is added after sign multiplication; use it to shift a
+//     centered mesh into base-at-zero coordinates.
+//
+// Stock CylinderMesh (Y-up, centered): mesh_arc_axis=1, mesh_arc_sign=+1,
+// mesh_arc_offset=h/2.
+// TentacleMesh (auto-configured): mesh_arc_axis=2, mesh_arc_sign=-1, mesh_arc_offset=0.
 //
 // Three-layer deformation stack:
 //   1. Rest girth — already baked into mesh geometry; nothing to do here.
@@ -29,35 +37,42 @@ uniform int spline_data_width = 1;
 uniform sampler2D rest_girth_texture : repeat_disable, filter_linear;
 // 0 = X, 1 = Y, 2 = Z (default, per §10.1).
 uniform int mesh_arc_axis = 2;
-// Additive offset applied before arc lookup. For a centered mesh, set to half
-// the long-axis extent so the base maps to arc=0.
+// Sign applied to the chosen axis component before offset. Use -1.0 when the
+// mesh extends in the negative direction (TentacleMesh's intrinsic_axis_sign=-1
+// case). Default +1.0 keeps stock primitives working unchanged.
+uniform float mesh_arc_sign = 1.0;
+// Additive offset applied after sign. For a centered mesh, set to half the
+// long-axis extent so the base maps to arc=0.
 uniform float mesh_arc_offset = 0.0;
 
 // Decompose the mesh vertex into (arc, lateral_a, lateral_b) according to
-// mesh_arc_axis. lateral_a maps onto spline normal, lateral_b onto binormal.
+// mesh_arc_axis + mesh_arc_sign. lateral_a maps onto spline normal,
+// lateral_b onto binormal.
 void tt_decompose_mesh_vertex(vec3 v, out float arc, out vec2 lateral) {
 	if (mesh_arc_axis == 0) {
-		arc = v.x;
+		arc = v.x * mesh_arc_sign;
 		lateral = v.yz;
 	} else if (mesh_arc_axis == 1) {
-		arc = v.y;
+		arc = v.y * mesh_arc_sign;
 		lateral = v.xz;
 	} else {
-		arc = v.z;
+		arc = v.z * mesh_arc_sign;
 		lateral = v.xy;
 	}
 }
 
 // Decompose a mesh-space normal the same way, returning (along_arc, lateral).
+// The sign multiplier flips the along-arc component too — a +Z-facing tip cap
+// on a sign=-1 mesh actually points *forward* along the spline's tangent.
 void tt_decompose_mesh_normal(vec3 n, out float along_arc, out vec2 lateral) {
 	if (mesh_arc_axis == 0) {
-		along_arc = n.x;
+		along_arc = n.x * mesh_arc_sign;
 		lateral = n.yz;
 	} else if (mesh_arc_axis == 1) {
-		along_arc = n.y;
+		along_arc = n.y * mesh_arc_sign;
 		lateral = n.xz;
 	} else {
-		along_arc = n.z;
+		along_arc = n.z * mesh_arc_sign;
 		lateral = n.xy;
 	}
 }

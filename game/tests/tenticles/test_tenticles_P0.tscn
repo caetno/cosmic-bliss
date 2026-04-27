@@ -1,0 +1,33 @@
+[gd_scene load_steps=5 format=3 uid="uid://heiayhpbk5mi"]
+
+[ext_resource type="Script" path="res://tests/tenticles/test_tenticles_P0.gd" id="1_driver"]
+
+[sub_resource type="QuadMesh" id="QuadMesh_quad"]
+size = Vector2(2, 2)
+
+[sub_resource type="Shader" id="Shader_unlit"]
+code = "shader_type spatial;
+render_mode unshaded, cull_disabled;
+
+uniform sampler2D tex : source_color, filter_nearest;
+
+void fragment() {
+	ALBEDO = texture(tex, UV).rgb;
+}
+"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_unlit"]
+shader = SubResource("Shader_unlit")
+
+[node name="TestTenticlesP0" type="Node3D" unique_id=1447400114]
+script = ExtResource("1_driver")
+
+[node name="UdonParticleSystem" type="UdonParticleSystem" parent="." unique_id=1447400201]
+texture_size = 256
+
+[node name="Quad" type="MeshInstance3D" parent="." unique_id=1447400202]
+mesh = SubResource("QuadMesh_quad")
+material_override = SubResource("ShaderMaterial_unlit")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1447400203]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3)

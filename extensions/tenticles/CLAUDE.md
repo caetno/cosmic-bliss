@@ -46,6 +46,18 @@ inspired by Housemarque's NGP (Returnal). See `docs/design.md` for full architec
   absent. This is how fluid sim can ship after tentacles without touching tentacle code.
 - Never add a direct C++ dependency between particle system and fluid/SDF/voxelizer modules.
 
+### Bus coupling stays at user level
+- **Tenticles does not subscribe to TentacleTech's `StimulusBus`.** User-level GDScript
+  glue reads the bus and writes Tenticles' public params (curl-noise amplitude,
+  attractor radius, etc.). Tenticles remains self-contained per its scope boundary
+  (see `docs/tenticles/Tenticles_design.md` §0).
+- The "leaders + chorus" mass-wrap encounter pattern (TentacleTech_Architecture.md §12)
+  uses 2–4 TentacleTech leaders (which subscribe to the bus and own physics) plus a
+  surrounding mass of Tenticles tubes (visual chorus, hero-silhouette-attracted via
+  voxelized SDF, no force application). Tenticles never collides with, attaches to,
+  or applies force to the hero — anything that touches the hero physically is
+  TentacleTech.
+
 ### Editor vs runtime
 - Editor-only code (inspector plugins, annotation parser UI, hot-reload) registers at
   `MODULE_INITIALIZATION_LEVEL_EDITOR`. Runtime code never links against it.
@@ -79,7 +91,10 @@ Verify against your exact 4.6 tag before coding:
 
 - `scons platform=<linuxbsd|windows|macos> target=template_debug` (or `template_release`)
 - Links against pre-compiled `../godot-cpp/`. Do not modify godot-cpp.
-- Extension manifest is `udon.gdextension`. Entry point is `src/register_types.cpp`.
+- Extension manifest is `tenticles.gdextension` (must match the directory name
+  for `tools/build.sh`). Entry symbol is `tenticles_library_init`. Entry point
+  source is `src/register_types.cpp`. The `Udon*` C++ class prefix is the
+  internal codename from the design doc and is unrelated to the file name.
 
 ## Code style
 

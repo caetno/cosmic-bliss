@@ -70,6 +70,16 @@ public:
 	void set_target_particle_index(int p_index);
 	int get_target_particle_index() const;
 
+	// Pose targets — distributed soft pull, one per indexed particle. Used
+	// by behavior layer to write a full-body "muscular pose" each tick.
+	// Three parallel arrays of equal length; behavior driver rebuilds them
+	// per tick. Composes additively with the single tip target above.
+	void set_pose_targets(const godot::PackedInt32Array &p_indices,
+			const godot::PackedVector3Array &p_world_positions,
+			const godot::PackedFloat32Array &p_stiffnesses);
+	void clear_pose_targets();
+	int get_pose_target_count() const;
+
 	// Anchor — explicit override. By default, the tentacle anchors particle 0
 	// to its own global_transform every physics tick. Calling
 	// set_anchor_transform() with a fixed transform disables auto-tracking
@@ -102,6 +112,11 @@ public:
 		MESH_ARC_AXIS_Z = 2, // §10.1 default
 	};
 
+	// `tentacle_mesh` accepts any Mesh subclass. When the assigned mesh is a
+	// `TentacleMesh` (GDScript ArrayMesh subclass, §10.2), we duck-type-
+	// detect the bake hooks (`get_baked_girth_texture`) and auto-pipe the
+	// rest-girth texture into the shader uniform. For stock primitives the
+	// 3a placeholder stays in place (or whatever the user explicitly set).
 	void set_tentacle_mesh(const godot::Ref<godot::Mesh> &p_mesh);
 	godot::Ref<godot::Mesh> get_tentacle_mesh() const;
 
@@ -112,7 +127,14 @@ public:
 	void set_mesh_arc_axis(int p_axis);
 	int get_mesh_arc_axis() const;
 
-	// Additive offset applied before arc-axis lookup. Use to convert a
+	// Sign multiplier on the chosen axis. -1 maps a mesh whose tip is at
+	// negative-axis (TentacleMesh's intrinsic_axis_sign=-1 default per §10.1)
+	// onto the shader's positive arc convention. The duck-type integration
+	// auto-sets this from TentacleMesh; for stock primitives leave at +1.
+	void set_mesh_arc_sign(int p_sign);
+	int get_mesh_arc_sign() const;
+
+	// Additive offset applied after sign multiplication. Use to convert a
 	// centered mesh (e.g. Godot CylinderMesh, axis ∈ [-h/2, h/2]) to the
 	// base-at-zero convention the shader expects (arc ∈ [0, h]).
 	void set_mesh_arc_offset(float p_offset);
@@ -171,6 +193,7 @@ private:
 	godot::MeshInstance3D *mesh_instance = nullptr; // internal child
 	godot::Ref<godot::ShaderMaterial> shader_material;
 	int mesh_arc_axis = MESH_ARC_AXIS_Z;
+	int mesh_arc_sign = 1;
 	float mesh_arc_offset = 0.0f;
 
 	// Spline-driven render data. The CatmullSpline is rebuilt each tick from
@@ -198,6 +221,9 @@ private:
 	void _refresh_mesh_instance();
 	void _refresh_shader_material_bindings();
 	void _update_spline_data_texture();
+	// Used by the TentacleMesh duck-type integration (§10.2).
+	void _pull_baked_girth_from_mesh();
+	void _on_tentacle_mesh_changed();
 };
 
 VARIANT_ENUM_CAST(Tentacle::MeshArcAxis);

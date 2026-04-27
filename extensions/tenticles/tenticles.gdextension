@@ -1,0 +1,13 @@
+[configuration]
+
+entry_symbol = "tenticles_library_init"
+compatibility_minimum = "4.6"
+
+[libraries]
+
+linux.debug.x86_64   = "res://addons/tenticles/bin/libtenticles.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://addons/tenticles/bin/libtenticles.linux.template_release.x86_64.so"
+windows.debug.x86_64   = "res://addons/tenticles/bin/libtenticles.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://addons/tenticles/bin/libtenticles.windows.template_release.x86_64.dll"
+macos.debug   = "res://addons/tenticles/bin/libtenticles.macos.template_debug.framework"
+macos.release = "res://addons/tenticles/bin/libtenticles.macos.template_release.framework"

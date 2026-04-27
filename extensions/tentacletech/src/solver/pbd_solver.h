@@ -87,6 +87,20 @@ public:
 	godot::Vector3 get_target_position() const;
 	float get_target_stiffness() const;
 
+	// Pose targets — distributed soft pull, one per indexed particle. Used
+	// by behavior layer to write a full-body "muscular pose" each tick: the
+	// chain is actively shaped by per-particle targets rather than dragged
+	// from the tip. Composes additively with the single target-pull above.
+	// Three parallel arrays of equal length; no Dictionary parsing per tick.
+	void set_pose_targets(const godot::PackedInt32Array &p_indices,
+			const godot::PackedVector3Array &p_world_positions,
+			const godot::PackedFloat32Array &p_stiffnesses);
+	void clear_pose_targets();
+	int get_pose_target_count() const;
+	godot::PackedInt32Array get_pose_target_indices() const;
+	godot::PackedVector3Array get_pose_target_positions() const;
+	godot::PackedFloat32Array get_pose_target_stiffnesses() const;
+
 	// Per-particle accessors (single-element by-value) ---------------------
 
 	godot::Vector3 get_particle_position(int p_index) const;
@@ -142,6 +156,14 @@ private:
 	int target_particle_index = -1;
 	godot::Vector3 target_position;
 	float target_stiffness = DEFAULT_TARGET_STIFFNESS;
+
+	// Pose targets are stored as parallel PackedArrays — same lifetime
+	// model as the snapshot accessors (copy in / copy out). The behavior
+	// layer rebuilds them each tick; the iteration loop reads them as a
+	// flat list with no per-entry dictionary parsing.
+	godot::PackedInt32Array pose_target_indices;
+	godot::PackedVector3Array pose_target_positions;
+	godot::PackedFloat32Array pose_target_stiffnesses;
 
 	void predict(float p_dt);
 	void iterate();

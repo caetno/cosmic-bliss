@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/callable_method_pointer.hpp>
 
 #include "../spline/spline_data_packer.h"
 
@@ -21,6 +22,7 @@ const char *UNIFORM_SPLINE_DATA = "spline_data_texture";
 const char *UNIFORM_SPLINE_DATA_WIDTH = "spline_data_width";
 const char *UNIFORM_REST_GIRTH = "rest_girth_texture";
 const char *UNIFORM_MESH_ARC_AXIS = "mesh_arc_axis";
+const char *UNIFORM_MESH_ARC_SIGN = "mesh_arc_sign";
 const char *UNIFORM_MESH_ARC_OFFSET = "mesh_arc_offset";
 } // namespace
 
@@ -213,6 +215,25 @@ int Tentacle::get_target_particle_index() const {
 	return solver->get_target_particle_index();
 }
 
+// -- Pose targets (multi-particle distributed pull) -------------------------
+
+void Tentacle::set_pose_targets(const PackedInt32Array &p_indices,
+		const PackedVector3Array &p_world_positions,
+		const PackedFloat32Array &p_stiffnesses) {
+	if (solver.is_null()) return;
+	solver->set_pose_targets(p_indices, p_world_positions, p_stiffnesses);
+}
+
+void Tentacle::clear_pose_targets() {
+	if (solver.is_null()) return;
+	solver->clear_pose_targets();
+}
+
+int Tentacle::get_pose_target_count() const {
+	if (solver.is_null()) return 0;
+	return solver->get_pose_target_count();
+}
+
 // -- Anchor override --------------------------------------------------------
 
 void Tentacle::set_anchor_transform(const Transform3D &p_x) {
@@ -287,10 +308,72 @@ Dictionary Tentacle::get_anchor_state() const {
 // -- Render plumbing --------------------------------------------------------
 
 void Tentacle::set_tentacle_mesh(const Ref<Mesh> &p_mesh) {
+	// If we were tracking a previous TentacleMesh's `changed` signal, drop
+	// the connection so re-bakes on stale resources don't kick us.
+	if (tentacle_mesh.is_valid() && tentacle_mesh->is_connected("changed",
+			callable_mp(this, &Tentacle::_on_tentacle_mesh_changed))) {
+		tentacle_mesh->disconnect("changed",
+				callable_mp(this, &Tentacle::_on_tentacle_mesh_changed));
+	}
+
 	tentacle_mesh = p_mesh;
 	_refresh_mesh_instance();
+
+	if (tentacle_mesh.is_null()) {
+		return;
+	}
+
+	// Duck-type the new mesh: a `TentacleMesh` (GDScript ArrayMesh subclass,
+	// §10.2) exposes `get_baked_girth_texture` and emits `changed` after
+	// each rebuild. For stock primitives these hooks are absent; we leave
+	// the rest-girth uniform alone so the placeholder / explicit setter
+	// value persists.
+	if (tentacle_mesh->has_method("get_baked_girth_texture")) {
+		_pull_baked_girth_from_mesh();
+		// Re-pull whenever the mesh re-bakes (inspector slider drag, etc.).
+		if (!tentacle_mesh->is_connected("changed",
+				callable_mp(this, &Tentacle::_on_tentacle_mesh_changed))) {
+			tentacle_mesh->connect("changed",
+					callable_mp(this, &Tentacle::_on_tentacle_mesh_changed));
+		}
+	}
 }
 Ref<Mesh> Tentacle::get_tentacle_mesh() const { return tentacle_mesh; }
+
+void Tentacle::_pull_baked_girth_from_mesh() {
+	if (tentacle_mesh.is_null()) {
+		return;
+	}
+	if (!tentacle_mesh->has_method("get_baked_girth_texture")) {
+		return;
+	}
+	Variant raw = tentacle_mesh->call("get_baked_girth_texture");
+	Ref<ImageTexture> tex = raw;
+	if (tex.is_valid()) {
+		set_rest_girth_texture(tex);
+	}
+
+	// TentacleMesh also reports its arc-axis convention. Without this, a mesh
+	// whose tip is at -Z (intrinsic_axis_sign=-1, the §10.1 default) collapses
+	// in the shader because tt_distance_to_parameter clamps negative arcs.
+	if (tentacle_mesh->has_method("get_baked_arc_convention")) {
+		Variant raw_conv = tentacle_mesh->call("get_baked_arc_convention");
+		Dictionary conv = raw_conv;
+		if (conv.has("axis")) {
+			set_mesh_arc_axis((int)conv["axis"]);
+		}
+		if (conv.has("sign")) {
+			set_mesh_arc_sign((int)conv["sign"]);
+		}
+		if (conv.has("offset")) {
+			set_mesh_arc_offset((float)conv["offset"]);
+		}
+	}
+}
+
+void Tentacle::_on_tentacle_mesh_changed() {
+	_pull_baked_girth_from_mesh();
+}
 
 void Tentacle::set_mesh_arc_axis(int p_axis) {
 	if (p_axis < 0) p_axis = 0;
@@ -301,6 +384,18 @@ void Tentacle::set_mesh_arc_axis(int p_axis) {
 	}
 }
 int Tentacle::get_mesh_arc_axis() const { return mesh_arc_axis; }
+
+void Tentacle::set_mesh_arc_sign(int p_sign) {
+	// Clamp to ±1 — anything else is meaningless for the convention. Pass 0
+	// through as +1 (no-op default).
+	if (p_sign < 0) p_sign = -1;
+	else p_sign = 1;
+	mesh_arc_sign = p_sign;
+	if (shader_material.is_valid()) {
+		shader_material->set_shader_parameter(UNIFORM_MESH_ARC_SIGN, (float)mesh_arc_sign);
+	}
+}
+int Tentacle::get_mesh_arc_sign() const { return mesh_arc_sign; }
 
 void Tentacle::set_mesh_arc_offset(float p_offset) {
 	mesh_arc_offset = p_offset;
@@ -418,6 +513,7 @@ void Tentacle::_refresh_shader_material_bindings() {
 		shader_material->set_shader_parameter(UNIFORM_REST_GIRTH, rest_girth_texture);
 	}
 	shader_material->set_shader_parameter(UNIFORM_MESH_ARC_AXIS, mesh_arc_axis);
+	shader_material->set_shader_parameter(UNIFORM_MESH_ARC_SIGN, (float)mesh_arc_sign);
 	shader_material->set_shader_parameter(UNIFORM_MESH_ARC_OFFSET, mesh_arc_offset);
 }
 
@@ -594,6 +690,10 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_target_particle_index", "index"), &Tentacle::set_target_particle_index);
 	ClassDB::bind_method(D_METHOD("get_target_particle_index"), &Tentacle::get_target_particle_index);
 
+	ClassDB::bind_method(D_METHOD("set_pose_targets", "indices", "world_positions", "stiffnesses"), &Tentacle::set_pose_targets);
+	ClassDB::bind_method(D_METHOD("clear_pose_targets"), &Tentacle::clear_pose_targets);
+	ClassDB::bind_method(D_METHOD("get_pose_target_count"), &Tentacle::get_pose_target_count);
+
 	ClassDB::bind_method(D_METHOD("set_anchor_transform", "xform"), &Tentacle::set_anchor_transform);
 	ClassDB::bind_method(D_METHOD("clear_anchor_override"), &Tentacle::clear_anchor_override);
 
@@ -607,10 +707,13 @@ void Tentacle::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_tentacle_mesh", "mesh"), &Tentacle::set_tentacle_mesh);
 	ClassDB::bind_method(D_METHOD("get_tentacle_mesh"), &Tentacle::get_tentacle_mesh);
+	ClassDB::bind_method(D_METHOD("_on_tentacle_mesh_changed"), &Tentacle::_on_tentacle_mesh_changed);
 	ClassDB::bind_method(D_METHOD("set_shader_material", "material"), &Tentacle::set_shader_material);
 	ClassDB::bind_method(D_METHOD("get_shader_material"), &Tentacle::get_shader_material);
 	ClassDB::bind_method(D_METHOD("set_mesh_arc_axis", "axis"), &Tentacle::set_mesh_arc_axis);
 	ClassDB::bind_method(D_METHOD("get_mesh_arc_axis"), &Tentacle::get_mesh_arc_axis);
+	ClassDB::bind_method(D_METHOD("set_mesh_arc_sign", "sign"), &Tentacle::set_mesh_arc_sign);
+	ClassDB::bind_method(D_METHOD("get_mesh_arc_sign"), &Tentacle::get_mesh_arc_sign);
 	ClassDB::bind_method(D_METHOD("set_mesh_arc_offset", "offset"), &Tentacle::set_mesh_arc_offset);
 	ClassDB::bind_method(D_METHOD("get_mesh_arc_offset"), &Tentacle::get_mesh_arc_offset);
 
@@ -636,6 +739,8 @@ void Tentacle::_bind_methods() {
 			"set_shader_material", "get_shader_material");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_arc_axis", PROPERTY_HINT_ENUM, "X,Y,Z"),
 			"set_mesh_arc_axis", "get_mesh_arc_axis");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "mesh_arc_sign", PROPERTY_HINT_ENUM, "Negative:-1,Positive:1"),
+			"set_mesh_arc_sign", "get_mesh_arc_sign");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "mesh_arc_offset", PROPERTY_HINT_RANGE, "-10.0,10.0,0.001,or_lesser,or_greater"),
 			"set_mesh_arc_offset", "get_mesh_arc_offset");
 

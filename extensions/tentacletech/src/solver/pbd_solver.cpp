@@ -95,10 +95,27 @@ void PBDSolver::iterate() {
 					particles[i], particles[i + 1], particles[i + 2],
 					rest_bending_chord_lengths[i], bending_stiffness);
 		}
-		// 3. Target-pull (soft).
+		// 3. Target-pull (soft) — single-particle, AI / behavior intent.
 		if (target_active && target_particle_index >= 0 && target_particle_index < n) {
 			tentacletech::constraints::project_target_pull(
 					particles[target_particle_index], target_position, target_stiffness);
+		}
+		// 3.5. Pose targets — distributed multi-particle pull, used by the
+		// behavior layer to write a full-body muscular pose. Composes
+		// additively with the single target-pull above; the iteration loop
+		// reconciles the two via the same projection operator so a curl
+		// pose and a tip target don't fight each other in unexpected ways.
+		{
+			int pose_n = pose_target_indices.size();
+			const int *pose_idx = pose_target_indices.ptr();
+			const Vector3 *pose_pos = pose_target_positions.ptr();
+			const float *pose_stf = pose_target_stiffnesses.ptr();
+			for (int k = 0; k < pose_n; k++) {
+				int idx = pose_idx[k];
+				if (idx < 0 || idx >= n) continue;
+				tentacletech::constraints::project_target_pull(
+						particles[idx], pose_pos[k], pose_stf[k]);
+			}
 		}
 		// 4. Collision normals — Phase 4.
 		// 5. Friction tangential — Phase 4.
@@ -290,6 +307,49 @@ int PBDSolver::get_target_particle_index() const { return target_particle_index;
 Vector3 PBDSolver::get_target_position() const { return target_position; }
 float PBDSolver::get_target_stiffness() const { return target_stiffness; }
 
+// -- Pose targets -----------------------------------------------------------
+
+void PBDSolver::set_pose_targets(const PackedInt32Array &p_indices,
+		const PackedVector3Array &p_world_positions,
+		const PackedFloat32Array &p_stiffnesses) {
+	int n_idx = p_indices.size();
+	int n_pos = p_world_positions.size();
+	int n_stf = p_stiffnesses.size();
+	int n = (n_idx < n_pos ? n_idx : n_pos);
+	if (n_stf < n) n = n_stf;
+	pose_target_indices.resize(n);
+	pose_target_positions.resize(n);
+	pose_target_stiffnesses.resize(n);
+	int *idx_ptr = pose_target_indices.ptrw();
+	Vector3 *pos_ptr = pose_target_positions.ptrw();
+	float *stf_ptr = pose_target_stiffnesses.ptrw();
+	const int *src_idx = p_indices.ptr();
+	const Vector3 *src_pos = p_world_positions.ptr();
+	const float *src_stf = p_stiffnesses.ptr();
+	for (int i = 0; i < n; i++) {
+		idx_ptr[i] = src_idx[i];
+		pos_ptr[i] = src_pos[i];
+		float s = src_stf[i];
+		if (s < 0.0f) s = 0.0f;
+		if (s > 1.0f) s = 1.0f;
+		stf_ptr[i] = s;
+	}
+}
+
+void PBDSolver::clear_pose_targets() {
+	pose_target_indices.clear();
+	pose_target_positions.clear();
+	pose_target_stiffnesses.clear();
+}
+
+int PBDSolver::get_pose_target_count() const {
+	return pose_target_indices.size();
+}
+
+PackedInt32Array PBDSolver::get_pose_target_indices() const { return pose_target_indices; }
+PackedVector3Array PBDSolver::get_pose_target_positions() const { return pose_target_positions; }
+PackedFloat32Array PBDSolver::get_pose_target_stiffnesses() const { return pose_target_stiffnesses; }
+
 // -- Per-particle accessors -------------------------------------------------
 
 Vector3 PBDSolver::get_particle_position(int i) const {
@@ -428,6 +488,13 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_target_particle_index"), &PBDSolver::get_target_particle_index);
 	ClassDB::bind_method(D_METHOD("get_target_position"), &PBDSolver::get_target_position);
 	ClassDB::bind_method(D_METHOD("get_target_stiffness"), &PBDSolver::get_target_stiffness);
+
+	ClassDB::bind_method(D_METHOD("set_pose_targets", "indices", "world_positions", "stiffnesses"), &PBDSolver::set_pose_targets);
+	ClassDB::bind_method(D_METHOD("clear_pose_targets"), &PBDSolver::clear_pose_targets);
+	ClassDB::bind_method(D_METHOD("get_pose_target_count"), &PBDSolver::get_pose_target_count);
+	ClassDB::bind_method(D_METHOD("get_pose_target_indices"), &PBDSolver::get_pose_target_indices);
+	ClassDB::bind_method(D_METHOD("get_pose_target_positions"), &PBDSolver::get_pose_target_positions);
+	ClassDB::bind_method(D_METHOD("get_pose_target_stiffnesses"), &PBDSolver::get_pose_target_stiffnesses);
 
 	ClassDB::bind_method(D_METHOD("get_particle_position", "index"), &PBDSolver::get_particle_position);
 	ClassDB::bind_method(D_METHOD("set_particle_position", "index", "position"), &PBDSolver::set_particle_position);

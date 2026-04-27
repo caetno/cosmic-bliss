@@ -15,6 +15,7 @@
 | **Position-based everything** | Friction, collisions, constraints all project positions in PBD iterations; no explicit velocity or impulse integration |
 | **State is explicit and cheap to read** | Every system publishes to the stimulus bus; anyone can subscribe |
 | **"Alive" is a noise-and-shader problem, not a behavior-tree problem** | Motion emerges from layered noise on parameters, not from discrete states |
+| **Soft physics over scripted levers** | If a behavior can't be expressed via stiffness, friction, grip, damage thresholds, or modulation channels, the fix is the physics — not a boolean reject or an angle gate. Stopgap levers, when they must exist, are flagged as such and retire when the underlying geometry / stiffness model catches up. Boolean rejects in particular get used everywhere a designer doesn't want to tune the physics; do not introduce them. |
 
 ---
 
@@ -93,6 +94,15 @@ struct TentacleParticle {
 
 `girth_scale` and `asymmetry` are updated post-solve from segment lengths (volume preservation) and orifice ring pressures, respectively. See §3.4 and §6.3.
 
+**Mass initialization.** Per-particle mass is set proportional to the local segment volume:
+
+```
+particle.mass = density × radius_at_arc_length² × local_segment_length
+particle.inv_mass = 1.0 / particle.mass
+```
+
+A constant-mass chain produces a uniformly heavy tip that resists whipping; mass-by-volume gives the natural "thin tip whips, thick base anchors" feel for free. Pinned particles (`inv_mass = 0`) are unchanged.
+
 ### 3.2 Solver loop and iteration order
 
 Fixed per-tick loop with prediction → iteration × N → finalization:
@@ -142,6 +152,16 @@ finalize:
 
 All projection math operates on particle positions directly. No force accumulation.
 
+**Bending — form (committed).** The bending constraint operates on the `(i, i+2)` chord — projects the displacement of `p[i+1]` away from the line `p[i]→p[i+2]` toward zero, weighted by stiffness. This is the canonical PBD bending form; do not substitute angle-based variants.
+
+**Bending — angular-stiffness invariance under non-uniform `rest_lengths`.** When the chain has non-uniform per-pair `rest_length[i]` (§3.6), the bending correction must be scaled to keep *angular* stiffness consistent across the chain. Multiply the correction by:
+
+```
+bend_scale = 1.0 / (rest_length[i] + rest_length[i+1])
+```
+
+Without this, tip-clustered chains (short segments) become disproportionately stiff in bending compared to base segments.
+
 ### 3.4 Volume preservation and asymmetry propagation
 
 After the iteration loop completes:
@@ -188,6 +208,32 @@ Volume preservation responds to stretch. Asymmetry responds to cross-sectional s
 - **Final positions on exit.** No integration step that could violate constraints.
 - **Small footprint.** Solver core is ~300–400 lines of C++.
 - **Godot's `SoftBody3D` is mesh-based** and doesn't fit a 1D chain.
+
+### 3.6 Non-uniform particle distribution
+
+A tentacle chain may distribute its particles non-uniformly along arc-length to concentrate resolution where it's needed (typically the tip, for fine wrap fidelity). The underlying solver already accepts per-pair `rest_length`; only initialization plumbing changes.
+
+**Init API on `Tentacle` / `PBDSolver`:**
+
+```cpp
+void initialize_chain_with_lengths(const PackedFloat32Array& rest_lengths);
+// length = N - 1; sum sets total chain length.
+
+void set_distribution_curve(const Ref<Curve>& curve);
+// Convenience: derives rest_lengths from a [0..1] curve mapping
+// axial_t to local segment density. Curve area is normalized to total length.
+```
+
+**Coupled changes when distribution is non-uniform:**
+
+1. Mass-by-volume per §3.1 (otherwise short segments become low-mass islands).
+2. Bending correction scaled per §3.3.
+3. Spline parameterization switches to centripetal Catmull-Rom (§5.1) — uniform CR overshoots near dense knot regions.
+4. Texture coordinates derived from arc-length in the shader (§5.3) so authored UVs do not stretch under varying segment length.
+
+**Iteration count.** PBD distance-constraint convergence degrades with length disparity. For non-uniform chains with ratio > 2× between shortest and longest segment, bump the iteration count from 4 to 5–6. Wrapping-grade chains (§12) override this with their own lower-iteration profile.
+
+Default chain remains uniform; non-uniform is opt-in per `TentacleType` profile.
 
 ---
 
@@ -266,6 +312,38 @@ bone.apply_impulse_at_position(impulse_friction, contact_point)
 ```
 
 Heavy tentacle dragging across skin pulls the hero's skin (and the bone under it) in the drag direction. This is where the "tentacle friction makes the hero move" feel comes from.
+
+**Soft distance stiffness during contact.** Per-pair distance constraint stiffness drops from `1.0` to a tunable `contact_stiffness` (default `0.5`) for any segment whose either endpoint is in active collision contact this tick. The chain stretches *temporarily* over wrapped geometry, springing back when contact ends. Cheaper and more stable than full length-redistribution.
+
+```
+for each distance constraint between particles a, b:
+    stiffness = (a.in_contact_this_tick || b.in_contact_this_tick)
+        ? contact_stiffness
+        : base_stiffness
+    project_distance_constraint(a, b, rest_length[i], stiffness)
+```
+
+**Tuning interaction.** Per-iteration stiffness compounds across iterations within a single tick: effective single-tick stiffness ≈ `1 - (1 - stiffness)^iter_count`. So `contact_stiffness = 0.5` at 4 iterations gives ≈ 0.94 effective — most of the *visible* stretch comes from across-tick relaxation against collision push-back, not from a single tick's compounded projection. Tune `contact_stiffness` and `iteration_count` together; do not tune in isolation.
+
+**Length-redistribution / elastic-budget ("S-curve length storage")** is explicitly deferred. Re-evaluate only if soft stiffness alone produces visible slack.
+
+**Type-2 friction reciprocal routing.** The type-1 path above applies the friction displacement as an equal-and-opposite impulse on the contacted ragdoll bone. **Type-2 (particle vs orifice rim) is different.** The contact is with a kinematic ring, not a ragdoll bone — so the type-1 rule cannot be reused. Type-2 friction reciprocals are summed per ring direction onto `EI.tangential_friction_per_dir[d]` (§6.2) and routed to the orifice's `host_bone` by the §6.3 reaction-on-host-bone pass — not applied directly per-particle. This avoids double-routing and keeps the host-bone reaction self-consistent with the radial and axial-wedge components computed at the same place.
+
+```
+// Inside §4.3 friction projection, after computing friction_applied for
+// a particle currently in type-2 contact at ring direction d:
+if contact_type == TYPE_2:
+    // Project friction_applied onto the tentacle tangent at the ring,
+    // accumulate scalar magnitude per direction. §6.3 takes it from there.
+    t_hat = evaluate_tentacle_tangent(EI.tentacle, ring.arc_length)
+    EI.tangential_friction_per_dir[d] += dot(friction_applied, t_hat) * effective_mass / dt
+    // Do NOT call bone.apply_impulse_at_position here — handled by §6.3.
+else if contact_type == TYPE_1:
+    // Existing canonical behavior (above): route reciprocal to ragdoll bone directly.
+    bone.apply_impulse_at_position(impulse_friction, contact_point)
+```
+
+`tangential_friction_per_dir` is cleared at the start of each PBD tick alongside other per-tick `EntryInteraction` state.
 
 ### 4.4 Friction coefficient composition
 
@@ -378,6 +456,18 @@ class CatmullSpline {
 
 **Parallel transport binormals** (not Frenet) are critical — Frenet frames twist at inflection points; parallel transport stays smooth. Use for rendering and for tunnel projection.
 
+**Parameterization.** The spline supports α-parameterization:
+
+- `α = 0.0` — uniform (existing default; correct for evenly-spaced control points).
+- `α = 0.5` — centripetal (required when control points are non-uniformly spaced; eliminates overshoot loops near dense regions).
+- `α = 1.0` — chordal.
+
+Default to centripetal when the source chain has non-uniform `rest_lengths` (§3.6); otherwise uniform stays canonical for performance.
+
+```cpp
+void set_parameterization(float alpha);   // 0.0 / 0.5 / 1.0
+```
+
 ### 5.2 GPU data texture encoding
 
 Godot spatial shaders do not support SSBOs. Spline data is encoded into an `RGBA32F` texture and sampled with `texelFetch`:
@@ -437,6 +527,20 @@ evaluate_spline_frame(arc_length, n, b);
 VERTEX = spline_pos + n * lateral.x + b * lateral.y;
 // NORMAL transforms similarly
 ```
+
+**Arc-length-driven V coordinate.** The vertex shader computes the vertex's current arc-length-along-the-spline from the spline data texture's distance LUT, normalizes by total current arc length, and uses the result as the V texture coordinate. The mesh's baked V is interpreted only as a *ring-index reference*, not a final UV.
+
+```glsl
+float current_arc_length_at_vertex = arclen_lookup(vertex.rest_position.z);
+float current_total_arc_length     = arclen_total();
+vec2  uv_remapped = vec2(UV.x, current_arc_length_at_vertex / current_total_arc_length);
+```
+
+**Dependency.** Assumes `vertex.rest_position.z == rest_arc_length` for that vertex's ring. The procedural generator and Blender pipeline (§10.1) guarantee this by construction (mesh aligned along +Z, V = arc-length). A future curved-rest-pose authoring path would silently break this assumption — revisit if added.
+
+**Decoupling.** This decouples authored / detail textures from per-segment-length variation introduced by §3.6 (non-uniform distribution) and §4.3 (soft contact stretch). Cost: one small partial sum per vertex; sub-microsecond at typical ring counts.
+
+**Fully procedural materials** (noise, distance fields, polar coordinates) drive off the same arc-length output and never need a baked UV.
 
 ### 5.4 Auto-baked girth (no manual profile authoring)
 
@@ -521,8 +625,37 @@ struct EntryInteraction {
     Vector<float>  radial_pressure_per_ring;
     float      axial_friction_force;
     Vector3    reaction_on_ragdoll;
+
+    // Per-tentacle one-shot ejection (added 2026-04-27).
+    // PBD prev_position kick along entry_axis; decays to zero quickly.
+    float      ejection_velocity = 0.0;       // m/s, positive = expel outward
+    float      ejection_decay    = 12.0;      // 1/s
+
+    // Cached "is in tunnel" classification, computed once per tick at the
+    // EI update step. Read by ejection_velocity application, peristalsis
+    // application, and any other per-tunnel-particle pass.
+    PackedInt32Array particles_in_tunnel;
+
+    // Per-direction tangential friction at the rim (added 2026-04-27 rev 2.1).
+    // Populated by §4.3 type-2 friction projection — summed per ring direction
+    // across all particles in type-2 contact at that direction this tick.
+    // Read by §6.3 reaction-on-host-bone, which routes the friction reciprocal
+    // to host_bone (NOT to a ragdoll bone — type-1 routing rule does not apply
+    // to type-2 contacts). Cleared at the start of each PBD tick.
+    float      tangential_friction_per_dir[8] = {0};
 };
 ```
+
+Per-tick application after the PBD step (ejection):
+
+```
+if EI.ejection_velocity > 0.0:
+    for each particle index i in EI.particles_in_tunnel:
+        tentacle.particles[i].prev_position -= EI.entry_axis * EI.ejection_velocity * dt
+    EI.ejection_velocity *= (1.0 - EI.ejection_decay * dt)
+```
+
+Used by `RefusalSpasmPattern` and `PainExpulsionPattern` emitters (§6.10) to eject one tentacle without disturbing others sharing the orifice.
 
 Lifecycle:
 ```
@@ -574,6 +707,84 @@ for each ring r in orifice.rings:
 ```
 
 A rigid tentacle against a soft orifice: orifice stretches a lot, tentacle barely compresses. Soft tentacle against rigid orifice: tentacle flattens, orifice barely stretches. Same equation.
+
+**Reaction force on the orifice's host bone.** Each direction transmits its compression and friction back to the deform bone the orifice's `Center` is parented to. Without this step, a knot deforms the rim visually but does not transmit hero weight into the chain — i.e., suspension is not physically realized.
+
+Let `host_bone = orifice.Center.parent_ragdoll_bone` (per §6.1 hierarchy).
+
+```
+for each ring direction d in [0..N-1]:                       // N = orifice.ring_count, §6.1
+    dir_d          = direction_vec[d]                          // outward in Center frame
+    ring_world_pos = orifice.Center.global × (dir_d × current_radius[d])
+    p              = pressure_per_dir[d]                       // ≥ 0 from bilateral compliance
+    s_intrinsic    = EI.arc_length_at_entry + r_offset_along_axis[d]
+
+    // Radial reaction: rim pushes back along its own outward axis
+    radial_force_on_host = -dir_d * p
+
+    // Axial wedge — surface-normal tilt at this ring's arc-length.
+    // dr/ds is taken with respect to distance traveled along +entry_axis
+    // (outward) at the contact, NOT along the tentacle's intrinsic arc-length.
+    // The intrinsic gradient is converted by the sign of the tangent's
+    // projection on entry_axis: a tentacle threading inward (tangent ·
+    // entry_axis < 0 — the typical suspension geometry) flips the sign.
+    drds_intrinsic = signed_girth_gradient_at_arc_length(EI.tentacle, s_intrinsic)
+    t_hat          = evaluate_tentacle_tangent(EI.tentacle, s_intrinsic)
+    drds_outward   = drds_intrinsic * sign(dot(t_hat, orifice.entry_axis))
+    norm           = sqrt(1.0 + drds_outward * drds_outward)
+    axial_hold     = -p * drds_outward / norm
+    axial_force_on_host = orifice.entry_axis * axial_hold
+    // Sign convention (numerically verified; see "Wedge sign sanity" test):
+    //   drds_outward > 0  (knot apex on the cavity-EXTERIOR side of this
+    //                      ring contact — knot mid-thrust into cavity, leading
+    //                      flange wedging the rim):
+    //                      axial force on host is INTO CAVITY. Engulfment-assist.
+    //   drds_outward < 0  (knot apex on the cavity-INTERIOR side of this
+    //                      ring contact — knot lodged inside, rim sitting on
+    //                      the knot's exterior-facing slope):
+    //                      axial force on host is TOWARD EXIT. This is the
+    //                      suspension-holding direction — host pulled toward
+    //                      anchor side, transmitting hero weight up the chain.
+
+    // Friction-tangential along the tentacle axis at this ring.
+    // tangential_friction_per_dir[d] is populated by §4.3 type-2 routing
+    // (a scalar magnitude); convert to vector by multiplying by t_hat.
+    friction_force_on_host = -t_hat * EI.tangential_friction_per_dir[d]
+
+    total = radial_force_on_host + axial_force_on_host + friction_force_on_host
+    host_bone.apply_impulse_at_position(total * dt, ring_world_pos)
+
+    EI.reaction_on_ragdoll += total
+```
+
+**Why the normalized form, and why not `tan`.** The axial component of a normal force on a surface with axial gradient is `pressure × sin(θ)` where `tan(θ) = drds_outward`. The expression `-p × drds_outward / sqrt(1 + drds_outward²)` is exactly `-p × sin(θ)` — bounded by `p` at the limit (a vertical flange, where `sin → 1` while `tan → ∞`). Earlier drafts using `tan(local_taper)` blew up at the very geometry the system most needs to handle correctly. Earlier drafts using the unnormalized linearization `-p × drds_outward` are fine for shallow slopes (≤ ~30° taper) but degrade past that.
+
+**Where force returns to the tentacle (case-by-case).** §6.3's bilateral compliance writes `target_radius_per_dir[d]` and an asymmetry delta on near particles. The asymmetry write is a **shape-parameter modification** — it alters effective radius for subsequent collision queries, but does **not** push particles. Force feedback into the chain comes from elsewhere, and the path differs by case:
+
+- **Knot inside rim** (`drds_outward < 0` at the rim contact, knot apex on the cavity-interior side): the chain receives force via **type-2 collision projection** during PBD iterations — knot particles geometrically inside the spring-damper-driven ring radius (§6.4) are projected back outside it (§4.2 type-2 path). Tangential motion is then capped by the friction projection (§4.3). Both are real position corrections. This is the canonical suspension-holding path.
+- **Smooth shaft inside rim** (`drds_outward ≈ 0`, no knot, no taper): the wedge-axial term vanishes; radial projection is small, often within hysteresis. Hold is **purely friction at the rim** along the shaft direction (§4.3). Suspension on a smooth shaft is therefore friction-limited — see §14 gotcha and the "Smooth-shaft suspension fails" test.
+- **Knot mid-thrust into cavity** (`drds_outward > 0`, leading flange wedging the rim from outside): wedge axial force on the host is INTO CAVITY — the rim is dragged inward as the knot pushes through. This is engulfment-assist, not suspension. Friction direction depends on the tentacle's instantaneous axial velocity.
+
+The reaction-on-host-bone step closes the third-law loop on the **rim side**; the tentacle side is unchanged and runs through existing collision + friction projections.
+
+**Terminology.** All per-direction quantities use `_per_dir[d]` — canonical, established in §6.2. `pressure_per_ring[r]` and similar `_per_ring[r]` aliases used in earlier drafts are retired; do not reintroduce them.
+
+**Damage degrades grip gradually.** Effective grip strength decays via `smoothstep` against accumulated damage:
+
+```
+dmg_t = clamp(EI.damage_accumulated_total / damage_failure_threshold, 0, 1)
+effective_grip_strength = base_grip_strength
+    × mod.grip_strength_mult
+    × (1.0 - smoothstep(0.0, 1.0, dmg_t))
+```
+
+Smoothstep, not linear: linear gives a derivative discontinuity at the threshold (visible as a sudden cliff to zero). Smoothstep tails off gracefully.
+
+Sustained suspension or prolonged grip raises damage; grip slips well before the orifice "fails." `damage_failure_threshold` is per-orifice; default `1.0` arbitrary unit, scaled by per-tick damage rate.
+
+`OrificeDamaged` is a **continuous channel** (already in §8.1), not an event — don't emit per-tick events for accumulated damage.
+
+Emit one-shot `GripBroke` when `effective_grip_strength` first crosses below `0.1`. **Hysteresis:** do not re-emit until `effective_grip_strength` has recovered above `0.2` and crossed `0.1` again. Prevents flutter at the threshold.
 
 ### 6.4 Spring-damper ring dynamics
 
@@ -639,6 +850,19 @@ When a tentacle needs to resolve its own angular location against the authored r
 **Inter-tentacle separation inside an orifice:** type-5 (particle-particle) collision is always enabled for particles flagged as inside any orifice, even if disabled globally. This lets two tentacles jam in side-by-side and physically push each other apart.
 
 **Cap: 3 simultaneous per orifice.** 4th is rejected at entry. Override flag exists for player/narrative-driven forced multi-entry.
+
+**Knot-aware grip ramp.** When a girth differential is straddling the rim, grip engagement ramps faster:
+
+```
+knot_factor = clamp(|girth_gradient_at_rim| / reference_gradient, 0, 1)
+grip_engagement_rate_effective = base_rate * (1.0 + knot_factor)
+```
+
+`girth_gradient_at_rim` is the signed axial derivative of girth where the tentacle crosses the entry plane — the same quantity used by the §6.3 axial wedge. Magnitude is large for a knot, near zero for the smooth shaft. Reference gradient is per-orifice (default `1.0`). Makes "trapped behind a knot" feel land reliably without affecting smooth-shaft scenarios.
+
+**Source of the gradient.** Bake `d(girth)/ds` as a second channel of the girth texture (§5.4) at mesh import / procedural-generation time. The same texture sample serves both §6.3 (axial wedge) and §6.5 (knot factor). Avoids per-tick finite-differencing.
+
+**No `accept_penetration` flag, no `min_approach_angle_cos` gate.** Per §1: if soft physics can't refuse, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. Glancing-approach rejection waits for a connected curved-surface representation of the rim in type-2 collision (currently rings are 8 discrete radial bones; once they form a real surface, glancing approaches slide off naturally — see §14).
 
 ### 6.6 Jaw special case
 
@@ -741,6 +965,20 @@ girth(t, time) = rest_girth(t) × (1 + amp × sin((t − speed × time) × 2π �
 
 Beads in the low-girth phase of the wave experience asymmetric ring pressure producing a net axial force along the tunnel gradient — the same wedge mechanic as orifice-rim compression, applied tunnel-to-bead. Reverie can drive expulsion (amplitude high, speed positive along exit direction) or retention (amplitude low, or speed reversed to pull beads inward).
 
+**Mechanical scope.** Peristalsis is implemented as a time-varying contribution to `target_radius_per_dir[d]` — the same channel bilateral compliance writes. Concretely, for each ring direction at every active tunnel ring along the orifice's tunnel:
+
+```
+wave_phase = (arc_length_at_ring × peristalsis_wavelength
+            - peristalsis_wave_speed × t) × 2π
+peristalsis_target_radius =
+    rest_radius * (1.0 - peristalsis_amplitude * sin(wave_phase))
+target_radius_per_dir[d] = max(target_radius_per_dir[d], peristalsis_target_radius)
+```
+
+(Or, depending on whether peristalsis is constrictive or dilatory at the trough, blend or `min`/`max` per the authored intent.)
+
+**Consequence.** Any particle in the tunnel — bead-chain or penetrating tentacle — that is in collision contact with the deformed wall radius is pushed by the same projection. Bilateral compliance writes asymmetry to nearby tentacle particles; type-3 collision (tunnel wall) handles the rest. **No separate "push tentacle particles" force path is needed.** This makes peristalsis the canonical mechanism for both ingestion (negative `peristalsis_wave_speed`) and expulsion (positive) of penetrating tentacles, alongside its bead-storage role.
+
 **Birthing: ring transit.** When a bead reaches the orifice's inner entry plane, it is treated identically to a bulb on retraction (Scenario 2). Ring bones stretch nonlinearly to accommodate `bead.chain_radius`; bilateral compliance (§6.3) applies; grip hysteresis engages if grip was active; pop-release occurs past the ring's widest point. Emits `RingTransitStart` at initial contact and `RingTransitEnd` at completion, and `PayloadExpelled` with the bead reference as the full event payload.
 
 Damage accumulates per §6 if `bead.chain_radius` exceeds `orifice.max_radius`.
@@ -750,6 +988,100 @@ Damage accumulates per §6 if `bead.chain_radius` exceeds `orifice.max_radius`.
 The freed tentacle is an ordinary `Tentacle` with a **"Free Float" scenario preset** (see `TentacleTech_Scenarios.md` §A4): zero target-pull, high noise, low stiffness. In zero-G environments this produces natural wiggling. The existing PBD bending constraints (§3.3) fill the role that cone-twist joints would on a `PhysicalBone3D` chain. **Do not use `PhysicalBone3D` chains for excreted tentacles** — one solver type for everything (§1 principle), and the `PhysicalBone3D` scaling bug (§14) would re-surface.
 
 **Open design question (not blocking):** payload source for oviposition in gameplay — whether tentacles arrive pre-loaded, refill from environment sources, or have infinite capacity. Defer until encounter design lands.
+
+### 6.10 Transient pulse primitives
+
+Steady peristalsis (§6.9) covers continuous waves. Transient one-shot pulses cover punctuated reflexes — climax contractions, gag reflex, pain spasm, refusal spasm, knot-engulfment "gulp." Implemented as additive envelopes on top of `peristalsis_amplitude` / `peristalsis_wave_speed`, evaluated per tick.
+
+```cpp
+struct ContractionPulse {
+    float       magnitude;     // 0..1, peak added to peristalsis_amplitude
+    float       speed;         // arc-length/sec, signed (positive = exit, negative = ingest)
+    float       wavelength;    // typically ≥ tunnel length → acts as one wave
+    float       duration;      // seconds (envelope total length)
+    float       t_started;     // populated on activation
+    Ref<Curve>  envelope;      // 0..1 over normalized age; default below
+    uint32_t    applies_to;    // bitfield: TENTACLES = 1, BEADS = 2
+};
+
+Vector<ContractionPulse> active_pulses;   // per orifice; cap ~4
+```
+
+**Pulses are atomic.** No `count`, no `interval`. Repeating patterns (orgasm, etc.) are sugar at the *emitter* level: the pattern emits N atomic `ContractionPulse`s with staggered `t_started`. The orifice tick has one job — evaluate active pulses additively.
+
+Per-tick contribution:
+
+```
+effective_amplitude = peristalsis_amplitude
+effective_speed     = peristalsis_wave_speed
+for each pulse p in active_pulses (filtered by applies_to):
+    age = current_time - p.t_started
+    if age >= p.duration:
+        retire and continue
+    env = p.envelope.sample_baked(age / p.duration)
+    effective_amplitude += p.magnitude * env
+    effective_speed     += p.speed     * env
+```
+
+**Default envelope.** Built-in `Curve` resource: trapezoidal `0 → 1 → 1 → 0` with 20% attack, 60% sustain, 20% release. Authoring may override per-pulse with custom curves (sharp spike, slow swell, etc.).
+
+**Named patterns** (Reverie reaction-profile sugar — emitters that queue lists of atomic pulses; not new physics):
+
+- `OrgasmPattern` — 6 pulses, magnitudes `[0.8, 0.7, 0.6, 0.5, 0.4, 0.3]`, stagger 0.6 s, `speed +0.4 m/s`, default envelope.
+- `GagReflexPattern` — 1 pulse, magnitude 1.0, duration 0.4 s, sharp envelope (10% attack, 20% sustain, 70% release), `speed +0.6 m/s` on the oral tunnel; combined at the Reverie layer with `jaw_relaxation → 1` and head `voluntary_motion_vector` rear-ward.
+- `PainExpulsionPattern` — 1 pulse, magnitude 0.7, duration 0.3 s, sharp envelope.
+- `RefusalSpasmPattern` — 2 pulses, magnitude 0.5, alongside `active_contraction_target → 0.6` and host `voluntary_motion_vector` away.
+- `KnotEngulfPattern` — 1 pulse, *negative* speed, magnitude 0.7, duration 0.5 s, wavelength = tunnel length.
+
+The term "DrawInPulse" used in earlier drafts is **not** a separate type — it is a `ContractionPulse` with negative `speed`. Avoid the term in code; use `ContractionPulse` everywhere.
+
+**Autonomous `appetite` (optional).** Per-orifice `appetite: float` (default 0.0) drives automatic reverse peristalsis when a girth differential is detected at the entry plane:
+
+```
+if orifice.appetite > 0 and girth_at_entry_plane > orifice.rest_radius * 1.05:
+    auto_speed     = -orifice.appetite * appetite_speed_scale
+    auto_amplitude = +orifice.appetite * appetite_amplitude_scale
+    effective_speed     += auto_speed
+    effective_amplitude += auto_amplitude
+```
+
+Reverie owns the value of `appetite` (state-driven, can be 0 most of the time); the mechanical response is autonomous below it. Use to express character archetypes ("hungry rim") without scripting per-encounter pulses.
+
+### 6.11 `RhythmSyncedProbe` — body-rhythm-locked self-insertion
+
+A modifier component on `Tentacle` (sibling pattern to `OvipositorComponent`, §6.9). Reads `marionette.body_rhythm_phase` (`docs/marionette/Marionette_plan.md` P7.10) and drives the tentacle's tip target along an active `EntryInteraction`'s tunnel at a configurable phase offset. This is how a tentacle locks rhythmically to the host body's pelvic motion — pumping coordination ("thrust when hips rock back") or yielding coordination ("advance when hips press in"), differing only in `phase_offset_rad`.
+
+**Schema:**
+
+```
+RhythmSyncedProbe (Node, child of Tentacle):
+  marionette_path: NodePath        # reference to the synced Marionette
+  entry_interaction_id: int        # which EI on this tentacle to drive (-1 = first active)
+  phase_offset_rad: float = PI     # offset from marionette.body_rhythm_phase
+  amplitude_along_spline: float    # how far the insertion drives, in tunnel arc length
+  insertion_curve: Curve           # value over phase: shape of the drive cycle
+```
+
+**Per-tick:**
+
+```
+phase = fmod(marionette.body_rhythm_phase + phase_offset_rad, TAU)
+drive = insertion_curve.sample_baked(phase / TAU) * amplitude_along_spline
+# drive is added to the tentacle's tip target along the EI's tunnel arc-length;
+# composes with the existing target-pull constraint (§3.3) — does not replace it.
+tentacle.set_tunnel_drive(EI, drive)
+```
+
+**Composition.** The drive is a position offset along the `EntryInteraction`'s tunnel arc-length, applied as a target-pull (§3.3). It composes additively with whatever target the tentacle's behavior driver is otherwise writing — high-level intent stays in charge of *which* orifice is engaged; the rhythm probe owns *when* it pushes within that engagement.
+
+**Two presets worth shipping:**
+
+- `probe_pumping.tres` with `phase_offset_rad = PI` — tentacle thrusts forward when hips rock backward (pumping coordination).
+- `probe_yielding.tres` with `phase_offset_rad = 0` — tentacle and hips advance together (body presses into the thrust).
+
+Both reference the same `insertion_curve` shape; only the offset differs.
+
+**Why on `Marionette`'s clock and not the tentacle's own.** Per `docs/marionette/Marionette_plan.md` P7.10, `body_rhythm_phase` is integrated, not recomputed; a frequency change driven by Reverie produces a smooth tempo change in the body and in any tentacle locked to it. A tentacle with its own clock would phase-snap when arousal shifts. Mandatory.
 
 ---
 
@@ -918,6 +1250,24 @@ enum StimulusEventType {
     StorageBeadMigrated,                             // storage chain movement
     RingTransitStart, RingTransitEnd,                // bead crossing rim
     PhenomenonAchieved,                              // rare emergent event (see docs/Gameplay_Mechanics.md)
+
+    // Pattern lifecycle (added 2026-04-27). Most subscribers want these,
+    // not per-pulse fires.
+    OrgasmStart, OrgasmEnd,
+    GagReflexStart, GagReflexEnd,
+    PainExpulsionStart, PainExpulsionEnd,
+    RefusalSpasmStart, RefusalSpasmEnd,
+
+    // Generic per-pulse fire — for fine-grained sound triggering or
+    // physics-precise reactions. Most subscribers will ignore this and use
+    // the lifecycle events above.
+    ContractionPulseFired,        // extra: { pattern_id, magnitude, kind }
+
+    // Discrete physical beats (added 2026-04-27)
+    KnotEngulfed,                 // bulky girth crossing inward past the rim
+                                  //   (counterpart to BulbPop)
+    EntryRejected,                // EntryInteraction creation failed for soft-physics
+                                  //   reasons. extra: { peak_pressure, reason }
 };
 
 struct StimulusEvent {
@@ -944,6 +1294,20 @@ Oviposition / birthing payloads:
 - `RingTransitStart` (`orifice_id`, `bead_id`, `bead_radius`) — bead crosses inner entry plane on the way out.
 - `RingTransitEnd` (same plus `duration_seconds`) — bead has fully crossed the rim.
 - `PhenomenonAchieved` (`phenomenon_id`, `magnitude`, `context`) — fired by a `PhenomenonDetector` when a rare emergent event is recognized (see `docs/Gameplay_Mechanics.md`).
+
+Pattern + per-pulse + discrete-beat events (added 2026-04-27):
+
+- `OrgasmStart` / `OrgasmEnd`, `GagReflexStart` / `GagReflexEnd`, `PainExpulsionStart` / `PainExpulsionEnd`, `RefusalSpasmStart` / `RefusalSpasmEnd` — pattern lifecycle brackets emitted by the §6.10 pattern emitters. Coarse-grained; most subscribers (sound, animation, Reverie) consume these rather than per-pulse fires.
+- `ContractionPulseFired` (`pattern_id`, `magnitude`, `kind`) — fired once per atomic `ContractionPulse` activation. Use when fine-grained sound triggering or physics-precise reactions are needed.
+- `KnotEngulfed` — counterpart to `BulbPop`; fired when a bulky girth differential crosses inward past the rim (e.g. autonomous `appetite` consuming a knot, §6.10).
+- `EntryRejected` (`peak_pressure`, `reason`) — soft-physics rejection of an entry attempt. Reasons:
+  - `InsufficientPressure` — approach pressure below grip-engagement threshold.
+  - `FrictionStuck` — tentacle pinned by static friction before crossing the entry plane.
+  - `OrificeBusy` — cap of 3 simultaneous tentacles per §6.5 reached.
+
+  There is no hard-refusal lever (per §1 discipline). `EntryRejected` exists to tell subscribers that a soft-physics rejection happened, not to be triggered by a script.
+
+**No event-type-per-pattern.** Adding `OrgasmContraction`, `LustfulSpasm`, `PostCoitalRipple` as distinct event types would inflate the enum unboundedly. Patterns are data; events are type-checked enum values that subscribers compile against. The generic `ContractionPulseFired` carries pattern identity in its `extra` dictionary. Lifecycle events are coarse-grained brackets, kept as a small fixed set.
 
 **Continuous channels** — values that exist every frame, updated in place:
 ```
@@ -984,6 +1348,19 @@ struct OrificeModulation {
     float peristalsis_wave_speed   = 0.0;    // arc-length units/sec; positive = toward exit
     float peristalsis_amplitude    = 0.0;    // 0..1 fraction of rest girth
     float peristalsis_wavelength   = 1.0;    // waves per unit arc-length
+
+    // Transient pulse activation (added 2026-04-27). See §6.10.
+    // Reverie pushes new ContractionPulse entries into the orifice's
+    // active_pulses array through a mutator method. Patterns are emitted as
+    // multi-pulse sequences by the pattern emitter (sugar; not part of the
+    // tick-level data).
+    void queue_contraction_pulse(ContractionPulse p);
+    void emit_pattern(StringName pattern_id);   // sugar: queues N atomic pulses
+
+    // Autonomous appetite (added 2026-04-27).
+    // 0..1; non-zero enables automatic reverse peristalsis when
+    // girth_at_entry > rest_radius × 1.05.
+    float appetite                 = 0.0;
 };
 
 // Peristalsis modulation is per-tunnel, attached to the orifice whose tunnel
@@ -1213,6 +1590,93 @@ Provided as `.tres` resources under `gdscript/procedural/presets/`: `smooth.tres
 - **Composition of multiple `TentacleMesh` resources into one** (e.g., chained tentacles via mesh merge) — Phase 9 polish if motivated.
 - **Animating mesh-shape properties at runtime** — physics motion is the spline shader's job, not mesh rebakes.
 
+### 10.2a TentacleMesh as a `PrimitiveMesh` subclass (UX fix)
+
+This is a UX fix; it does not change the modifier model itself.
+
+**Resource shape.** `TentacleMesh` is a `PrimitiveMesh` subclass (overrides `_create_mesh_array()`; calls `request_update()` from setters). Inspector edits regenerate live without per-set `ArrayMesh` allocation, fixing the slider-snap-back UX where setters that recreated `Mesh` / `Resource` triggered `notify_property_list_changed()` and dropped inspector focus.
+
+**Workflow remains two-stage:**
+
+1. **Edit time.** `TentacleMesh` is a `PrimitiveMesh` assigned to `MeshInstance3D.mesh`. Property edits trigger `request_update()`; the engine regenerates surface arrays lazily on the next draw. No baked output yet.
+2. **Bake to ship.** A "Bake" inspector action freezes the current state into a static `.tres ArrayMesh` plus the auxiliary outputs (`girth_texture`, `rest_length`, mask channels). The static `.tres` is what ships. Runtime regeneration remains supported but is not the gameplay path (§5.4 unchanged).
+
+**Auxiliary bake outputs unchanged.** Channel layout (UV0 / UV1 / COLOR.rgba / CUSTOM0) and girth-texture format are unchanged.
+
+**Predecessor.** This supersedes the previous `TentacleMesh : Resource` shape used in §10.2's resource layout, and any earlier "TentacleMeshRoot Node3D with modifier child Nodes" authoring paradigm. The Node-tree pattern is retired — modifiers are part of the data model on `TentacleMesh` itself (see §10.2b).
+
+### 10.2b Modifier model: kernel + repeat + falloff
+
+Architectural change to the modifier data model, independent of §10.2a. Reframes §10.2's flat `features` list into a `modifiers` list with three primitive kernels.
+
+**Resource layout (v1):**
+
+```
+TentacleMesh : PrimitiveMesh
+├── length, base_radius, tip_radius, radius_curve
+├── radial_segments, length_segments, cross_section
+├── twist_total, twist_curve, seam_offset, intrinsic_axis_sign
+├── distribution_curve : Curve            (controls non-uniform §3.6 init)
+├── modifiers : Array[TentacleModifier]   (single flat list in v1)
+└── tip_shape : TentacleTipShape          (separate library: Pointed, Bulb, Flare,
+                                             Canal, Mouth, Rounded, …)
+
+TentacleModifier : Resource (abstract)
+├── enabled : bool
+├── t_start, t_end : float                (arc-length range, [0..1])
+├── feather : float                       (smoothstep falloff at boundaries)
+├── kernel : enum { Ring, Vertex, Mask }  (a modifier may declare multiple)
+├── repeat : int                          (1 = single instance; N = N copies)
+├── falloff_curve : Curve                 (k=0 at first instance, k=1 at last)
+├── radial_mask : enum { AllAround, OneSide, TwoSide, Spiral }
+└── _apply(ctx, t_start, t_end, feather, repeat, falloff)
+```
+
+**Sections deferred to v2.** A `TentacleSection` resource with shared, feathered boundaries is an authoring grouping for tentacles with 12+ stacked modifiers. v1 ships with per-modifier `t_start` / `t_end` / `feather` directly on `TentacleModifier` — no grouping container, no section-boundary slider semantics. Promote to multi-section once authoring needs it; the kernel / repeat / falloff factoring is unchanged when that happens.
+
+**Modifier kernels.** Three primitive kernel types cover the full feature catalog:
+
+- `Ring` — per-axial radius / normal modulation, full ring (knot, ripple, taper override, local twist).
+- `Vertex` — per-vertex offset as a function of `(arc_s, theta)` (wart, spine, sucker cup).
+- `Mask` — writes to COLOR.rgba / UV1 / CUSTOM0 only (papillae, photophore, color band, sheen band).
+
+A modifier may declare multiple kernel types (e.g. suckers = `Vertex + Mask`).
+
+**Stacking rule.** Within the modifier list, ring-kernel offsets sum; mask-kernel writes max-blend per channel; vertex-kernel offsets sum. No exposed blend modes.
+
+**Repeat + falloff.** Single primitive that wraps the kernel as a 1D instancer along the modifier's range:
+
+```
+for k in 0..repeat:
+    local_t = lerp(t_start, t_end, k / max(repeat - 1, 1))
+    scale   = falloff_curve.sample(k / max(repeat - 1, 1))
+    apply_kernel(ctx, local_t, feather, scale * base_amplitude)
+```
+
+**`SuckerRowFeature` reframes as `SuckersModifier`** — same params (count, position_curve, size_curve, side, rim_height, cup_depth, double_row_offset), now operating in the modifier list with `kernel = Vertex + Mask`.
+
+**Modifier catalog** (geometry + mask types — not all v1):
+
+| Modifier                | Kernel(s)       | v1?                                                |
+|---|---|---|
+| `SuckersModifier`       | Vertex + Mask   | yes (rename of existing)                           |
+| `KnotModifier`          | Ring            | yes (egg / sphere / ridged / custom-curve profile) |
+| `RippleModifier`        | Ring            | later                                              |
+| `RibsModifier`          | Ring            | later                                              |
+| `WartClusterModifier`   | Vertex          | later                                              |
+| `SpinesModifier`        | Vertex          | later                                              |
+| `RibbonModifier`        | Vertex          | later                                              |
+| `TwistOverrideModifier` | Ring            | later                                              |
+| `PapillaeModifier`      | Mask            | later                                              |
+| `PhotophoreModifier`    | Mask            | later                                              |
+| `ColorBandModifier`     | Mask            | later                                              |
+| `SheenBandModifier`     | Mask            | later                                              |
+| `EmissionBandModifier`  | Mask            | later                                              |
+
+**Validation against physics constraints** runs over the *aggregated* radius profile after all modifiers bake — soft amber zone before hard stop, with hover tooltip explaining which constraint (max girth-ratio per unit length, max twist rate, etc.).
+
+**Tip shape library** is separate from the modifier list. Each tip shape is a small `Resource` with its own params (Pointed: nothing extra; Bulb: bulb_radius, taper_in_length; Flare: flare_count, flare_depth; etc.). Picked once per tentacle. The tip is silhouette-defining and lives in the mesh layer per §5.0.
+
 ### 10.3 Blender pipeline
 
 For hero-asset tentacles:
@@ -1437,6 +1901,54 @@ Target: 60 Hz on Intel UHD / Steam Deck low / mobile Vulkan.
 - Particles per tentacle: 48
 - Tentacles per orifice: 3
 
+**Realistic active-tentacle ranges (mid-range desktop, ~RTX 3060 class, 1080p, 60 Hz):**
+
+| Scene | Active tentacles |
+|---|---|
+| Hero + tentacles, no orifice contact | 8–12 |
+| Hero + tentacles, 1–2 orifice interactions | 6–8 |
+| Heavy scenario (multiple orifices, tangle) | 4–6 |
+| Same scene, after Marionette SPD ports to C++ | + ~50% |
+| Steam Deck / mid laptop iGPU class | ~half of above |
+
+Counts are *active* — idle / off-screen / asleep tentacles cost essentially nothing (PBD trivially sleeps; spline texture upload skips when no particle moved past epsilon). Treat all values as ±50% until Phase 4 (collision) and Phase 5 (orifice) are measured with a real hero present.
+
+**Cost levers, in order of cost-effectiveness:**
+
+1. Sleep when idle.
+2. LOD iteration count (close: 8, mid: 4, far: 2).
+3. LOD physics rate (60 / 30 / 15 Hz tiers by distance/relevance).
+4. LOD mesh tessellation (cheap; mesh is GPU-skinned).
+5. Port Marionette SPD to C++ (largest single CPU recovery; deferred).
+6. Spatial-hash tuning (only relevant once tentacle↔tentacle is in).
+7. Shader LOD (drop iridescence/SSS at distance).
+
+**Lightweight wrapping-grade tentacle profile** — for "many tentacles wrap the hero" scenarios:
+
+| Param | Hero-grade | Wrapping-grade |
+|---|---|---|
+| Particles | 32 | 12 |
+| PBD iterations | 8 | 4 |
+| Constraints | distance, bending, target, anchor, collision, friction, attachment | distance, bending, anchor, collision (no friction-in-iteration loop) |
+| Tentacle↔tentacle (Type 7) | yes | **no** (wrappers pass through each other) |
+| Orifice interaction | yes | no |
+| Bulger contributions | yes | no |
+| Mesh tessellation | 16 × 24 | 8 × 12 |
+| Sleep aggressively | optional | mandatory |
+
+A wrapper costs ~25–35% of a hero-grade tentacle. Acceptable budget shifts to ~12–18 wrappers + 2 leaders simultaneously active.
+
+**Role swap is not free.** Promoting a wrapper to a leader (or demoting) requires constraint-stack rebuild — type-7 spatial hash registration, friction-iteration enable, bulger registration, orifice eligibility flip. For static role assignment per encounter this never pays. For dynamic role swap mid-encounter, expect a few hundred microseconds and a one-tick visible discontinuity. Don't author swaps in hot loops; if a chorus tentacle needs to become a leader mid-encounter, fade it out and spawn a fresh leader instead.
+
+**Mass-wrap encounter pattern: leaders + chorus.**
+
+- **2–4 TentacleTech leaders** physically grab and constrain the hero (bilateral compliance, friction, asymmetry, orifice work, bus events).
+- **Surrounding mass of Tenticles tubes** (visual chorus) anchored to environment geometry, attracted to hero silhouette via voxelized SDF (`docs/tenticles/Tenticles_design.md` §1.7), with curl noise. Cannot apply force — purely visual mass.
+- **Termination trick:** place a few Tenticles tube tips near the leader contact points so the eye reads the whole tangle as one mass.
+- **Bus coupling stays at user level.** Tenticles does **not** subscribe to `StimulusBus`. User-level GDScript glue reads the bus and writes Tenticles' public params (curl-noise amplitude, attractor radius, etc.). Tenticles remains self-contained per its existing scope boundary (`docs/tenticles/Tenticles_design.md` §0).
+
+Hard scope boundary unchanged: Tenticles never collides with, attaches to, or applies force to the hero. Anything that touches the hero physically is TentacleTech.
+
 ---
 
 ## 13. Phase plan
@@ -1537,6 +2049,10 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 - **Ring runaway:** hard clamp on `current_radius` prevents spring from pushing past anatomical limits. Velocity zeroed at clamp.
 - **Attachment slip compounding:** slip accumulates; after `max_slip_from_original` drift, detach entirely rather than re-anchor further.
 - **PhysicalBone3D scale bug** (existing Godot bug): tentacle root must remain at scale 1. Document in setup.
+- **Suspension tentacles must be anchored to environment geometry, not to another character's ragdoll bone.** Hero gravity transmitted through a single Marionette joint (typically the lumbar) exceeds the active-ragdoll torque budget and produces visible jitter or collapse. Anchor to ceiling / wall / static level mesh. Unrelated to the tentacle chain itself, which transmits force fine through PBD distance + anchor constraints.
+- **Suspension requires a girth differential, not just compression.** A smooth shaft compressed past the rim transmits no radial reaction force into the chain — the rim is kinematic, contact projection only fires when a particle is geometrically inside the deformed rim. Suspensions must use a tentacle with a knot, bulb, ridge, or other girth differential straddling the rim. Author scenarios accordingly.
+- **No `accept_penetration`-style hard refusal levers exist.** If a scenario seems to need one, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. See §1.
+- **Glancing-approach rejection is not modeled.** Currently rings are 8 discrete radial bones; a glancing tentacle slides along whatever rim geometry that produces. A future revision that builds a connected ring-cylinder surface for type-2 collision will let glancing approaches slide off naturally; until then, accept and absorb glancing approaches via the soft-physics path.
 
 **What not to do:**
 - Don't use `MeshDataTool` in hot paths

@@ -23,13 +23,18 @@ If you find older design docs (fragmented main plan, interaction detail, collisi
 - Ragdoll snapshot (once per tick) with surface material tags
 - Orifice system: 8-direction ring bones with spring-damper, EntryInteraction with persistent hysteretic state, bilateral compliance, multi-tentacle support (cap 3)
 - Jaw orifice: hinge joint dynamics with muscular closure, hard anatomical limit, `jaw_relaxation` modulation
-- Bulger system: uniform array (max 32), spring-damper per bulger, both internal (penetration) and external (contact) sources
+- Bulger system: capsule uniform arrays (max 64; `bulgers_a[64]` + `bulgers_b[64]`), spring-damper per bulger, priority tiers (Storage / Internal / Transient), both internal (penetration) and external (contact) sources
 - GPU spline-skinning vertex shader with 3-layer deformation stack (mesh detail × girth_scale × asymmetry)
 - Auto-baked girth texture from mesh geometry (no manual Curve authoring)
 - Stimulus Bus: events (ring buffer), continuous channels, modulation channels (bidirectional)
 - Body area abstraction (20–30 regions per hero, not per-bone)
 - Mechanical sound emission (physics-driven, not character voice)
 - Fluid strand spawning on separation
+- Storage chains, oviposition, birthing (§6.8–6.9)
+- Transient `ContractionPulse` primitive with named pattern emitters (orgasm, gag reflex, pain expulsion, refusal spasm, knot engulf — §6.10), autonomous `appetite`
+- `RhythmSyncedProbe` modifier on `Tentacle` — locks tip drive to `Marionette.body_rhythm_phase` (§6.11; see Marionette P7.10)
+- Reaction-on-host-bone closure (§6.3) — radial + axial-wedge + type-2 friction reciprocal applied to the orifice's `host_bone`; closes the third-law loop on the rim side and is what makes suspension physically realized
+- `TentacleMesh` as a `PrimitiveMesh` subclass + modifier model with `Ring` / `Vertex` / `Mask` kernels (§10.2a / §10.2b)
 
 ### Out-of-scope
 - Reaction system, emotion states, facial expressions → Reverie
@@ -109,6 +114,12 @@ You are a sub-Claude scoped to this extension. The repo's top-level Claude (star
 - **Ring bones use spring-damper dynamics,** not direct position assignment.
 - **Bulgers have spring-damper state** for both position and radius.
 - **Stimulus bus is bidirectional.** Physics writes events + continuous state; Reverie writes modulation.
+- **Soft physics over scripted levers** (§1 design principle, added 2026-04-27). No `accept_penetration` boolean, no `min_approach_angle_cos` gate, no per-pattern event types. If a behavior can't be expressed via stiffness, friction, grip, damage, or a modulation channel, the fix is the physics — not a hard reject. Boolean rejects in particular get used everywhere a designer doesn't want to tune the physics; do not introduce them.
+- **Per-direction quantities use `_per_dir[d]`** (canonical, established in §6.2). The `_per_ring[r]` aliases used in earlier drafts are retired; do not reintroduce them.
+- **Axial-wedge math uses the normalized form** `-p × drds_outward / sqrt(1 + drds_outward²)` (= `-p × sin θ`), not `tan(local_taper)` and not the unnormalized `-p × drds_outward` linearization. The normalized form is bounded by `p` at near-vertical flanges; the others blow up at exactly the geometry that matters most. `drds_outward` is gradient w.r.t. distance traveled along `+entry_axis`, derived from intrinsic `dr/ds` by the sign of `dot(t_hat, entry_axis)` (§6.3).
+- **Type-2 friction reciprocals do NOT route per-particle to a ragdoll bone.** They sum into `EI.tangential_friction_per_dir[d]` (§6.2) and the §6.3 reaction-on-host-bone pass routes them to `host_bone`. Type-1 routing rule (§4.3) does not apply to type-2 contacts.
+- **`ContractionPulse` is atomic.** No `count`, no `interval`. Repeating patterns are sugar at the emitter level — patterns queue lists of atomic pulses; the per-tick code never sees `count` or `interval` (§6.10).
+- **`body_rhythm_phase` lives on `Marionette`** (P7.10), not on `Tentacle`. `RhythmSyncedProbe` reads it via the configured `marionette_path` and never integrates its own clock.
 
 ## What not to do
 

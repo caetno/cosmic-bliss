@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://6aiwfeehqct0"
+path="res://.godot/imported/hello_world.glsl-2eda6f5bd7e3a1a75676e6774f784f69.res"
+
+[deps]
+
+source_file="res://addons/tenticles/shaders/sim/hello_world.glsl"
+dest_files=["res://.godot/imported/hello_world.glsl-2eda6f5bd7e3a1a75676e6774f784f69.res"]
+
+[params]
+

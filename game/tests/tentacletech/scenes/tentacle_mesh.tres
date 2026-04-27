@@ -1,0 +1,8 @@
+[gd_resource type="PrimitiveMesh" script_class="TentacleMesh" format=3 uid="uid://dmgk2vcwctwqo"]
+
+[ext_resource type="Script" uid="uid://b4efdj0crogwg" path="res://addons/tentacletech/scripts/procedural/tentacle_feature.gd" id="1_4t7u2"]
+[ext_resource type="Script" uid="uid://qsyfs86h8wms" path="res://addons/tentacletech/scripts/procedural/tentacle_mesh.gd" id="2_faxlv"]
+
+[resource]
+script = ExtResource("2_faxlv")
+metadata/_custom_type_script = "uid://qsyfs86h8wms"
