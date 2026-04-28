@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
@@ -86,6 +87,9 @@ void Tentacle::set_particle_count(int p_count) {
 	if (p_count < 2) p_count = 2;
 	if (p_count == particle_count) return;
 	particle_count = p_count;
+	// Recompute segment_length from the assigned mesh's length BEFORE the
+	// rebuild so the freshly-laid chain uses the right per-segment rest.
+	_apply_mesh_length_to_segment_length();
 	rebuild_chain();
 }
 int Tentacle::get_particle_count() const { return particle_count; }
@@ -151,6 +155,26 @@ void Tentacle::set_asymmetry_recovery_rate(float p_r) {
 }
 float Tentacle::get_asymmetry_recovery_rate() const {
 	return solver.is_valid() ? solver->get_asymmetry_recovery_rate() : PBDSolver::DEFAULT_ASYMMETRY_RECOVERY_RATE;
+}
+
+void Tentacle::set_base_angular_velocity_limit(float p_omega) {
+	if (solver.is_valid()) solver->set_base_angular_velocity_limit(p_omega);
+}
+float Tentacle::get_base_angular_velocity_limit() const {
+	return solver.is_valid() ? solver->get_base_angular_velocity_limit() : PBDSolver::DEFAULT_BASE_ANGULAR_VELOCITY_LIMIT;
+}
+
+void Tentacle::set_rigid_base_count(int p_count) {
+	if (solver.is_valid()) solver->set_rigid_base_count(p_count);
+	// Re-issue the anchor so the newly-pinned particles snap to the
+	// captured local offsets immediately, without waiting for the next
+	// transform-changed notification.
+	if (solver.is_valid() && solver->has_anchor()) {
+		solver->set_anchor(solver->get_anchor_particle_index(), solver->get_anchor_transform());
+	}
+}
+int Tentacle::get_rigid_base_count() const {
+	return solver.is_valid() ? solver->get_rigid_base_count() : 1;
 }
 
 void Tentacle::rebuild_chain() {
@@ -337,6 +361,7 @@ void Tentacle::set_tentacle_mesh(const Ref<Mesh> &p_mesh) {
 					callable_mp(this, &Tentacle::_on_tentacle_mesh_changed));
 		}
 	}
+	_apply_mesh_length_to_segment_length();
 }
 Ref<Mesh> Tentacle::get_tentacle_mesh() const { return tentacle_mesh; }
 
@@ -373,6 +398,30 @@ void Tentacle::_pull_baked_girth_from_mesh() {
 
 void Tentacle::_on_tentacle_mesh_changed() {
 	_pull_baked_girth_from_mesh();
+	_apply_mesh_length_to_segment_length();
+}
+
+void Tentacle::_apply_mesh_length_to_segment_length() {
+	if (tentacle_mesh.is_null()) {
+		return;
+	}
+	if (particle_count < 2) {
+		return;
+	}
+	// Stock Mesh primitives don't have a `length` property — get() returns
+	// NIL, so we leave segment_length untouched. TentacleMesh exposes
+	// `length` as an @export float.
+	Variant raw_len = tentacle_mesh->get("length");
+	Variant::Type t = raw_len.get_type();
+	if (t != Variant::FLOAT && t != Variant::INT) {
+		return;
+	}
+	float mesh_len = (float)raw_len;
+	if (mesh_len <= 0.0f) {
+		return;
+	}
+	float new_seg = mesh_len / (float)(particle_count - 1);
+	set_segment_length(new_seg);
 }
 
 void Tentacle::set_mesh_arc_axis(int p_axis) {
@@ -461,6 +510,44 @@ Array Tentacle::get_spline_frames(int p_count) const {
 
 void Tentacle::update_render_data() {
 	_update_spline_data_texture();
+}
+
+void Tentacle::set_draw_gizmo(bool p_enabled) {
+	if (draw_gizmo == p_enabled) return;
+	draw_gizmo = p_enabled;
+	if (draw_gizmo) {
+		_spawn_debug_overlay();
+	} else {
+		_despawn_debug_overlay();
+	}
+}
+
+bool Tentacle::get_draw_gizmo() const { return draw_gizmo; }
+
+void Tentacle::_spawn_debug_overlay() {
+	if (debug_overlay != nullptr) return;
+	const String path = "res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd";
+	ResourceLoader *rl = ResourceLoader::get_singleton();
+	if (rl == nullptr || !rl->exists(path)) {
+		return;
+	}
+	Ref<Script> script = rl->load(path);
+	if (script.is_null()) {
+		return;
+	}
+	Node3D *overlay = memnew(Node3D);
+	overlay->set_script(script);
+	overlay->set_name("DebugGizmoOverlay");
+	overlay->set("tentacle", this);
+	add_child(overlay, false, Node::INTERNAL_MODE_FRONT);
+	debug_overlay = overlay;
+}
+
+void Tentacle::_despawn_debug_overlay() {
+	if (debug_overlay == nullptr) return;
+	remove_child(debug_overlay);
+	debug_overlay->queue_free();
+	debug_overlay = nullptr;
 }
 
 void Tentacle::_ensure_mesh_instance() {
@@ -682,6 +769,12 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bending_stiffness"), &Tentacle::get_bending_stiffness);
 	ClassDB::bind_method(D_METHOD("set_asymmetry_recovery_rate", "rate"), &Tentacle::set_asymmetry_recovery_rate);
 	ClassDB::bind_method(D_METHOD("get_asymmetry_recovery_rate"), &Tentacle::get_asymmetry_recovery_rate);
+	ClassDB::bind_method(D_METHOD("set_base_angular_velocity_limit", "omega"), &Tentacle::set_base_angular_velocity_limit);
+	ClassDB::bind_method(D_METHOD("get_base_angular_velocity_limit"), &Tentacle::get_base_angular_velocity_limit);
+	ClassDB::bind_method(D_METHOD("set_rigid_base_count", "count"), &Tentacle::set_rigid_base_count);
+	ClassDB::bind_method(D_METHOD("get_rigid_base_count"), &Tentacle::get_rigid_base_count);
+	ClassDB::bind_method(D_METHOD("set_draw_gizmo", "enabled"), &Tentacle::set_draw_gizmo);
+	ClassDB::bind_method(D_METHOD("get_draw_gizmo"), &Tentacle::get_draw_gizmo);
 
 	ClassDB::bind_method(D_METHOD("set_target", "world_pos"), &Tentacle::set_target);
 	ClassDB::bind_method(D_METHOD("clear_target"), &Tentacle::clear_target);
@@ -757,4 +850,12 @@ void Tentacle::_bind_methods() {
 			"set_bending_stiffness", "get_bending_stiffness");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "asymmetry_recovery_rate", PROPERTY_HINT_RANGE, "0.0,10.0,0.01,or_greater"),
 			"set_asymmetry_recovery_rate", "get_asymmetry_recovery_rate");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "base_angular_velocity_limit", PROPERTY_HINT_RANGE, "0.0,20.0,0.01,or_greater"),
+			"set_base_angular_velocity_limit", "get_base_angular_velocity_limit");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "rigid_base_count", PROPERTY_HINT_RANGE, "1,8,1,or_greater"),
+			"set_rigid_base_count", "get_rigid_base_count");
+
+	ADD_GROUP("Debug", "");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),
+			"set_draw_gizmo", "get_draw_gizmo");
 }

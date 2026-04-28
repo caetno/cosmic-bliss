@@ -42,6 +42,9 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 	target_active = false;
 	target_particle_index = -1;
 	target_position = Vector3();
+
+	rigid_base_count = 1;
+	rigid_base_local_offsets.assign(1, Vector3());
 }
 
 int PBDSolver::get_particle_count() const {
@@ -60,6 +63,7 @@ void PBDSolver::tick(float p_dt) {
 	}
 	predict(p_dt);
 	iterate();
+	apply_base_angular_clamp(p_dt);
 	finalize(p_dt);
 }
 
@@ -83,28 +87,26 @@ void PBDSolver::predict(float p_dt) {
 void PBDSolver::iterate() {
 	int n = (int)particles.size();
 	for (int iter = 0; iter < iteration_count; iter++) {
-		// 1. Distance constraints (segment length).
-		for (int i = 0; i + 1 < n; i++) {
-			tentacletech::constraints::project_distance(
-					particles[i], particles[i + 1],
-					rest_lengths[i], distance_stiffness);
-		}
-		// 2. Bending (chord-length form, stable for low stiffness).
+		// 1. Bending first (chord-length form, stable for low stiffness).
+		// High bending_stiffness pushes the chain back toward its rest
+		// curvature each iteration, so the pose-pulls below have to fight
+		// the bending term — which is what makes `bending_stiffness`
+		// visibly affect chain rigidity even when a behavior driver is
+		// writing pose targets every tick.
 		for (int i = 0; i + 2 < n; i++) {
 			tentacletech::constraints::project_bending(
 					particles[i], particles[i + 1], particles[i + 2],
 					rest_bending_chord_lengths[i], bending_stiffness);
 		}
-		// 3. Target-pull (soft) — single-particle, AI / behavior intent.
+		// 2. Soft target-pulls — both the single AI/behavior tip target and
+		// the distributed multi-particle pose targets. Applied after
+		// bending so they have the last word on shape (modulated by their
+		// own stiffness), and before distance below so they can't violate
+		// segment-length integrity.
 		if (target_active && target_particle_index >= 0 && target_particle_index < n) {
 			tentacletech::constraints::project_target_pull(
 					particles[target_particle_index], target_position, target_stiffness);
 		}
-		// 3.5. Pose targets — distributed multi-particle pull, used by the
-		// behavior layer to write a full-body muscular pose. Composes
-		// additively with the single target-pull above; the iteration loop
-		// reconciles the two via the same projection operator so a curl
-		// pose and a tip target don't fight each other in unexpected ways.
 		{
 			int pose_n = pose_target_indices.size();
 			const int *pose_idx = pose_target_indices.ptr();
@@ -117,6 +119,14 @@ void PBDSolver::iterate() {
 						particles[idx], pose_pos[k], pose_stf[k]);
 			}
 		}
+		// 3. Distance constraints (segment length). Hard physics — runs
+		// last among shape constraints so segments never end up stretched
+		// or compressed by pose pulls.
+		for (int i = 0; i + 1 < n; i++) {
+			tentacletech::constraints::project_distance(
+					particles[i], particles[i + 1],
+					rest_lengths[i], distance_stiffness);
+		}
 		// 4. Collision normals — Phase 4.
 		// 5. Friction tangential — Phase 4.
 		// 6. Anchor last so it overrides any earlier violation.
@@ -125,6 +135,59 @@ void PBDSolver::iterate() {
 					particles[anchor_particle_index], anchor_xform);
 		}
 	}
+}
+
+void PBDSolver::apply_base_angular_clamp(float p_dt) {
+	if (base_angular_velocity_limit <= 0.0f) {
+		return;
+	}
+	if (!anchor_active) {
+		return;
+	}
+	int n = (int)particles.size();
+	int anchor_idx = anchor_particle_index;
+	if (anchor_idx < 0 || anchor_idx >= n) {
+		return;
+	}
+	int neighbor_idx = anchor_idx + 1;
+	if (neighbor_idx >= n) {
+		neighbor_idx = anchor_idx - 1;
+	}
+	if (neighbor_idx < 0 || neighbor_idx >= n) {
+		return;
+	}
+	TentacleParticle &np = particles[neighbor_idx];
+	if (np.inv_mass <= 0.0f) {
+		return;
+	}
+	Vector3 anchor_pos = particles[anchor_idx].position;
+	Vector3 old_offset = np.prev_position - anchor_pos;
+	Vector3 new_offset = np.position - anchor_pos;
+	float old_len = old_offset.length();
+	float new_len = new_offset.length();
+	if (old_len < 1e-6f || new_len < 1e-6f) {
+		return;
+	}
+	Vector3 old_dir = old_offset / old_len;
+	Vector3 new_dir = new_offset / new_len;
+	float cos_angle = old_dir.dot(new_dir);
+	if (cos_angle > 1.0f) cos_angle = 1.0f;
+	if (cos_angle < -1.0f) cos_angle = -1.0f;
+	float angle = Math::acos(cos_angle);
+	float max_angle = base_angular_velocity_limit * p_dt;
+	if (angle <= max_angle) {
+		return;
+	}
+	Vector3 axis = old_dir.cross(new_dir);
+	float axis_len = axis.length();
+	if (axis_len < 1e-6f) {
+		// Old and new are (anti-)collinear; rotation axis is undefined. Snap
+		// the radial extent only — leaves the direction unchanged.
+		return;
+	}
+	axis = axis / axis_len;
+	Vector3 clamped_dir = old_dir.rotated(axis, max_angle);
+	np.position = anchor_pos + clamped_dir * new_len;
 }
 
 void PBDSolver::finalize(float p_dt) {
@@ -247,6 +310,12 @@ void PBDSolver::set_asymmetry_recovery_rate(float p_r) {
 }
 float PBDSolver::get_asymmetry_recovery_rate() const { return asymmetry_recovery_rate; }
 
+void PBDSolver::set_base_angular_velocity_limit(float p_omega) {
+	if (p_omega < 0.0f) p_omega = 0.0f;
+	base_angular_velocity_limit = p_omega;
+}
+float PBDSolver::get_base_angular_velocity_limit() const { return base_angular_velocity_limit; }
+
 // -- Anchor -----------------------------------------------------------------
 
 void PBDSolver::set_anchor(int p_idx, const Transform3D &p_xform) {
@@ -265,6 +334,23 @@ void PBDSolver::set_anchor(int p_idx, const Transform3D &p_xform) {
 	particles[p_idx].inv_mass = 0.0f;
 	particles[p_idx].position = p_xform.origin;
 	particles[p_idx].prev_position = p_xform.origin;
+
+	// Apply the rigid-base block: every particle in [0, rigid_base_count)
+	// snaps to the anchor's frame via its stored local offset and stays
+	// pinned (inv_mass = 0). The primary anchor particle was just placed at
+	// the transform origin above; the other rigid particles ride along.
+	int rigid_n = rigid_base_count;
+	if (rigid_n > n) rigid_n = n;
+	if (rigid_n > (int)rigid_base_local_offsets.size()) {
+		rigid_n = (int)rigid_base_local_offsets.size();
+	}
+	for (int k = 0; k < rigid_n; k++) {
+		if (k == p_idx) continue;
+		Vector3 world = p_xform.xform(rigid_base_local_offsets[k]);
+		particles[k].inv_mass = 0.0f;
+		particles[k].position = world;
+		particles[k].prev_position = world;
+	}
 }
 
 void PBDSolver::clear_anchor() {
@@ -280,6 +366,32 @@ void PBDSolver::clear_anchor() {
 bool PBDSolver::has_anchor() const { return anchor_active; }
 int PBDSolver::get_anchor_particle_index() const { return anchor_particle_index; }
 Transform3D PBDSolver::get_anchor_transform() const { return anchor_xform; }
+
+void PBDSolver::set_rigid_base_count(int p_count) {
+	int n = (int)particles.size();
+	if (p_count < 1) p_count = 1;
+	if (p_count > n) p_count = n;
+	int old_count = rigid_base_count;
+
+	// Capture local offsets for the new rigid range relative to the current
+	// anchor frame (or world, if no anchor is set yet — same effect since
+	// the scene-construction path lays particles in the anchor's frame).
+	Transform3D inv = anchor_active ? anchor_xform.affine_inverse() : Transform3D();
+	rigid_base_local_offsets.assign((size_t)p_count, Vector3());
+	for (int k = 0; k < p_count; k++) {
+		rigid_base_local_offsets[k] = inv.xform(particles[k].position);
+		particles[k].inv_mass = 0.0f;
+	}
+	// Restore mobility for particles that are no longer rigid.
+	for (int k = p_count; k < old_count && k < n; k++) {
+		// Skip the primary anchor — it has its own pin lifecycle.
+		if (anchor_active && k == anchor_particle_index) continue;
+		particles[k].inv_mass = 1.0f;
+	}
+	rigid_base_count = p_count;
+}
+
+int PBDSolver::get_rigid_base_count() const { return rigid_base_count; }
 
 // -- Target pull ------------------------------------------------------------
 
@@ -371,6 +483,9 @@ float PBDSolver::get_particle_inv_mass(int i) const {
 void PBDSolver::set_particle_inv_mass(int i, float w) {
 	if (i < 0 || i >= (int)particles.size()) return;
 	if (w < 0.0f) w = 0.0f;
+	// Rigid base block stays pinned regardless of external writes — the
+	// behavior layer's mass_from_girth pass would otherwise unpin them.
+	if (i < rigid_base_count) return;
 	particles[i].inv_mass = w;
 }
 
@@ -475,12 +590,17 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bending_stiffness"), &PBDSolver::get_bending_stiffness);
 	ClassDB::bind_method(D_METHOD("set_asymmetry_recovery_rate", "rate"), &PBDSolver::set_asymmetry_recovery_rate);
 	ClassDB::bind_method(D_METHOD("get_asymmetry_recovery_rate"), &PBDSolver::get_asymmetry_recovery_rate);
+	ClassDB::bind_method(D_METHOD("set_base_angular_velocity_limit", "omega"), &PBDSolver::set_base_angular_velocity_limit);
+	ClassDB::bind_method(D_METHOD("get_base_angular_velocity_limit"), &PBDSolver::get_base_angular_velocity_limit);
 
 	ClassDB::bind_method(D_METHOD("set_anchor", "particle_index", "world_xform"), &PBDSolver::set_anchor);
 	ClassDB::bind_method(D_METHOD("clear_anchor"), &PBDSolver::clear_anchor);
 	ClassDB::bind_method(D_METHOD("has_anchor"), &PBDSolver::has_anchor);
 	ClassDB::bind_method(D_METHOD("get_anchor_particle_index"), &PBDSolver::get_anchor_particle_index);
 	ClassDB::bind_method(D_METHOD("get_anchor_transform"), &PBDSolver::get_anchor_transform);
+
+	ClassDB::bind_method(D_METHOD("set_rigid_base_count", "count"), &PBDSolver::set_rigid_base_count);
+	ClassDB::bind_method(D_METHOD("get_rigid_base_count"), &PBDSolver::get_rigid_base_count);
 
 	ClassDB::bind_method(D_METHOD("set_target", "particle_index", "world_pos", "stiffness"), &PBDSolver::set_target);
 	ClassDB::bind_method(D_METHOD("clear_target"), &PBDSolver::clear_target);

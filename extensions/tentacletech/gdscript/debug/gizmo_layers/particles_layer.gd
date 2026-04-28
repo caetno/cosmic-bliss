@@ -22,6 +22,11 @@ func _ready() -> void:
 	_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_material.no_depth_test = true
 	_material.disable_receive_shadows = true
+	# Queue with transparents (which draw after opaques) and bump priority
+	# to the max so the mesh can never paint over us. Without this, the
+	# tentacle mesh's opaque pass would render after this layer and hide it.
+	_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_material.render_priority = RenderingServer.MATERIAL_RENDER_PRIORITY_MAX
 	material_override = _material
 
 	# Render in world space — the layer doesn't follow the parent overlay's

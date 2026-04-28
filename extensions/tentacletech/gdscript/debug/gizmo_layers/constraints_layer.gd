@@ -37,6 +37,8 @@ func _ready() -> void:
 	# Lines with vertex alpha need transparency mode; alpha=0.6 on bending arcs
 	# only takes effect with this enabled.
 	_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	# Render after the tentacle mesh so it can't paint over us.
+	_material.render_priority = RenderingServer.MATERIAL_RENDER_PRIORITY_MAX
 	material_override = _material
 
 	top_level = true

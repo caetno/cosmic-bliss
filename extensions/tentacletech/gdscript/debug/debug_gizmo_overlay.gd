@@ -1,4 +1,5 @@
 @tool
+class_name TentacleDebugOverlay
 extends Node3D
 ## TentacleTech debug gizmo overlay (Phase 2).
 ##

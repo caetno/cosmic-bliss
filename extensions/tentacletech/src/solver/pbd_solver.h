@@ -34,6 +34,7 @@ public:
 	static constexpr float DEFAULT_BENDING_STIFFNESS = 0.5f;
 	static constexpr float DEFAULT_ASYMMETRY_RECOVERY_RATE = 3.0f;
 	static constexpr float DEFAULT_TARGET_STIFFNESS = 0.2f;
+	static constexpr float DEFAULT_BASE_ANGULAR_VELOCITY_LIMIT = 0.0f;
 	static constexpr float ASYMMETRY_MAGNITUDE_CAP = 0.5f;
 
 	PBDSolver();
@@ -70,6 +71,13 @@ public:
 	void set_asymmetry_recovery_rate(float p_rate);
 	float get_asymmetry_recovery_rate() const;
 
+	// Caps the angular speed (rad/sec) of the dynamic particle adjacent to
+	// the anchor as it sweeps around the anchor over one tick. 0 disables.
+	// Pose pulls and inertia from the rest of the chain can otherwise whip
+	// the base around faster than the bending term alone resists.
+	void set_base_angular_velocity_limit(float p_omega);
+	float get_base_angular_velocity_limit() const;
+
 	// Anchor (hard pin) ----------------------------------------------------
 
 	void set_anchor(int p_particle_index, const godot::Transform3D &p_xform);
@@ -77,6 +85,16 @@ public:
 	bool has_anchor() const;
 	int get_anchor_particle_index() const;
 	godot::Transform3D get_anchor_transform() const;
+
+	// Rigid base — pin the first N particles to the anchor transform so the
+	// base segment(s) can't tilt under pose pulls or gravity. Count = 1 (the
+	// default) matches the legacy single-particle anchor. Bumping to 2 fixes
+	// the segment 0→1 orientation; 3 also locks 1→2, etc. Local offsets are
+	// captured from the current particle positions (relative to anchor_xform)
+	// at the time set_rigid_base_count is called, then re-applied each time
+	// set_anchor receives a new transform.
+	void set_rigid_base_count(int p_count);
+	int get_rigid_base_count() const;
 
 	// Target pull (soft) ---------------------------------------------------
 
@@ -147,10 +165,16 @@ private:
 	float distance_stiffness = DEFAULT_DISTANCE_STIFFNESS;
 	float bending_stiffness = DEFAULT_BENDING_STIFFNESS;
 	float asymmetry_recovery_rate = DEFAULT_ASYMMETRY_RECOVERY_RATE;
+	float base_angular_velocity_limit = DEFAULT_BASE_ANGULAR_VELOCITY_LIMIT;
 
 	bool anchor_active = false;
 	int anchor_particle_index = -1;
 	godot::Transform3D anchor_xform;
+
+	// Rigid base — particles [0, rigid_base_count) follow anchor_xform via
+	// stored local offsets. Sized whenever set_rigid_base_count is called.
+	int rigid_base_count = 1;
+	std::vector<godot::Vector3> rigid_base_local_offsets;
 
 	bool target_active = false;
 	int target_particle_index = -1;
@@ -167,6 +191,7 @@ private:
 
 	void predict(float p_dt);
 	void iterate();
+	void apply_base_angular_clamp(float p_dt);
 	void finalize(float p_dt);
 };
 

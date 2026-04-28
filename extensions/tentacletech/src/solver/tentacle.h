@@ -61,6 +61,10 @@ public:
 	float get_bending_stiffness() const;
 	void set_asymmetry_recovery_rate(float p_rate);
 	float get_asymmetry_recovery_rate() const;
+	void set_base_angular_velocity_limit(float p_omega);
+	float get_base_angular_velocity_limit() const;
+	void set_rigid_base_count(int p_count);
+	int get_rigid_base_count() const;
 
 	// Target pull (soft, on the tip particle by default).
 	void set_target(const godot::Vector3 &p_world_pos);
@@ -168,6 +172,14 @@ public:
 	// Each Dictionary has { position, tangent, normal, binormal } as Vector3.
 	godot::Array get_spline_frames(int p_count) const;
 
+	// Debug gizmo toggle — spawns an internal `TentacleDebugOverlay` child
+	// that draws particle crosses, segment stretch, bending arcs, anchor,
+	// and target-pull on top of the mesh (no_depth_test + max render
+	// priority). Works in editor and at runtime. Setting false destroys
+	// the overlay.
+	void set_draw_gizmo(bool p_enabled);
+	bool get_draw_gizmo() const;
+
 	// Repacks the spline data texture from current solver state. Normally
 	// invoked from _physics_process; exposed publicly so tests and editor
 	// preview hooks can drive the update path without forcing a chain
@@ -216,13 +228,29 @@ private:
 
 	godot::Ref<godot::ImageTexture> rest_girth_texture;
 
+	// Debug gizmo overlay — auto-spawned as an internal child when
+	// draw_gizmo is true. Loads
+	// `res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd` via
+	// ResourceLoader and assigns `tentacle = this`. Internal-mode keeps it
+	// out of the .tscn file.
+	bool draw_gizmo = false;
+	godot::Node3D *debug_overlay = nullptr;
+
 	void _allocate_render_resources();
 	void _ensure_mesh_instance();
+	void _spawn_debug_overlay();
+	void _despawn_debug_overlay();
 	void _refresh_mesh_instance();
 	void _refresh_shader_material_bindings();
 	void _update_spline_data_texture();
 	// Used by the TentacleMesh duck-type integration (§10.2).
 	void _pull_baked_girth_from_mesh();
+	// If the assigned mesh exposes a `length` property (TentacleMesh does;
+	// stock primitives don't), set segment_length so the chain spans exactly
+	// that length when straight: segment_length = mesh.length / (n - 1).
+	// No-op for meshes without a `length` property — segment_length stays
+	// user-driven in that case.
+	void _apply_mesh_length_to_segment_length();
 	void _on_tentacle_mesh_changed();
 };
 
