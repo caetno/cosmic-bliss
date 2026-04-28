@@ -1083,6 +1083,8 @@ Both reference the same `insertion_curve` shape; only the offset differs.
 
 **Why on `Marionette`'s clock and not the tentacle's own.** Per `docs/marionette/Marionette_plan.md` P7.10, `body_rhythm_phase` is integrated, not recomputed; a frequency change driven by Reverie produces a smooth tempo change in the body and in any tentacle locked to it. A tentacle with its own clock would phase-snap when arousal shifts. Mandatory.
 
+**Note on shared clock consumers.** The same `Marionette.body_rhythm_phase` integrated by Marionette is now also read by `MarionetteComposer` (`docs/marionette/Marionette_plan.md` P10) for predictive engagement pumping of the body. `RhythmSyncedProbe` and the composer therefore share a single phase variable for body-tentacle rhythm coupling — no replication. Frequency is set via the frequency-compliance pipeline (`docs/architecture/Reverie_Planning.md §3.5`): Reverie writes the per-mindset compliance curve, the composer slew-limits `body_rhythm_frequency` toward `body_rhythm_frequency_proposed`; both consumers see the same value automatically.
+
 ---
 
 ## 7. Hero skin bulges
