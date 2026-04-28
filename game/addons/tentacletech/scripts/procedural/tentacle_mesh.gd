@@ -106,6 +106,7 @@ var _baked: bool = false
 var _cached_arrays: Array = []
 var _cached_custom0: PackedFloat32Array = PackedFloat32Array()
 var _cached_girth_texture: ImageTexture = null
+var _cached_girth_samples: PackedFloat32Array = PackedFloat32Array()
 var _cached_rest_length: float = 0.0
 var _cached_peak_radius: float = 0.0
 var _cached_channels_used: PackedStringArray = PackedStringArray()
@@ -162,6 +163,7 @@ func _ensure_baked() -> void:
 
 	var girth_data: Dictionary = _GirthBaker.bake_from_mesh_data(ctx.vertices, 2)
 	_cached_girth_texture = girth_data.get("girth_texture")
+	_cached_girth_samples = girth_data.get("girth_samples", PackedFloat32Array())
 	_cached_rest_length = girth_data.get("rest_length", length)
 	_cached_peak_radius = girth_data.get("peak_radius", base_radius)
 	_cached_channels_used = ctx.channels_used_array()
@@ -228,6 +230,14 @@ func bake() -> Dictionary:
 func get_baked_girth_texture() -> ImageTexture:
 	_ensure_baked()
 	return _cached_girth_texture
+
+
+# Raw 256-bin normalized girth samples (values in [0,1] against peak
+# radius) — same data uploaded to the texture. Exposed because
+# headless consumers cannot read pixels back from the GPU-side texture.
+func get_baked_girth_samples() -> PackedFloat32Array:
+	_ensure_baked()
+	return _cached_girth_samples
 
 
 func get_baked_rest_length() -> float:

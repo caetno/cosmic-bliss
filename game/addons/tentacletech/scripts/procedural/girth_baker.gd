@@ -24,12 +24,19 @@ const RAW_BINS := 128 # quantization step before resampling
 ##
 ## Returns a Dictionary:
 ##   "girth_texture" — ImageTexture, FORMAT_RF, 256×1, values in [0,1]
+##   "girth_samples" — PackedFloat32Array, the 256 normalized samples
+##                     written into the texture; exposed so headless
+##                     consumers (mass distribution, tests) can read the
+##                     curve without round-tripping through the renderer
+##                     (ImageTexture.get_image() returns dummy bytes
+##                     under --headless)
 ##   "rest_length"   — float, max - min along arc axis
 ##   "peak_radius"   — float, the max radial extent before normalization
 ##   "min_radius"    — float, the min radial extent observed
 static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2) -> Dictionary:
 	var result := {
 		"girth_texture": null,
+		"girth_samples": PackedFloat32Array(),
 		"rest_length": 0.0,
 		"peak_radius": 0.0,
 		"min_radius": 0.0,
@@ -39,6 +46,7 @@ static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2
 		# Degenerate input — return a uniform 1.0 placeholder so consumers
 		# don't fall back to undefined behavior.
 		result["girth_texture"] = _make_uniform_texture(1.0)
+		result["girth_samples"] = _make_uniform_samples(1.0)
 		return result
 
 	var axis_idx: int = clampi(p_axis, 0, 2)
@@ -54,6 +62,7 @@ static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2
 	var rest_length: float = arc_max - arc_min
 	if rest_length < 1e-6:
 		result["girth_texture"] = _make_uniform_texture(1.0)
+		result["girth_samples"] = _make_uniform_samples(1.0)
 		return result
 
 	# Pass 2: bucket by quantized arc, track max radial extent per bucket.
@@ -89,6 +98,7 @@ static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2
 		# No usable data — should be impossible with n >= 2 unless all
 		# vertices are degenerate. Bail to placeholder.
 		result["girth_texture"] = _make_uniform_texture(1.0)
+		result["girth_samples"] = _make_uniform_samples(1.0)
 		return result
 
 	# Extend the first/last filled values to the array ends.
@@ -122,6 +132,7 @@ static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2
 		if raw_max[i] < min_r: min_r = raw_max[i]
 	if peak <= 0.0:
 		result["girth_texture"] = _make_uniform_texture(1.0)
+		result["girth_samples"] = _make_uniform_samples(1.0)
 		return result
 
 	# Resample to RESAMPLED_BINS via linear interpolation along the raw
@@ -147,6 +158,7 @@ static func bake_from_mesh_data(p_positions: PackedVector3Array, p_axis: int = 2
 
 	var img := Image.create_from_data(RESAMPLED_BINS, 1, false, Image.FORMAT_RF, bytes)
 	result["girth_texture"] = ImageTexture.create_from_image(img)
+	result["girth_samples"] = floats
 	result["rest_length"] = rest_length
 	result["peak_radius"] = peak
 	result["min_radius"] = min_r
@@ -175,3 +187,11 @@ static func _make_uniform_texture(p_value: float) -> ImageTexture:
 		bytes.encode_float(i * 4, p_value)
 	var img := Image.create_from_data(RESAMPLED_BINS, 1, false, Image.FORMAT_RF, bytes)
 	return ImageTexture.create_from_image(img)
+
+
+static func _make_uniform_samples(p_value: float) -> PackedFloat32Array:
+	var s := PackedFloat32Array()
+	s.resize(RESAMPLED_BINS)
+	for i in RESAMPLED_BINS:
+		s[i] = p_value
+	return s
