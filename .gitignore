@@ -21,3 +21,8 @@ game/addons/*/bin/
 
 # Large test-scene assets (preserved locally; not tracked — may move to LFS later)
 tools/test_scenes/marionette_kasumi/
+game/assets/
+game/tests/marionette/kasumi/
+
+# Local-only scenes (per-machine scratch; suffix `_local`)
+game/scenes/*_local.tscn
