@@ -9,7 +9,7 @@ Monorepo containing a Godot 4.6 game (Cosmic Bliss) and its supporting GDExtensi
 | **Cosmic Bliss** | The game | GDScript, resources, scenes |
 | **TentacleTech** | PBD tentacle physics, orifices, collision, stimulus bus | C++ core (PBD hot path) + GDScript glue |
 | **Tenticles** | GPU particle system (NGP-style) | C++ core (RenderingDevice-driven, no GDScript hot path possible) |
-| **Marionette** | Active ragdoll solver (SPD) | GDScript (SPD hot-path C++ port held in reserve — triggered only by profiling evidence at realistic character count) |
+| **Marionette** | Active ragdoll solver (SPD), cost-weighted IK composer | C++ core (SPD, composer, IK, strain, engagement) + GDScript glue (resources, authoring-time solvers, gizmos, editor tooling) |
 | **Reverie** | Reaction system, facial rig, state/mindset, expressions | GDScript (future) |
 | **dpg** | Legacy DPG port (broken) — kept as reference for spline math salvage | Being phased out |
 
