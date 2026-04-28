@@ -4,55 +4,80 @@ extends EditorNode3DGizmoPlugin
 
 # Authoring-time gizmo for visually verifying P2.6 (archetype solvers) and
 # P2.7 (muscle frame builder) on a Marionette node before the rest of Phase 2
-# lands (no permutation matcher, no editor button, no shipped BoneProfile).
+# lands (no editor button, no shipped BoneProfile yet).
 #
 # Activates whenever a Marionette node is selected. Reads the SkeletonProfile
 # off the assigned BoneProfile. Renders:
 #
-#   1. The muscle frame as a large RGB tripod at the hip midpoint.
-#         red   = character right
-#         green = up (toward head)
-#         blue  = forward (mesh-facing)
+#   1. The muscle frame as a large CMY tripod at the hip midpoint.
+#         magenta = character right
+#         cyan    = up (toward head)
+#         white   = forward (mesh-facing)
 #
-#   2. A small RGB tripod at each bone's world-rest origin showing the per-
-#      bone solver target (P2.6 output) in anatomical convention:
+#   2. A medium saturated RGB tripod at each bone's world-rest origin:
 #         red   = flex axis     (anatomical +X)
 #         green = along-bone    (anatomical +Y)
 #         blue  = abduction     (anatomical +Z)
 #
-# All coordinates are in the Marionette node's local frame (the gizmo system
-# applies the node's global transform). The SkeletonProfile reference poses
-# accumulate in the same frame, so we draw points directly without any
-# further conversion.
+#      Bones whose rest basis fails the permutation matcher (P2.8) draw all
+#      three axes in saturated yellow.
+#
+# Materials: one per color, registered in _init with stable names. We do
+# *not* route color through add_lines's `modulate` parameter — in 4.6 that
+# argument doesn't reliably tint lines on top-rendered materials.
 
 const _MUSCLE_FRAME_LENGTH: float = 0.4
-const _BONE_FRAME_LENGTH: float = 0.08
 
-const _MAT_MUSCLE_X: StringName = &"muscle_right"
-const _MAT_MUSCLE_Y: StringName = &"muscle_up"
-const _MAT_MUSCLE_Z: StringName = &"muscle_forward"
-const _MAT_BONE_X: StringName = &"bone_flex"
-const _MAT_BONE_Y: StringName = &"bone_along"
-const _MAT_BONE_Z: StringName = &"bone_abduction"
+# Per-bone tripod arms scale with bone-to-child distance, so a humerus
+# gets a long tripod and a finger phalanx a short one — matching Godot's
+# default Skeleton3D gizmo's bone-length-aware drawing. Constants below
+# are the multiplier (fraction of bone length) and a floor in meters so
+# zero-length terminal bones still draw something visible.
+const _BONE_FRAME_FRACTION: float = 0.45
+const _BONE_FRAME_MIN: float = 0.02
+
+# Material names — also serve as the per-color keys.
+const _MAT_MUSCLE_X: StringName = &"muscle_x"
+const _MAT_MUSCLE_Y: StringName = &"muscle_y"
+const _MAT_MUSCLE_Z: StringName = &"muscle_z"
+const _MAT_BONE_X: StringName = &"bone_x"
+const _MAT_BONE_Y: StringName = &"bone_y"
+const _MAT_BONE_Z: StringName = &"bone_z"
+const _MAT_BONE_UNMATCHED: StringName = &"bone_unmatched"
+
+# Muscle-frame palette (CMY-ish; chosen to contrast with the default
+# Skeleton3D gizmo's orange-yellow fan).
+const _COL_MUSCLE_X: Color = Color(1.0, 0.0, 0.7)   # magenta
+const _COL_MUSCLE_Y: Color = Color(0.0, 1.0, 1.0)   # cyan
+const _COL_MUSCLE_Z: Color = Color(1.0, 1.0, 1.0)   # white
+
+# Per-bone palette (saturated RGB for XYZ-gizmo convention).
+const _COL_BONE_X: Color = Color(1.0, 0.0, 0.05)
+const _COL_BONE_Y: Color = Color(0.0, 1.0, 0.1)
+const _COL_BONE_Z: Color = Color(0.1, 0.3, 1.0)
+
+# Unmatched bones (P2.8 below threshold).
+const _COL_BONE_UNMATCHED: Color = Color(1.0, 1.0, 0.0)
 
 
 func _init() -> void:
-	# All materials are unshaded with depth test disabled (on_top=true) so the
-	# tripods stay readable on top of Godot's default Skeleton3D bone gizmo.
-	# Muscle-frame colors are pure-saturated; per-bone colors are tinted lighter
-	# so the body-level frame stays the dominant cue.
-	create_material(_MAT_MUSCLE_X, Color(1.0, 0.15, 0.15), false, true)
-	create_material(_MAT_MUSCLE_Y, Color(0.15, 1.0, 0.15), false, true)
-	create_material(_MAT_MUSCLE_Z, Color(0.2, 0.4, 1.0), false, true)
-	create_material(_MAT_BONE_X, Color(1.0, 0.55, 0.55), false, true)
-	create_material(_MAT_BONE_Y, Color(0.55, 1.0, 0.55), false, true)
-	create_material(_MAT_BONE_Z, Color(0.55, 0.7, 1.0), false, true)
+	# on_top=true on every material so our lines win against the default
+	# Skeleton3D gizmo's bone fan. EditorNode3DGizmoPlugin.create_material
+	# signature: (name, color, billboard, on_top, use_vertex_color).
+	create_material(_MAT_MUSCLE_X, _COL_MUSCLE_X, false, true)
+	create_material(_MAT_MUSCLE_Y, _COL_MUSCLE_Y, false, true)
+	create_material(_MAT_MUSCLE_Z, _COL_MUSCLE_Z, false, true)
+	create_material(_MAT_BONE_X, _COL_BONE_X, false, true)
+	create_material(_MAT_BONE_Y, _COL_BONE_Y, false, true)
+	create_material(_MAT_BONE_Z, _COL_BONE_Z, false, true)
+	create_material(_MAT_BONE_UNMATCHED, _COL_BONE_UNMATCHED, false, true)
 
 
-# Render after Godot's built-in Skeleton3D gizmo (default priority -1.0) so
-# our lines win the z-fight when on_top is on.
-func _get_priority() -> float:
-	return 1.0
+# Render after Godot's built-in Skeleton3D gizmo so our lines win the
+# z-fight when on_top is on. EditorNode3DGizmoPlugin._get_priority returns
+# int in 4.6 (negative = drawn earlier; we want a higher number).
+func _get_priority() -> int:
+	return 1
 
 
 func _get_gizmo_name() -> String:
@@ -111,18 +136,19 @@ static func _hip_midpoint_from_rests(world_rests: Dictionary[StringName, Transfo
 	return Vector3.ZERO
 
 
+func _draw_line(gizmo: EditorNode3DGizmo, a: Vector3, b: Vector3, mat_name: StringName) -> void:
+	gizmo.add_lines(_segment(a, b), get_material(mat_name, gizmo))
+
+
 func _draw_muscle_frame(
 		gizmo: EditorNode3DGizmo,
 		origin: Vector3,
 		frame: MuscleFrame,
 		direction_basis: Basis) -> void:
 	var len: float = _MUSCLE_FRAME_LENGTH
-	gizmo.add_lines(_segment(origin, origin + (direction_basis * frame.right) * len),
-		get_material(_MAT_MUSCLE_X, gizmo))
-	gizmo.add_lines(_segment(origin, origin + (direction_basis * frame.up) * len),
-		get_material(_MAT_MUSCLE_Y, gizmo))
-	gizmo.add_lines(_segment(origin, origin + (direction_basis * frame.forward) * len),
-		get_material(_MAT_MUSCLE_Z, gizmo))
+	_draw_line(gizmo, origin, origin + (direction_basis * frame.right) * len, _MAT_MUSCLE_X)
+	_draw_line(gizmo, origin, origin + (direction_basis * frame.up) * len, _MAT_MUSCLE_Y)
+	_draw_line(gizmo, origin, origin + (direction_basis * frame.forward) * len, _MAT_MUSCLE_Z)
 
 
 func _draw_per_bone_targets(
@@ -158,29 +184,50 @@ func _draw_per_bone_targets(
 		# else first listed child, else nudge along bone-local +Y.
 		var child_world: Transform3D = bone_world
 		var explicit_tail: StringName = profile.get_bone_tail(i)
+		var has_real_child: bool = false
 		if explicit_tail != &"" and world_rests.has(explicit_tail):
 			child_world = world_rests[explicit_tail]
+			has_real_child = true
 		elif first_child.has(bone_name) and world_rests.has(first_child[bone_name]):
 			child_world = world_rests[first_child[bone_name]]
+			has_real_child = true
 		else:
-			# Synthesize: bone origin + small step along bone-local +Y.
-			var nudge: Vector3 = bone_world.basis.y.normalized() * _BONE_FRAME_LENGTH
+			# Synthesize: bone origin + small step along bone-local +Y. Only
+			# used to give the solver a non-degenerate hint; tripod length
+			# falls back to _BONE_FRAME_MIN below.
+			var nudge: Vector3 = bone_world.basis.y.normalized() * _BONE_FRAME_MIN
 			if nudge == Vector3.ZERO:
-				nudge = Vector3(0.0, _BONE_FRAME_LENGTH, 0.0)
+				nudge = Vector3(0.0, _BONE_FRAME_MIN, 0.0)
 			child_world = bone_world
 			child_world.origin = bone_world.origin + nudge
 
 		var is_left_side: bool = String(bone_name).begins_with("Left")
 		var basis: Basis = MarionetteArchetypeSolverDispatch.solve(
 				archetype, bone_world, child_world, muscle_frame, is_left_side)
+
+		# Run the permutation matcher (P2.8) against the bone's rest basis
+		# so the gizmo can flag bones whose rest frame can't cleanly hold
+		# the anatomical target. ROOT and FIXED bones aren't subject to SPD
+		# limits, so we don't paint them yellow even if their permutation is
+		# weak (the score is meaningless for those archetypes).
+		var unmatched: bool = false
+		if archetype != BoneArchetype.Type.ROOT and archetype != BoneArchetype.Type.FIXED:
+			var match_result: MarionettePermutationMatch = MarionettePermutationMatcher.find_match(
+					bone_world.basis, basis)
+			unmatched = not match_result.matched
+
 		var origin: Vector3 = source_to_local * bone_world.origin
-		var len: float = _BONE_FRAME_LENGTH
-		gizmo.add_lines(_segment(origin, origin + (direction_basis * basis.x) * len),
-			get_material(_MAT_BONE_X, gizmo))
-		gizmo.add_lines(_segment(origin, origin + (direction_basis * basis.y) * len),
-			get_material(_MAT_BONE_Y, gizmo))
-		gizmo.add_lines(_segment(origin, origin + (direction_basis * basis.z) * len),
-			get_material(_MAT_BONE_Z, gizmo))
+		# Bone length drives tripod size — long bones (humerus, femur) get
+		# long arms; phalanges get short ones. Floor at _BONE_FRAME_MIN so
+		# zero-length terminal bones still render.
+		var bone_length: float = (child_world.origin - bone_world.origin).length() if has_real_child else 0.0
+		var len: float = max(bone_length * _BONE_FRAME_FRACTION, _BONE_FRAME_MIN)
+		var mat_x: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_X
+		var mat_y: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_Y
+		var mat_z: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_Z
+		_draw_line(gizmo, origin, origin + (direction_basis * basis.x) * len, mat_x)
+		_draw_line(gizmo, origin, origin + (direction_basis * basis.y) * len, mat_y)
+		_draw_line(gizmo, origin, origin + (direction_basis * basis.z) * len, mat_z)
 
 
 static func _segment(a: Vector3, b: Vector3) -> PackedVector3Array:

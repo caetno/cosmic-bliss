@@ -148,13 +148,22 @@ static func compute_skeleton_world_rests(
 		else:
 			skeleton_global[i] = skeleton_global[parent] * local
 
-	# Then translate via BoneMap.
+	# Resolve each profile bone to a skeleton bone index, with a two-step lookup:
+	#   1. Use the BoneMap to translate profile name -> rig name (e.g. ARP's
+	#      "thigh_stretch.l" pre-retarget). Try find_bone on that.
+	#   2. If the mapped name isn't on the skeleton (or no mapping was set),
+	#      fall back to looking up the profile name directly. This covers
+	#      Godot's import-time retargeting workflow, which renames source
+	#      bones to canonical SkeletonProfile names — leaving the BoneMap's
+	#      pre-retarget mappings stale but the skeleton self-describing.
 	for i in range(profile.bone_size):
 		var profile_bone_name: StringName = profile.get_bone_name(i)
 		var rig_bone_name: StringName = bone_map.get_skeleton_bone_name(profile_bone_name)
-		if rig_bone_name == &"":
-			continue
-		var rig_bone_idx: int = skeleton.find_bone(rig_bone_name)
+		var rig_bone_idx: int = -1
+		if rig_bone_name != &"":
+			rig_bone_idx = skeleton.find_bone(rig_bone_name)
+		if rig_bone_idx < 0:
+			rig_bone_idx = skeleton.find_bone(profile_bone_name)
 		if rig_bone_idx < 0:
 			continue
 		result[profile_bone_name] = skeleton_global[rig_bone_idx]

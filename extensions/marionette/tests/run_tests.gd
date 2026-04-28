@@ -30,6 +30,26 @@ func _init() -> void:
 		_test_hinge_solver_bent_knee,
 		_test_clavicle_solver_flex_axis_is_up,
 		_test_spine_solver_along_is_up,
+		_test_permutation_matcher_candidate_count,
+		_test_permutation_matcher_identity,
+		_test_permutation_matcher_known_swap,
+		_test_permutation_matcher_known_roll,
+		_test_permutation_matcher_pathological,
+		_test_permutation_matcher_negative_axes,
+		_test_permutation_matcher_with_rest_rotation,
+		_test_permutation_matcher_writes_into_entry,
+		_test_rom_defaults_shoulder_vs_hip,
+		_test_rom_defaults_elbow_vs_knee,
+		_test_rom_defaults_wrist_vs_ankle,
+		_test_rom_defaults_phalanx_fallback,
+		_test_rom_defaults_zero_for_root_and_fixed,
+		_test_bone_profile_generator_humanoid_counts,
+		_test_bone_profile_generator_archetypes_match_defaults,
+		_test_bone_profile_generator_handedness,
+		_test_bone_profile_generator_rom_spot_checks,
+		_test_bone_profile_generator_root_and_fixed_left_at_defaults,
+		_test_bone_profile_generator_idempotent,
+		_test_bone_profile_generator_null_skeleton_profile_errors,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -574,3 +594,477 @@ func _test_spine_solver_along_is_up() -> bool:
 	if not basis.x.is_equal_approx(Vector3.RIGHT):
 		return _fail("spine_along", "flex=%s, expected (1,0,0)" % basis.x)
 	return _ok("spine_solver_along_is_up")
+
+
+# ---------- Permutation matcher (P2.8) ----------
+
+func _test_permutation_matcher_candidate_count() -> bool:
+	# Chiral octahedral group has exactly 24 proper-rotation signed permutations.
+	# Improper (det = -1) reflections are excluded by construction.
+	var n := MarionettePermutationMatcher.candidate_count()
+	if n != 24:
+		return _fail("matcher_candidate_count", "got %d, expected 24" % n)
+	return _ok("permutation_matcher_candidate_count")
+
+
+func _test_permutation_matcher_identity() -> bool:
+	# Aligned target on aligned rest basis: best permutation is the identity
+	# permutation, score = 1.
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, Basis.IDENTITY)
+	if r.flex_axis != SignedAxis.Axis.PLUS_X:
+		return _fail("matcher_identity", "flex=%d, expected PLUS_X" % int(r.flex_axis))
+	if r.along_bone_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_identity", "along=%d, expected PLUS_Y" % int(r.along_bone_axis))
+	if r.abduction_axis != SignedAxis.Axis.PLUS_Z:
+		return _fail("matcher_identity", "abd=%d, expected PLUS_Z" % int(r.abduction_axis))
+	if not is_equal_approx(r.score, 1.0):
+		return _fail("matcher_identity", "score=%f, expected 1.0" % r.score)
+	if not r.matched:
+		return _fail("matcher_identity", "expected matched=true")
+	return _ok("permutation_matcher_identity")
+
+
+func _test_permutation_matcher_known_swap() -> bool:
+	# Target columns: flex=+Y, along=+X, abd=-Z. Det = +1 (proper rotation).
+	# Rest = identity, so the matcher must recover the swap exactly.
+	var target := Basis(Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(0, 0, -1))
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target)
+	if r.flex_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_swap", "flex=%d, expected PLUS_Y" % int(r.flex_axis))
+	if r.along_bone_axis != SignedAxis.Axis.PLUS_X:
+		return _fail("matcher_swap", "along=%d, expected PLUS_X" % int(r.along_bone_axis))
+	if r.abduction_axis != SignedAxis.Axis.MINUS_Z:
+		return _fail("matcher_swap", "abd=%d, expected MINUS_Z" % int(r.abduction_axis))
+	if not is_equal_approx(r.score, 1.0):
+		return _fail("matcher_swap", "score=%f, expected 1.0" % r.score)
+	if not r.matched:
+		return _fail("matcher_swap", "expected matched=true")
+	return _ok("permutation_matcher_known_swap")
+
+
+func _test_permutation_matcher_known_roll() -> bool:
+	# Target = identity rotated 30° around +Y. Per-axis dot is cos(30°) for X/Z
+	# and 1 for Y; min = cos(30°) ≈ 0.866 — above default 0.85 → matched.
+	var target := Basis(Vector3.UP, deg_to_rad(30.0))
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target)
+	if r.flex_axis != SignedAxis.Axis.PLUS_X:
+		return _fail("matcher_roll", "flex=%d, expected PLUS_X" % int(r.flex_axis))
+	if r.along_bone_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_roll", "along=%d, expected PLUS_Y" % int(r.along_bone_axis))
+	if r.abduction_axis != SignedAxis.Axis.PLUS_Z:
+		return _fail("matcher_roll", "abd=%d, expected PLUS_Z" % int(r.abduction_axis))
+	var expected: float = cos(deg_to_rad(30.0))
+	if absf(r.score - expected) > 1.0e-5:
+		return _fail("matcher_roll", "score=%f, expected %f" % [r.score, expected])
+	if not r.matched:
+		return _fail("matcher_roll", "30° roll should still match at default threshold")
+	return _ok("permutation_matcher_known_roll")
+
+
+func _test_permutation_matcher_pathological() -> bool:
+	# 45° roll: best score = cos(45°) ≈ 0.707, below 0.85 → matched=false.
+	var target := Basis(Vector3.UP, deg_to_rad(45.0))
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target)
+	if r.matched:
+		return _fail("matcher_pathological", "45° roll should not match at default threshold")
+	if r.score >= 0.85:
+		return _fail("matcher_pathological", "score=%f, expected < 0.85" % r.score)
+	if r.score <= 0.0:
+		return _fail("matcher_pathological", "score=%f should be positive" % r.score)
+	# Lowering the threshold below the score should flip matched to true,
+	# proving the threshold is honored independently of the score search.
+	var r_loose := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target, 0.5)
+	if not r_loose.matched:
+		return _fail("matcher_pathological",
+			"at threshold 0.5 score %f should still match" % r_loose.score)
+	return _ok("permutation_matcher_pathological")
+
+
+func _test_permutation_matcher_negative_axes() -> bool:
+	# Target = (-X, +Y, -Z), determinant = +1 (two flips, proper rotation).
+	# Matcher must pick (MINUS_X, PLUS_Y, MINUS_Z).
+	var target := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1))
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target)
+	if r.flex_axis != SignedAxis.Axis.MINUS_X:
+		return _fail("matcher_neg", "flex=%d, expected MINUS_X" % int(r.flex_axis))
+	if r.along_bone_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_neg", "along=%d, expected PLUS_Y" % int(r.along_bone_axis))
+	if r.abduction_axis != SignedAxis.Axis.MINUS_Z:
+		return _fail("matcher_neg", "abd=%d, expected MINUS_Z" % int(r.abduction_axis))
+	if not is_equal_approx(r.score, 1.0):
+		return _fail("matcher_neg", "score=%f, expected 1.0" % r.score)
+	return _ok("permutation_matcher_negative_axes")
+
+
+func _test_permutation_matcher_with_rest_rotation() -> bool:
+	# Rest basis = identity rotated 90° around +Y:
+	#   rest.x = (0,0,-1), rest.y = (0,1,0), rest.z = (1,0,0).
+	# Target = identity. To produce target.x=(1,0,0) from rest, pick the
+	# bone-local axis whose rest-rotated vector is (1,0,0): that's +Z (since
+	# rest * +Z = rest.z = (1,0,0)). Likewise along=+Y, abd=-X.
+	var rest := Basis(Vector3.UP, deg_to_rad(90.0))
+	var r := MarionettePermutationMatcher.find_match(rest, Basis.IDENTITY)
+	if r.flex_axis != SignedAxis.Axis.PLUS_Z:
+		return _fail("matcher_rest_rot", "flex=%d, expected PLUS_Z" % int(r.flex_axis))
+	if r.along_bone_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_rest_rot", "along=%d, expected PLUS_Y" % int(r.along_bone_axis))
+	if r.abduction_axis != SignedAxis.Axis.MINUS_X:
+		return _fail("matcher_rest_rot", "abd=%d, expected MINUS_X" % int(r.abduction_axis))
+	if not is_equal_approx(r.score, 1.0):
+		return _fail("matcher_rest_rot", "score=%f, expected 1.0" % r.score)
+	return _ok("permutation_matcher_with_rest_rotation")
+
+
+func _test_permutation_matcher_writes_into_entry() -> bool:
+	# write_into() copies the resolved permutation into a BoneEntry, leaving
+	# other fields (archetype, ROM, mass) untouched.
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.HINGE
+	entry.mass_fraction = 0.05
+	entry.rom_min = Vector3(-1.0, -1.0, -1.0)
+	entry.rom_max = Vector3(1.0, 1.0, 1.0)
+
+	var target := Basis(Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(0, 0, -1))
+	var r := MarionettePermutationMatcher.find_match(Basis.IDENTITY, target)
+	r.write_into(entry)
+
+	if entry.flex_axis != SignedAxis.Axis.PLUS_Y:
+		return _fail("matcher_write", "flex_axis not copied")
+	if entry.along_bone_axis != SignedAxis.Axis.PLUS_X:
+		return _fail("matcher_write", "along_bone_axis not copied")
+	if entry.abduction_axis != SignedAxis.Axis.MINUS_Z:
+		return _fail("matcher_write", "abduction_axis not copied")
+	if entry.archetype != BoneArchetype.Type.HINGE:
+		return _fail("matcher_write", "archetype clobbered")
+	if not is_equal_approx(entry.mass_fraction, 0.05):
+		return _fail("matcher_write", "mass_fraction clobbered")
+	if entry.rom_max != Vector3(1.0, 1.0, 1.0):
+		return _fail("matcher_write", "rom_max clobbered")
+	return _ok("permutation_matcher_writes_into_entry")
+
+
+# ---------- ROM defaults (P2.9) ----------
+
+func _test_rom_defaults_shoulder_vs_hip() -> bool:
+	# Both Ball, but distinct ROMs per Marionette_plan P2.9.
+	var shoulder := BoneEntry.new()
+	shoulder.archetype = BoneArchetype.Type.BALL
+	MarionetteRomDefaults.apply(shoulder, &"LeftUpperArm")
+
+	var hip := BoneEntry.new()
+	hip.archetype = BoneArchetype.Type.BALL
+	MarionetteRomDefaults.apply(hip, &"LeftUpperLeg")
+
+	# Shoulder: flex 0..150°, abd 0..150°.
+	if not is_equal_approx(shoulder.rom_min.x, 0.0):
+		return _fail("rom_shoulder", "flex_min=%f, expected 0" % shoulder.rom_min.x)
+	if not is_equal_approx(shoulder.rom_max.x, deg_to_rad(150.0)):
+		return _fail("rom_shoulder", "flex_max=%f, expected 150°" % rad_to_deg(shoulder.rom_max.x))
+	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(150.0)):
+		return _fail("rom_shoulder", "abd_max=%f, expected 150°" % rad_to_deg(shoulder.rom_max.z))
+
+	# Hip: flex -15..100°, abd 0..40°.
+	if not is_equal_approx(hip.rom_min.x, deg_to_rad(-15.0)):
+		return _fail("rom_hip", "flex_min=%f, expected -15°" % rad_to_deg(hip.rom_min.x))
+	if not is_equal_approx(hip.rom_max.x, deg_to_rad(100.0)):
+		return _fail("rom_hip", "flex_max=%f, expected 100°" % rad_to_deg(hip.rom_max.x))
+	if not is_equal_approx(hip.rom_max.z, deg_to_rad(40.0)):
+		return _fail("rom_hip", "abd_max=%f, expected 40°" % rad_to_deg(hip.rom_max.z))
+
+	# The two are not the same set of values.
+	if shoulder.rom_max.is_equal_approx(hip.rom_max):
+		return _fail("rom_shoulder_vs_hip", "shoulder and hip rom_max identical")
+	# Right-side bones get the same magnitude as left (side flip is at solver time).
+	var right_shoulder := BoneEntry.new()
+	right_shoulder.archetype = BoneArchetype.Type.BALL
+	MarionetteRomDefaults.apply(right_shoulder, &"RightUpperArm")
+	if not right_shoulder.rom_max.is_equal_approx(shoulder.rom_max):
+		return _fail("rom_shoulder_vs_hip", "right shoulder rom_max != left shoulder")
+	return _ok("rom_defaults_shoulder_vs_hip")
+
+
+func _test_rom_defaults_elbow_vs_knee() -> bool:
+	var elbow := BoneEntry.new()
+	elbow.archetype = BoneArchetype.Type.HINGE
+	MarionetteRomDefaults.apply(elbow, &"LeftLowerArm")
+	var knee := BoneEntry.new()
+	knee.archetype = BoneArchetype.Type.HINGE
+	MarionetteRomDefaults.apply(knee, &"LeftLowerLeg")
+
+	if not is_equal_approx(elbow.rom_max.x, deg_to_rad(140.0)):
+		return _fail("rom_elbow", "flex_max=%f, expected 140°" % rad_to_deg(elbow.rom_max.x))
+	if not is_equal_approx(knee.rom_max.x, deg_to_rad(135.0)):
+		return _fail("rom_knee", "flex_max=%f, expected 135°" % rad_to_deg(knee.rom_max.x))
+	# Both should have zero rotation and abduction (1-DOF hinge).
+	if not is_equal_approx(elbow.rom_max.y, 0.0) or not is_equal_approx(elbow.rom_max.z, 0.0):
+		return _fail("rom_elbow", "expected zero rot/abd, got rot=%f abd=%f" %
+			[elbow.rom_max.y, elbow.rom_max.z])
+	if not is_equal_approx(knee.rom_max.y, 0.0) or not is_equal_approx(knee.rom_max.z, 0.0):
+		return _fail("rom_knee", "expected zero rot/abd")
+	return _ok("rom_defaults_elbow_vs_knee")
+
+
+func _test_rom_defaults_wrist_vs_ankle() -> bool:
+	var wrist := BoneEntry.new()
+	wrist.archetype = BoneArchetype.Type.SADDLE
+	MarionetteRomDefaults.apply(wrist, &"LeftHand")
+	var ankle := BoneEntry.new()
+	ankle.archetype = BoneArchetype.Type.SADDLE
+	MarionetteRomDefaults.apply(ankle, &"LeftFoot")
+
+	# Wrist: flex ±55, abd -15..35.
+	if not is_equal_approx(wrist.rom_min.x, deg_to_rad(-55.0)):
+		return _fail("rom_wrist", "flex_min=%f" % rad_to_deg(wrist.rom_min.x))
+	if not is_equal_approx(wrist.rom_max.z, deg_to_rad(35.0)):
+		return _fail("rom_wrist", "abd_max=%f" % rad_to_deg(wrist.rom_max.z))
+
+	# Ankle: flex -15..40, abd ±20.
+	if not is_equal_approx(ankle.rom_min.x, deg_to_rad(-15.0)):
+		return _fail("rom_ankle", "flex_min=%f" % rad_to_deg(ankle.rom_min.x))
+	if not is_equal_approx(ankle.rom_max.x, deg_to_rad(40.0)):
+		return _fail("rom_ankle", "flex_max=%f" % rad_to_deg(ankle.rom_max.x))
+	if not is_equal_approx(ankle.rom_max.z, deg_to_rad(20.0)):
+		return _fail("rom_ankle", "abd_max=%f" % rad_to_deg(ankle.rom_max.z))
+
+	# Saddles have zero medial rotation (only flex + abd are powered axes).
+	if not is_equal_approx(wrist.rom_max.y, 0.0):
+		return _fail("rom_wrist", "rotation should be zero on saddle")
+	return _ok("rom_defaults_wrist_vs_ankle")
+
+
+func _test_rom_defaults_phalanx_fallback() -> bool:
+	# Distal phalanx (HINGE that's not elbow/knee) → 0..80°.
+	var distal := BoneEntry.new()
+	distal.archetype = BoneArchetype.Type.HINGE
+	MarionetteRomDefaults.apply(distal, &"LeftIndexDistal")
+	if not is_equal_approx(distal.rom_max.x, deg_to_rad(80.0)):
+		return _fail("rom_phalanx", "distal flex_max=%f, expected 80°" % rad_to_deg(distal.rom_max.x))
+
+	# Proximal phalanx (SADDLE that's not Hand/Foot) → 0..90° flex, ±20° abd.
+	var proximal := BoneEntry.new()
+	proximal.archetype = BoneArchetype.Type.SADDLE
+	MarionetteRomDefaults.apply(proximal, &"LeftIndexProximal")
+	if not is_equal_approx(proximal.rom_max.x, deg_to_rad(90.0)):
+		return _fail("rom_phalanx", "proximal flex_max=%f, expected 90°" % rad_to_deg(proximal.rom_max.x))
+	if not is_equal_approx(proximal.rom_max.z, deg_to_rad(20.0)):
+		return _fail("rom_phalanx", "proximal abd_max=%f, expected 20°" % rad_to_deg(proximal.rom_max.z))
+
+	# The single "LeftToes" hinge bone (no per-toe phalanges in ARP-light rigs)
+	# shares the phalanx ROM by archetype fallback.
+	var toes := BoneEntry.new()
+	toes.archetype = BoneArchetype.Type.HINGE
+	MarionetteRomDefaults.apply(toes, &"LeftToes")
+	if not is_equal_approx(toes.rom_max.x, deg_to_rad(80.0)):
+		return _fail("rom_phalanx", "Toes block flex_max=%f, expected 80°" % rad_to_deg(toes.rom_max.x))
+	return _ok("rom_defaults_phalanx_fallback")
+
+
+func _test_rom_defaults_zero_for_root_and_fixed() -> bool:
+	# ROOT and FIXED bones aren't SPD-driven; ROM stays zero so any consumer
+	# that accidentally clamps to it produces a no-op rather than a real range.
+	var root := BoneEntry.new()
+	root.archetype = BoneArchetype.Type.ROOT
+	MarionetteRomDefaults.apply(root, &"Hips")
+	if root.rom_min != Vector3.ZERO or root.rom_max != Vector3.ZERO:
+		return _fail("rom_root", "ROOT should yield zero ROM, got min=%s max=%s" %
+			[root.rom_min, root.rom_max])
+
+	var jaw := BoneEntry.new()
+	jaw.archetype = BoneArchetype.Type.FIXED
+	MarionetteRomDefaults.apply(jaw, &"Jaw")
+	if jaw.rom_min != Vector3.ZERO or jaw.rom_max != Vector3.ZERO:
+		return _fail("rom_fixed", "FIXED should yield zero ROM")
+	return _ok("rom_defaults_zero_for_root_and_fixed")
+
+
+# ---------- BoneProfile generator (P2.10) ----------
+
+func _make_humanoid_bone_profile() -> BoneProfile:
+	var skel_profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	var bp := BoneProfile.new()
+	bp.skeleton_profile = skel_profile
+	return bp
+
+
+func _test_bone_profile_generator_humanoid_counts() -> bool:
+	# All 84 bones in MarionetteHumanoidProfile have a default archetype
+	# (verified by _test_humanoid_archetype_map_complete), so the generator
+	# should produce 84 entries with zero skipped. matched + unmatched should
+	# cover every non-ROOT / non-FIXED bone exactly once.
+	var bp := _make_humanoid_bone_profile()
+	var report := BoneProfileGenerator.generate(bp)
+	if report.error != "":
+		return _fail("generator_counts", "error: %s" % report.error)
+	if report.generated != 84:
+		return _fail("generator_counts", "generated=%d, expected 84" % report.generated)
+	if bp.bones.size() != 84:
+		return _fail("generator_counts", "bones.size()=%d, expected 84" % bp.bones.size())
+	if report.skipped != 0:
+		return _fail("generator_counts", "skipped=%d, expected 0 (skipped=%s)" %
+			[report.skipped, report.skipped_bones])
+	# 5 bones are excluded from the SPD pipeline (Root, Hips=ROOT; Jaw, LeftEye,
+	# RightEye=FIXED). 84 - 5 = 79 should pass through the matcher.
+	var spd_driven: int = report.matched + report.unmatched
+	if spd_driven != 79:
+		return _fail("generator_counts",
+			"matched+unmatched=%d, expected 79 (84 - 5 ROOT/FIXED)" % spd_driven)
+	return _ok("generator_humanoid_counts")
+
+
+func _test_bone_profile_generator_archetypes_match_defaults() -> bool:
+	# Every entry's archetype must equal MarionetteArchetypeDefaults' verdict —
+	# the generator is the only thing that *should* be writing this field.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	for bone_name: StringName in bp.bones.keys():
+		var entry: BoneEntry = bp.bones[bone_name]
+		var expected: int = MarionetteArchetypeDefaults.archetype_for_bone(bone_name)
+		if entry.archetype != expected:
+			return _fail("generator_archetypes",
+				"%s: entry.archetype=%d, defaults=%d" % [bone_name, int(entry.archetype), expected])
+	return _ok("generator_archetypes_match_defaults")
+
+
+func _test_bone_profile_generator_handedness() -> bool:
+	# Bones whose name starts with "Left" -> is_left_side=true; "Right" -> false;
+	# centerline (Spine, Head, Hips, Root, ...) -> false.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var checks := {
+		&"LeftUpperArm": true,
+		&"LeftLowerLeg": true,
+		&"LeftIndexProximal": true,
+		&"LeftBigToeDistal": true,
+		&"RightUpperArm": false,
+		&"RightFoot": false,
+		&"RightToe5Intermediate": false,
+		&"Hips": false,
+		&"Spine": false,
+		&"Head": false,
+		&"Jaw": false,
+	}
+	for bone_name: StringName in checks:
+		var want: bool = checks[bone_name]
+		var entry: BoneEntry = bp.bones[bone_name]
+		if entry == null:
+			return _fail("generator_handedness", "%s missing from bones dict" % bone_name)
+		if entry.is_left_side != want:
+			return _fail("generator_handedness",
+				"%s: is_left_side=%s, expected %s" % [bone_name, entry.is_left_side, want])
+	return _ok("generator_handedness")
+
+
+func _test_bone_profile_generator_rom_spot_checks() -> bool:
+	# Sanity-check that ROM defaults reach entries via the full pipeline.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+
+	# Knee: HINGE, flex_max = 135°.
+	var knee: BoneEntry = bp.bones[&"LeftLowerLeg"]
+	if not is_equal_approx(knee.rom_max.x, deg_to_rad(135.0)):
+		return _fail("generator_rom", "LeftLowerLeg flex_max=%f°, expected 135°" %
+			rad_to_deg(knee.rom_max.x))
+
+	# Elbow: HINGE, flex_max = 140°.
+	var elbow: BoneEntry = bp.bones[&"LeftLowerArm"]
+	if not is_equal_approx(elbow.rom_max.x, deg_to_rad(140.0)):
+		return _fail("generator_rom", "LeftLowerArm flex_max=%f°, expected 140°" %
+			rad_to_deg(elbow.rom_max.x))
+
+	# Shoulder: BALL, abd_max = 150° (UpperArm-specific).
+	var shoulder: BoneEntry = bp.bones[&"LeftUpperArm"]
+	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(150.0)):
+		return _fail("generator_rom", "LeftUpperArm abd_max=%f°, expected 150°" %
+			rad_to_deg(shoulder.rom_max.z))
+
+	# Wrist: SADDLE, flex ±55°.
+	var wrist: BoneEntry = bp.bones[&"LeftHand"]
+	if not is_equal_approx(wrist.rom_min.x, deg_to_rad(-55.0)):
+		return _fail("generator_rom", "LeftHand flex_min=%f°, expected -55°" %
+			rad_to_deg(wrist.rom_min.x))
+	if not is_equal_approx(wrist.rom_max.x, deg_to_rad(55.0)):
+		return _fail("generator_rom", "LeftHand flex_max=%f°, expected 55°" %
+			rad_to_deg(wrist.rom_max.x))
+
+	# Index proximal: SADDLE-fallback (saddle that's not Hand/Foot), flex 0..90°.
+	var idx_prox: BoneEntry = bp.bones[&"LeftIndexProximal"]
+	if not is_equal_approx(idx_prox.rom_max.x, deg_to_rad(90.0)):
+		return _fail("generator_rom", "LeftIndexProximal flex_max=%f°, expected 90°" %
+			rad_to_deg(idx_prox.rom_max.x))
+	return _ok("generator_rom_spot_checks")
+
+
+func _test_bone_profile_generator_root_and_fixed_left_at_defaults() -> bool:
+	# ROOT and FIXED bones get an entry but no permutation matcher run, so
+	# their permutation stays at BoneEntry defaults (PLUS_X / PLUS_Y / PLUS_Z)
+	# and ROM stays at zero (MarionetteRomDefaults zeroes them too).
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	for bone_name: StringName in [&"Root", &"Hips", &"Jaw", &"LeftEye", &"RightEye"]:
+		var entry: BoneEntry = bp.bones[bone_name]
+		if entry == null:
+			return _fail("generator_root_fixed", "%s missing" % bone_name)
+		if entry.flex_axis != SignedAxis.Axis.PLUS_X \
+				or entry.along_bone_axis != SignedAxis.Axis.PLUS_Y \
+				or entry.abduction_axis != SignedAxis.Axis.PLUS_Z:
+			return _fail("generator_root_fixed",
+				"%s permutation should be default (matcher skipped), got (%d,%d,%d)" %
+				[bone_name, int(entry.flex_axis), int(entry.along_bone_axis), int(entry.abduction_axis)])
+		if entry.rom_min != Vector3.ZERO or entry.rom_max != Vector3.ZERO:
+			return _fail("generator_root_fixed",
+				"%s ROM should be zero, got min=%s max=%s" % [bone_name, entry.rom_min, entry.rom_max])
+	return _ok("generator_root_and_fixed_left_at_defaults")
+
+
+func _test_bone_profile_generator_idempotent() -> bool:
+	# Regenerating overwrites: both runs produce structurally identical entries
+	# for the same input. Confirms the generator wholesale-replaces rather than
+	# accumulating, and that the pipeline itself is deterministic.
+	var bp := _make_humanoid_bone_profile()
+	var r1 := BoneProfileGenerator.generate(bp)
+	# Snapshot a few fields per bone, then regenerate and compare.
+	var snapshot: Dictionary = {}
+	for bone_name: StringName in bp.bones.keys():
+		var e: BoneEntry = bp.bones[bone_name]
+		snapshot[bone_name] = [int(e.archetype), int(e.flex_axis),
+			int(e.along_bone_axis), int(e.abduction_axis),
+			e.rom_min, e.rom_max, e.is_left_side]
+
+	var r2 := BoneProfileGenerator.generate(bp)
+	if r1.generated != r2.generated:
+		return _fail("generator_idempotent",
+			"generated diverged: r1=%d r2=%d" % [r1.generated, r2.generated])
+	if bp.bones.size() != snapshot.size():
+		return _fail("generator_idempotent",
+			"size diverged: now %d, was %d" % [bp.bones.size(), snapshot.size()])
+	for bone_name: StringName in bp.bones.keys():
+		if not snapshot.has(bone_name):
+			return _fail("generator_idempotent", "new bone after regeneration: %s" % bone_name)
+		var e: BoneEntry = bp.bones[bone_name]
+		var snap: Array = snapshot[bone_name]
+		if int(e.archetype) != snap[0]:
+			return _fail("generator_idempotent", "%s archetype drift" % bone_name)
+		if int(e.flex_axis) != snap[1] or int(e.along_bone_axis) != snap[2] or int(e.abduction_axis) != snap[3]:
+			return _fail("generator_idempotent", "%s permutation drift" % bone_name)
+		if e.rom_min != snap[4] or e.rom_max != snap[5]:
+			return _fail("generator_idempotent", "%s ROM drift" % bone_name)
+		if e.is_left_side != snap[6]:
+			return _fail("generator_idempotent", "%s is_left_side drift" % bone_name)
+	return _ok("generator_idempotent")
+
+
+func _test_bone_profile_generator_null_skeleton_profile_errors() -> bool:
+	# Friendly error rather than a crash when the profile isn't wired up.
+	var bp := BoneProfile.new()
+	var report := BoneProfileGenerator.generate(bp)
+	if report.error == "":
+		return _fail("generator_null_skel", "expected non-empty error message")
+	if report.generated != 0:
+		return _fail("generator_null_skel", "generated=%d, expected 0" % report.generated)
+	if bp.bones.size() != 0:
+		return _fail("generator_null_skel", "bones not empty after error")
+	# Null bone_profile too.
+	var report2 := BoneProfileGenerator.generate(null)
+	if report2.error == "":
+		return _fail("generator_null_skel", "null bone_profile should yield error")
+	return _ok("generator_null_skeleton_profile_errors")
