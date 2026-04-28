@@ -213,6 +213,69 @@ Defaults = identity. Physics works correctly with Reverie absent.
 
 To know what it wrote last tick (for smooth ramping rather than jumping). Also allows external systems (cutscenes, scripted sequences) to override modulation — Reverie sees the override and doesn't fight it.
 
+### 3.4 Engagement vector (write)
+
+Reverie publishes a per-tick **engagement vector** consumed by `MarionetteComposer` (`docs/marionette/Marionette_plan.md` P10.4). It controls *how* the body adds to the rhythm — strength, phase relative to the body's own clock, and decoherence:
+
+```
+engagement_magnitude   ∈ [0, 1]    // how strongly the body adds to the rhythm
+engagement_phase       ∈ (-π, π]   // offset from body_rhythm_phase
+engagement_phase_noise ∈ [0, 1]    // decoherence; high values = phase scrambling
+```
+
+The vector is produced by Reverie's reaction-profile blend: each `ReactionProfile.tres` declares default values; Reverie blends across active mindset states with their distribution weights. The vector lives in a continuous (`magnitude × e^(i × phase)`) disk; the four named modes are regions:
+
+| Mode | Magnitude | Phase | Noise |
+|---|---|---|---|
+| Refuse | high | irrelevant | high (scrambled) |
+| Accept | ~0 | irrelevant | ~0 |
+| Comply | moderate | 0 (phase-locked to displacement) | ~0 |
+| Engage | high | +π/2 (phase-leads displacement → velocity-phase pump) | ~0 |
+
+Mindset → engagement vector mapping is authored in `ReactionProfile.tres`; Reverie does not write joint angles. Marionette's composer consumes the vector and produces the per-bone effort via the predictive engagement pump (P10.6).
+
+### 3.5 Frequency compliance (write)
+
+The player (or any external driver — encounter scripting, AI suitor, etc.) publishes a `body_rhythm_frequency_proposed` value on the Stimulus Bus. Reverie does not pass it through directly. Each mindset state has a `FrequencyComplianceCurve` (`Resource`) defining:
+
+```
+preferred_band: Vector2  // min, max Hz
+compliance_curve: Curve  // 0..1 across freq, peaks inside preferred_band
+df_dt_max: float         // slew rate cap; max d(body_rhythm_frequency)/dt
+```
+
+Reverie computes the active mindset's effective curve as a weighted blend across the mindset distribution. Marionette's composer (P10.9) then lerps `body_rhythm_frequency` toward `proposed` at rate `compliance(proposed) × responsiveness`, capped by `df_dt_max`.
+
+Authored starting points (tunable):
+
+| Mindset | Preferred band | df_dt_max | Notes |
+|---|---|---|---|
+| Calm / Yielding | 0.3–0.6 Hz | 0.2 Hz/s | Slow lock at low rates |
+| Aroused | 0.8–1.5 Hz | 0.5 Hz/s | Fast tracking |
+| Edge / Blissful | 1.5–2.5 Hz | 0.7 Hz/s | Fast but Overwhelmed accumulates if held |
+| Resistant | (compliance ≈ 0 across all freq) | 0.05 Hz/s | Body refuses |
+| Overwhelmed / Dulled | unstable / narrow | 0.1 Hz/s | Tracks briefly, breaks |
+
+This pipeline replaces the prior "Reverie writes `body_rhythm_frequency` directly" sketch in §3.2: Reverie now writes the *curve* (per mindset blend) and the *proposed* frequency goes on the bus from any source; the composer is the lerp/slew owner. The `body_rhythm_frequency` field on `Marionette` is still the read-back value other systems consume.
+
+### 3.6 `body_strain` (continuous channel, read)
+
+Marionette's composer publishes `body_strain ∈ [0, 1]` per tick, computed as the sum of saturation across all SPD-driven joints:
+
+```
+body_strain = clamp(Σ smoothstep(0.7, 1.0, required_torque[j] / max_torque[j])² / N, 0, 1)
+```
+
+Reverie consumes for:
+- Vocal modulation (grunt, breath catch at high values)
+- Facial tension (jaw clench, brow knot blendshapes)
+- Breath rate adjustment (faster when straining)
+- Mindset drift toward Overwhelmed when sustained above threshold for more than a few seconds
+
+Closes the self-regulation loop: high strain → mindset shifts toward Overwhelmed → engagement_magnitude decreases → strain reduces.
+
+Hysteresis (Schmitt-trigger): emit "high strain" when strain > 0.6; emit "strain cleared" only when strain < 0.4. Otherwise Reverie sees flutter at a single threshold.
+
 ## 4. Output surfaces
 
 ### 4.1 Facial expressions
@@ -231,13 +294,15 @@ Reverie's reaction profiles map states to blendshape sets. Blending handles mult
 
 ### 4.2 Active ragdoll pose targets
 
-Reverie writes `BodyAreaModulation.pose_target_offset` and `pose_stiffness_mult`. Marionette (when built) consumes these and drives bones via PD controllers. Until Marionette exists, stubbed with `apply_central_force` on `PhysicalBone3D`s.
+Body postures are not authored as full target poses or as `BodyAreaModulation.pose_target_offset` lerps. They are authored as `PosturePattern` resources (micro-expression per-bone delta maps) and pushed to Marionette's composer as a weighted stack — see §5.5. Marionette (P10.3) sums the stack into the soup's posture-prior cost term, perturbing the rest pose at low weight.
 
-Reaction profiles include pose target offsets:
-- Ecstatic: arch-back offset on spine, relaxed limbs
-- In-pain + Resistant: curl-in offset on torso, stiffened limbs
-- Surrendered: limp offset (all stiffness down), no target
-- Defiant: forward-lean offset on torso, high stiffness
+Reaction profiles select pattern stacks per mindset:
+- Ecstatic: `back_arch.tres` (high), `jaw_slack.tres` (moderate), `hand_grasp.tres` (low)
+- In-pain + Resistant: `toe_curl.tres`, `hand_grasp.tres`, `neck_loll.tres` (negative weight = anti-loll, stiffening)
+- Surrendered: `jaw_slack.tres`, `neck_loll.tres`, `hip_drop_left.tres` + `hip_drop_right.tres`; combined with low `engagement_magnitude` (§3.4) for limp expression
+- Defiant: anti-curl stack + high `engagement_magnitude` with low phase noise → forward-lean reads as posture, not pose target
+
+`pose_stiffness_mult` is no longer the right knob; expression intensity is governed by pattern weights and engagement magnitude. The `BodyAreaModulation` channels remain for non-postural bone-area modulation (e.g., voluntary motion vector), but posture itself flows through the pattern library.
 
 ### 4.3 Vocalization
 
@@ -299,6 +364,57 @@ Authored per body area — static sensitivity value. Genital/nipple regions high
 
 Authored starting mindset vector + default state distribution. Different heroes can have identical physics but react very differently due to different authored baselines.
 
+### 5.5 Posture pattern library
+
+Body postures are not authored as full target poses. They are authored as small per-bone delta maps (`PosturePattern.tres` resources) representing micro-expressions:
+
+```
+# PosturePattern.tres
+name: StringName             # "toe_curl", "back_arch", "jaw_slack", "hand_grasp", "hip_drop_left", ...
+bone_deltas: Dictionary[StringName, Quaternion]
+default_weight_curve: Curve  # optional (e.g. ease-in for slower micro-expressions)
+```
+
+Reverie's reaction profiles point at one or more `PosturePattern` resources with per-mindset weights. Per-tick:
+
+```
+pattern_stack = []
+for each active mindset state with distribution weight m:
+    for each pattern in mindset.posture_patterns:
+        pattern_stack.append((pattern, m × pattern.weight))
+Marionette.set_posture_pattern_weights(pattern_stack)
+```
+
+Marionette's composer (P10.3) consumes the stack as the posture-prior cost term: composer sums weighted bone-deltas across the stack and uses the composed offset as a low-weight target perturbation in the IK soup.
+
+Default starting library: `toe_curl.tres`, `back_arch.tres`, `jaw_slack.tres`, `hand_grasp.tres`, `hip_drop_left.tres`, `hip_drop_right.tres`, `neck_loll.tres`, `eye_roll.tres` (eye_roll lives on the face rig, not body — but pattern files are uniform; both consumers read the same shape).
+
+**Pattern stack ordering matters when patterns conflict.** Two patterns prescribing opposing deltas on the same bone produce a weighted average; the composer's soup will sum and compromise. If a pattern *must* override (e.g., "back arch" overrides a less-specific "spine relax"), give it a much higher weight rather than relying on order.
+
+### 5.6 EngagementProfile resource
+
+Embedded in `ReactionProfile.tres` (per-mindset reaction profile), or stand-alone if useful:
+
+```
+class_name EngagementProfile extends Resource
+@export var magnitude: float = 0.0          # 0..1
+@export var phase: float = 0.0               # -π..π
+@export var phase_noise: float = 0.0         # 0..1
+```
+
+Reverie blends engagement profiles weighted by mindset distribution and writes the resulting vector via `Marionette.set_engagement_vector(...)` (§3.4). The four named modes (Refuse / Accept / Comply / Engage) are regions in this disk, not enum values.
+
+### 5.7 FrequencyComplianceCurve resource
+
+```
+class_name FrequencyComplianceCurve extends Resource
+@export var preferred_band: Vector2          # min, max Hz
+@export var compliance_curve: Curve          # 0..1 across freq domain
+@export var df_dt_max: float = 0.3           # Hz/s slew limit
+```
+
+One per mindset state. Reverie blends across active mindsets and hands the resulting curve to the composer via `Marionette.set_frequency_compliance_curve(...)` (§3.5).
+
 ## 6. The character state → physics feedback loop
 
 Full trace through one scenario (tip-test of an orifice by an exploring tentacle on a blissfully-mad character):
@@ -354,7 +470,7 @@ Not starting yet; rough outline for later:
 3.5. **Phase R3.5 — Attention and gaze.** Implement salience function, attention-target selection with hysteresis, modulation-channel write-out. Verify that Marionette's neck driver and the facial system's eye aim both respond correctly to the attention channel. Test player-control branching by toggling `tentacle_controlled_by` manually and confirming gaze tracks.
 4. **Phase R4 — Shader parameters.** Flushing, sweat, tear tracks. Hero looks alive in response to physics.
 5. **Phase R5 — Vocalization queue.** Basic one-shot lines tied to major events.
-6. **Phase R6 — Pose targets.** When Marionette is ready, drive body postures.
+6. **Phase R6 — Posture patterns + engagement vector + frequency compliance.** When Marionette's composer (P10) is ready, drive body postures via the pattern library (§5.5), publish the engagement vector (§3.4 / §5.6), and write the active frequency-compliance curve (§3.5 / §5.7). Reverie does not write joint angles; the composer turns the per-tick triple (`engagement_vector`, `pattern_stack`, `frequency_compliance_curve`) into per-bone effort. Read `body_strain` (§3.6) and feed back into mindset drift toward Overwhelmed.
 6.5. **Phase R6.5 — Peristalsis and ritual reactions.** Wire Reverie to write `peristalsis_*` channels based on state (e.g., high `Surrendered` + event pressure → expulsion waves; high `Anxious` → retention waves). Implement reaction profile branches for `PayloadDeposited` / `PayloadExpelled` / `RingTransitStart` / `RingTransitEnd` (distinct vocalizations and facial beats). Test with Scenario 12 and Scenario 13 setups.
 7. **Phase R7 — Mindset dynamics.** Long-term accumulators affecting state gains.
 8. **Phase R8 — Polish and authoring tools.** Reaction profile editor, mindset tuning.
