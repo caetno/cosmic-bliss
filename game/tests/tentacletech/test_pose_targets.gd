@@ -168,8 +168,12 @@ func test_pose_targets_per_particle_stiffness() -> bool:
 	var positions: PackedVector3Array = t.get_particle_positions()
 	var stiff_err: float = (positions[stiff_idx] - stiff_target).length()
 	var soft_err: float = (positions[soft_idx] - soft_target).length()
-	# Stiff converges much tighter than soft — at least 3× ratio.
-	if stiff_err * 3.0 > soft_err:
+	# Stiff converges tighter than soft by at least 1.5×. The threshold
+	# is moderate because pose-pulls now run *before* the distance
+	# constraint each iteration (so high `bending_stiffness` /
+	# `distance_stiffness` settings remain visible), which damps the
+	# raw stiffness ratio. Pre-reorder this gap was 3-4×.
+	if stiff_err * 1.5 > soft_err:
 		push_error("stiffness gradient not respected: stiff_err=%.4f vs soft_err=%.4f"
 				% [stiff_err, soft_err])
 		return false

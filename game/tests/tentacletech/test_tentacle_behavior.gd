@@ -24,6 +24,10 @@ func _init() -> void:
 		"test_disabled_does_not_write",
 		"test_smooth_noise_bounded",
 		"test_thrust_modulates_axial_extent",
+		"test_tip_rigid_zone_quiets_tip",
+		"test_strike_share_zero_pins_tip_axially",
+		"test_changing_thrust_frequency_does_not_jump",
+		"test_zero_drift_coil_stays_planar",
 	]:
 		if call(test_name):
 			print("[PASS] %s" % test_name)
@@ -108,6 +112,7 @@ func test_amplitude_zero_produces_rest_pose() -> bool:
 	var b = s["behavior"]
 	b.wave_amplitude_scale = 0.0
 	b.thrust_amplitude = 0.0
+	b.coil_amplitude = 0.0
 	b._physics_process(0.016)
 	var positions: PackedVector3Array = t.get_solver().get_pose_target_positions()
 	var n: int = t.particle_count
@@ -185,9 +190,10 @@ func test_smooth_noise_bounded() -> bool:
 	return true
 
 
-# Thrust frequency + amplitude must produce a visible axial swing in the
-# tip pose target's projection on rest_direction. Verifies the thrust knob
-# composes with the rest_extent multiplier as documented.
+# With `tip_rigid_length=0` (legacy uniform-scale path), thrust frequency
+# + amplitude must produce a visible axial swing in the tip pose target's
+# projection on rest_direction. Verifies the thrust knob composes with
+# the rest_extent multiplier as documented.
 func test_thrust_modulates_axial_extent() -> bool:
 	var s := _make_setup()
 	var t = s["tentacle"]
@@ -197,6 +203,9 @@ func test_thrust_modulates_axial_extent() -> bool:
 	b.thrust_amplitude = 0.2
 	b.thrust_bias = 0.0
 	b.rest_extent = 0.85
+	# Disable the tip-rigid zone for this assertion — the test is about
+	# the thrust→axial-extent composition, not the body/tip split.
+	b.tip_rigid_length = 0.0
 
 	var rest_dir: Vector3 = b.rest_direction.normalized()
 	var min_proj := INF
@@ -215,5 +224,167 @@ func test_thrust_modulates_axial_extent() -> bool:
 	var swing: float = max_proj - min_proj
 	if swing < 0.2:
 		push_error("thrust swing %.3f m < expected ~0.38" % swing)
+		return false
+	return true
+
+
+# With a non-zero tip_rigid_length, the *tip* pose target should have far
+# less lateral wave swing than a body particle — the rigid zone gates the
+# wave amplitude to zero at the very tip.
+func test_tip_rigid_zone_quiets_tip() -> bool:
+	var s := _make_setup()
+	var t = s["tentacle"]
+	var b = s["behavior"]
+	b.wave_amplitude_scale = 1.0
+	b.thrust_amplitude = 0.0
+	b.tip_rigid_length = 0.10  # ~10cm of chain length 0.96
+	b.tip_strike_share = 1.0
+
+	var rest_dir: Vector3 = b.rest_direction.normalized()
+	var tip_lateral_max: float = 0.0
+	var body_lateral_max: float = 0.0
+	# Sample a few seconds across drift + wave evolution.
+	for _i in 240:
+		b._physics_process(1.0 / 60.0)
+		var positions: PackedVector3Array = t.get_solver().get_pose_target_positions()
+		var tip: Vector3 = positions[positions.size() - 1]
+		# Mid-body sample: well outside the tip rigid zone.
+		var body: Vector3 = positions[positions.size() / 2]
+		var tip_lat: float = (tip - rest_dir * tip.dot(rest_dir)).length()
+		var body_lat: float = (body - rest_dir * body.dot(rest_dir)).length()
+		if tip_lat > tip_lateral_max: tip_lateral_max = tip_lat
+		if body_lat > body_lateral_max: body_lateral_max = body_lat
+	_teardown(s)
+	# Tip lateral swing must be much smaller than body's. A pure rigid
+	# zone at the very tip should produce ~zero lateral; allow some slack.
+	if tip_lateral_max > 0.5 * body_lateral_max:
+		push_error("tip lateral %.4f not muted vs body %.4f"
+				% [tip_lateral_max, body_lateral_max])
+		return false
+	if body_lateral_max < 0.01:
+		push_error("body lateral %.4f too small — wave not running"
+				% body_lateral_max)
+		return false
+	return true
+
+
+# With `tip_strike_share=0` and `tip_rigid_length>0`, the tip's axial
+# projection should be near-constant across a thrust cycle even with
+# strong amplitude. Body axial projection should still swing. This is
+# the "tip balanced in place" extreme.
+func test_strike_share_zero_pins_tip_axially() -> bool:
+	var s := _make_setup()
+	var t = s["tentacle"]
+	var b = s["behavior"]
+	b.wave_amplitude_scale = 0.0
+	b.thrust_frequency = 1.0
+	b.thrust_amplitude = 0.2
+	b.thrust_bias = 0.0
+	b.rest_extent = 0.85
+	b.tip_rigid_length = 0.10
+	b.tip_strike_share = 0.0
+
+	var rest_dir: Vector3 = b.rest_direction.normalized()
+	var tip_min := INF
+	var tip_max := -INF
+	var body_min := INF
+	var body_max := -INF
+	for _i in 60:
+		b._physics_process(1.0 / 60.0)
+		var positions: PackedVector3Array = t.get_solver().get_pose_target_positions()
+		var tip: Vector3 = positions[positions.size() - 1]
+		var body: Vector3 = positions[positions.size() / 2]
+		var tip_p: float = tip.dot(rest_dir)
+		var body_p: float = body.dot(rest_dir)
+		if tip_p < tip_min: tip_min = tip_p
+		if tip_p > tip_max: tip_max = tip_p
+		if body_p < body_min: body_min = body_p
+		if body_p > body_max: body_max = body_p
+	_teardown(s)
+	var tip_swing: float = tip_max - tip_min
+	var body_swing: float = body_max - body_min
+	# Body should swing meaningfully; tip swing should be far smaller.
+	if body_swing < 0.05:
+		push_error("body axial swing %.4f too small" % body_swing)
+		return false
+	if tip_swing > 0.05:
+		push_error("tip not pinned: swing %.4f m" % tip_swing)
+		return false
+	return true
+
+
+# Changing `thrust_frequency` mid-cycle must not cause a position jump.
+# Pre-fix used `sin(_time * TAU * f)` which jumps by `_time * TAU * Δf`
+# the moment f changes. Post-fix integrates the phase (`_thrust_phase_t
+# += dt * TAU * f`), so f only changes the *rate*, not the value. Same
+# fix applies to wave_noise_freq.
+func test_changing_thrust_frequency_does_not_jump() -> bool:
+	var s := _make_setup()
+	var t = s["tentacle"]
+	var b = s["behavior"]
+	b.wave_amplitude_scale = 0.0
+	b.coil_amplitude = 0.0
+	b.tip_rigid_length = 0.0
+	b.thrust_amplitude = 0.2
+	b.thrust_frequency = 1.0
+	b.rest_extent = 0.85
+	# Run for a few seconds to let `_time` accumulate so a multiplied-
+	# formulation jump would be large.
+	for _i in 200:
+		b._physics_process(1.0 / 60.0)
+	var positions_before: PackedVector3Array = t.get_solver().get_pose_target_positions()
+	var tip_before: Vector3 = positions_before[positions_before.size() - 1]
+	# Bump the frequency mid-flight.
+	b.thrust_frequency = 2.5
+	# Compute pose targets again immediately, with `dt=0` so the
+	# integrated phase advances by zero. If the implementation uses
+	# `sin(t * f)` the tip will jump; if it uses `sin(integrated_phase)`
+	# it won't.
+	b._physics_process(0.0)
+	var positions_after: PackedVector3Array = t.get_solver().get_pose_target_positions()
+	var tip_after: Vector3 = positions_after[positions_after.size() - 1]
+	_teardown(s)
+	var jump: float = (tip_after - tip_before).length()
+	if jump > 1e-4:
+		push_error("thrust freq change caused tip jump %.6f m" % jump)
+		return false
+	return true
+
+
+# With `wave_drift_speed=0` (locked perp plane) and `coil_amplitude>0`
+# and a load-biased thrust, every body pose target must lie in the
+# plane spanned by `rest_dir` and the fixed `perp1` axis — i.e. zero
+# component along `perp2`. That's the S-curve thrust pose; non-zero
+# drift rotates the same coil into a corkscrew.
+func test_zero_drift_coil_stays_planar() -> bool:
+	var s := _make_setup()
+	var t = s["tentacle"]
+	var b = s["behavior"]
+	b.wave_amplitude_scale = 0.0
+	b.wave_drift_speed = 0.0
+	b.coil_amplitude = 0.2
+	b.thrust_amplitude = 0.2
+	b.thrust_frequency = 1.0
+	b.thrust_bias = -1.0  # always loaded → always coiling
+	b.tip_rigid_length = 0.08
+
+	# With default rest_direction = (0,0,-1) and drift=0:
+	#   helper = UP = (0,1,0)
+	#   perp_base = (0,1,0) (UP is already perpendicular to rest_dir)
+	#   perp1 = perp_base = (0,1,0)
+	#   perp2 = rest_dir.cross(perp1) = (1,0,0)
+	# Plane normal (perp2) is +X, so all pose targets must have ~zero
+	# X component when tentacle is at world origin.
+
+	var max_x: float = 0.0
+	for _i in 90:
+		b._physics_process(1.0 / 60.0)
+		var positions: PackedVector3Array = t.get_solver().get_pose_target_positions()
+		for p in positions:
+			var ax: float = absf(p.x)
+			if ax > max_x: max_x = ax
+	_teardown(s)
+	if max_x > 1e-4:
+		push_error("coil leaked off-plane: max |x| = %.6f" % max_x)
 		return false
 	return true
