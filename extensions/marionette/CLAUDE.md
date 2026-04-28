@@ -325,7 +325,7 @@ Each indicates an architectural assumption is wrong and needs discussion.
 | `Skeleton3D.get_bone_parent(idx)` | Hierarchy walk |
 | `PhysicalBone3D.joint_type = JOINT_TYPE_6DOF` | Enable 6DOF joint per bone |
 | `PhysicalBone3D.joint_rotation` | **Bakes anatomical frame into physics at creation** |
-| `PhysicalBone3D.set("angular_limit_x/upper_angle", v)` | Set limits post-creation |
+| `PhysicalBone3D.set("joint_constraints/x/angular_limit_upper", v)` | Set 6DOF angular limits post-creation (4.6 path; verified via `get_property_list()`). Lower bound is `..._lower`. Linear lock: `joint_constraints/<x\|y\|z>/linear_limit_<lower\|upper>` |
 | `PhysicalBone3D._integrate_forces(state)` | SPD torque application path |
 | `PhysicsDirectBodyState3D.apply_torque(vec)` | World-space torque |
 | `PhysicalBoneSimulator3D` | Controls which bones are simulated |

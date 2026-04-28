@@ -50,6 +50,27 @@ func _init() -> void:
 		_test_bone_profile_generator_root_and_fixed_left_at_defaults,
 		_test_bone_profile_generator_idempotent,
 		_test_bone_profile_generator_null_skeleton_profile_errors,
+		_test_generator_template_upper_arm_joint_frame,
+		_test_generator_template_upper_leg_joint_frame,
+		_test_bone_state_profile_humanoid_defaults,
+		_test_bone_state_profile_get_state_fallback,
+		_test_collision_exclusion_parent_child_defaults,
+		_test_collision_exclusion_siblings,
+		_test_collision_exclusion_disabled_bones,
+		_test_marionette_bone_extends_physical_bone3d,
+		_test_build_ragdoll_synthetic_structure,
+		_test_build_ragdoll_joint_rotation_baking,
+		_test_build_ragdoll_rom_round_trip,
+		_test_build_ragdoll_idempotent,
+		_test_build_ragdoll_skips_unknown_bones,
+		_test_anatomical_pose_zero_yields_identity,
+		_test_anatomical_pose_single_axis_flex_default_permutation,
+		_test_anatomical_pose_permuted_flex_axis,
+		_test_anatomical_pose_negative_axis,
+		_test_anatomical_pose_compose_order,
+		_test_muscle_slider_applies_pose,
+		_test_muscle_slider_restores_rest_on_exit_tree,
+		_test_muscle_slider_reset_button,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -1053,6 +1074,72 @@ func _test_bone_profile_generator_idempotent() -> bool:
 	return _ok("generator_idempotent")
 
 
+func _generated_joint_world(bp: BoneProfile, bone_name: StringName) -> Basis:
+	# Generates the BoneProfile against the template (no live skeleton) and
+	# returns the joint-in-world basis for `bone_name` — i.e., what the
+	# JointLimitGizmo would draw at that bone if the rig matched the template.
+	var profile: SkeletonProfile = bp.skeleton_profile
+	var rests := MuscleFrameBuilder.compute_world_rests(profile)
+	var entry: BoneEntry = bp.bones[bone_name]
+	var bone_world: Transform3D = rests[bone_name]
+	return bone_world.basis * entry.bone_to_anatomical_basis()
+
+
+# Locks down the template-path expectation for shoulder Ball joints. If this
+# regresses, the JointLimitGizmo arcs at upper arms drift off-axis on the
+# editor visualization.
+func _test_generator_template_upper_arm_joint_frame() -> bool:
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+
+	# Left shoulder: along bone points laterally outward to the character's
+	# left. With template's hip-mid → +X = LeftUpperLeg side, "left lateral"
+	# = world +X. Flex axis perpendicular to along, falls back to +Y world
+	# (vertical) because make_anatomical_basis's perpendicular-of-along
+	# fallback picks +Y when along == ±X.
+	var left := _generated_joint_world(bp, &"LeftUpperArm")
+	if not left.y.is_equal_approx(Vector3(1, 0, 0)):
+		return _fail("template_upper_arm",
+			"LeftUpperArm along=%v, expected (1,0,0)" % left.y)
+	if not left.x.is_equal_approx(Vector3(0, 1, 0)):
+		return _fail("template_upper_arm",
+			"LeftUpperArm flex=%v, expected (0,1,0)" % left.x)
+	# Right shoulder mirrors: along = -X. Flex stays +Y (single body axis).
+	var right := _generated_joint_world(bp, &"RightUpperArm")
+	if not right.y.is_equal_approx(Vector3(-1, 0, 0)):
+		return _fail("template_upper_arm",
+			"RightUpperArm along=%v, expected (-1,0,0)" % right.y)
+	if not right.x.is_equal_approx(Vector3(0, 1, 0)):
+		return _fail("template_upper_arm",
+			"RightUpperArm flex=%v, expected (0,1,0)" % right.x)
+	return _ok("generator_template_upper_arm_joint_frame")
+
+
+# Same lock-down for hip Ball joints. Legs hang down in the template, so
+# along = -Y world for both sides.
+func _test_generator_template_upper_leg_joint_frame() -> bool:
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var left := _generated_joint_world(bp, &"LeftUpperLeg")
+	if not left.y.is_equal_approx(Vector3(0, -1, 0)):
+		return _fail("template_upper_leg",
+			"LeftUpperLeg along=%v, expected (0,-1,0)" % left.y)
+	# Flex axis for hip ball: lateral (limb_flex_axis = -muscle_frame.right
+	# = world +X), perpendicular to vertical along — no orthogonalization
+	# fallback needed.
+	if not left.x.is_equal_approx(Vector3(1, 0, 0)):
+		return _fail("template_upper_leg",
+			"LeftUpperLeg flex=%v, expected (1,0,0)" % left.x)
+	var right := _generated_joint_world(bp, &"RightUpperLeg")
+	if not right.y.is_equal_approx(Vector3(0, -1, 0)):
+		return _fail("template_upper_leg",
+			"RightUpperLeg along=%v, expected (0,-1,0)" % right.y)
+	if not right.x.is_equal_approx(Vector3(1, 0, 0)):
+		return _fail("template_upper_leg",
+			"RightUpperLeg flex=%v, expected (1,0,0)" % right.x)
+	return _ok("generator_template_upper_leg_joint_frame")
+
+
 func _test_bone_profile_generator_null_skeleton_profile_errors() -> bool:
 	# Friendly error rather than a crash when the profile isn't wired up.
 	var bp := BoneProfile.new()
@@ -1068,3 +1155,561 @@ func _test_bone_profile_generator_null_skeleton_profile_errors() -> bool:
 	if report2.error == "":
 		return _fail("generator_null_skel", "null bone_profile should yield error")
 	return _ok("generator_null_skeleton_profile_errors")
+
+
+# ---------- BoneStateProfile (P3.3) ----------
+
+func _test_bone_state_profile_humanoid_defaults() -> bool:
+	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	var bsp := BoneStateProfile.default_for_skeleton_profile(profile)
+	if bsp.states.size() != 84:
+		return _fail("bone_state_humanoid", "states.size()=%d, expected 84" % bsp.states.size())
+	# Jaw + eyes Kinematic per CLAUDE.md §9.
+	for n: StringName in [&"Jaw", &"LeftEye", &"RightEye"]:
+		if bsp.states[n] != BoneStateProfile.State.KINEMATIC:
+			return _fail("bone_state_humanoid", "%s should be KINEMATIC" % n)
+	# Body bones Powered.
+	for n: StringName in [&"LeftUpperArm", &"Spine", &"Hips", &"LeftFoot", &"Head"]:
+		if bsp.states[n] != BoneStateProfile.State.POWERED:
+			return _fail("bone_state_humanoid", "%s should be POWERED" % n)
+	return _ok("bone_state_profile_humanoid_defaults")
+
+
+func _test_bone_state_profile_get_state_fallback() -> bool:
+	# Bones not in the dict default to POWERED — gameplay shouldn't crash on
+	# unmapped names from forgotten profile updates.
+	var bsp := BoneStateProfile.new()
+	if bsp.get_state(&"NotARealBone") != BoneStateProfile.State.POWERED:
+		return _fail("bone_state_fallback", "unmapped bone should fall back to POWERED")
+	bsp.states[&"X"] = BoneStateProfile.State.UNPOWERED
+	if bsp.get_state(&"X") != BoneStateProfile.State.UNPOWERED:
+		return _fail("bone_state_fallback", "explicit state not honored")
+	return _ok("bone_state_profile_get_state_fallback")
+
+
+# ---------- CollisionExclusionProfile (P3.4) ----------
+
+func _make_3bone_skeleton() -> Skeleton3D:
+	# Root (idx 0) -> Hips (idx 1) -> LeftUpperLeg (idx 2). Names match the
+	# canonical SkeletonProfile names so build_ragdoll resolves entries via
+	# the direct-match fallback (no BoneMap needed).
+	var skel := Skeleton3D.new()
+	skel.name = "Skeleton3D"
+	skel.add_bone("Root")
+	skel.add_bone("Hips")
+	skel.set_bone_parent(1, 0)
+	skel.add_bone("LeftUpperLeg")
+	skel.set_bone_parent(2, 1)
+	skel.set_bone_rest(0, Transform3D.IDENTITY)
+	skel.set_bone_rest(1, Transform3D(Basis.IDENTITY, Vector3(0.0, 0.75, 0.0)))
+	skel.set_bone_rest(2, Transform3D(Basis.IDENTITY, Vector3(0.1, 0.0, 0.0)))
+	return skel
+
+
+func _test_collision_exclusion_parent_child_defaults() -> bool:
+	var skel := _make_3bone_skeleton()
+	var p := CollisionExclusionProfile.parent_child_defaults(skel)
+	if p.excluded_pairs.size() != 2:
+		skel.free()
+		return _fail("col_excl_pc", "expected 2 pairs, got %d" % p.excluded_pairs.size())
+	if not p.excluded_pairs.has(Vector2i(0, 1)):
+		skel.free()
+		return _fail("col_excl_pc", "missing (Root,Hips)")
+	if not p.excluded_pairs.has(Vector2i(1, 2)):
+		skel.free()
+		return _fail("col_excl_pc", "missing (Hips,LeftUpperLeg)")
+	skel.free()
+	return _ok("collision_exclusion_parent_child_defaults")
+
+
+func _test_collision_exclusion_siblings() -> bool:
+	# Add a second child under Hips so include_siblings has work to do.
+	var skel := _make_3bone_skeleton()
+	skel.add_bone("RightUpperLeg")  # idx 3
+	skel.set_bone_parent(3, 1)
+	skel.set_bone_rest(3, Transform3D(Basis.IDENTITY, Vector3(-0.1, 0.0, 0.0)))
+
+	var no_sib := CollisionExclusionProfile.parent_child_defaults(skel, false)
+	# Pairs: 0-1, 1-2, 1-3 = 3 pairs without siblings
+	if no_sib.excluded_pairs.size() != 3:
+		skel.free()
+		return _fail("col_excl_sib", "no-sibling pass: expected 3 pairs, got %d" % no_sib.excluded_pairs.size())
+
+	var with_sib := CollisionExclusionProfile.parent_child_defaults(skel, true)
+	# Adds (2,3) sibling pair.
+	if with_sib.excluded_pairs.size() != 4:
+		skel.free()
+		return _fail("col_excl_sib", "with-siblings: expected 4 pairs, got %d" % with_sib.excluded_pairs.size())
+	if not with_sib.excluded_pairs.has(Vector2i(2, 3)):
+		skel.free()
+		return _fail("col_excl_sib", "missing sibling pair (LeftUpperLeg,RightUpperLeg)")
+	skel.free()
+	return _ok("collision_exclusion_siblings")
+
+
+func _test_collision_exclusion_disabled_bones() -> bool:
+	var p := CollisionExclusionProfile.new()
+	p.disabled_bones.append("Jaw")
+	if not p.is_disabled(&"Jaw"):
+		return _fail("col_excl_disabled", "Jaw should be disabled")
+	if p.is_disabled(&"Spine"):
+		return _fail("col_excl_disabled", "Spine should not be disabled")
+	return _ok("collision_exclusion_disabled_bones")
+
+
+# ---------- MarionetteBone (P3.2) + Marionette.build_ragdoll (P3.7) ----------
+
+func _test_marionette_bone_extends_physical_bone3d() -> bool:
+	var b := MarionetteBone.new()
+	var ok := b is PhysicalBone3D
+	b.free()
+	if not ok:
+		return _fail("marionette_bone_class", "MarionetteBone should extend PhysicalBone3D")
+	return _ok("marionette_bone_extends_physical_bone3d")
+
+
+# Builds a Marionette wired to a 3-bone synthetic skeleton, populates the
+# BoneProfile with hand-crafted entries (so we control the permutation /
+# ROM exactly), and runs build_ragdoll. Caller is responsible for
+# free()-ing the returned Marionette.
+func _build_synthetic_marionette() -> Marionette:
+	var skel := _make_3bone_skeleton()
+	var marionette := Marionette.new()
+	marionette.name = "Marionette"
+	marionette.add_child(skel)
+	marionette.skeleton = NodePath("Skeleton3D")
+
+	var skel_profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	var bp := BoneProfile.new()
+	bp.skeleton_profile = skel_profile
+	bp.total_mass = 70.0
+
+	var root_entry := BoneEntry.new()
+	root_entry.archetype = BoneArchetype.Type.ROOT
+	bp.bones[&"Root"] = root_entry
+
+	var hip_entry := BoneEntry.new()
+	hip_entry.archetype = BoneArchetype.Type.ROOT
+	bp.bones[&"Hips"] = hip_entry
+
+	var leg_entry := BoneEntry.new()
+	leg_entry.archetype = BoneArchetype.Type.BALL
+	# Pick a non-identity permutation so joint_rotation baking has something
+	# observable: bone-local +Y becomes flex, +Z becomes along-bone, +X abd.
+	leg_entry.flex_axis = SignedAxis.Axis.PLUS_Y
+	leg_entry.along_bone_axis = SignedAxis.Axis.PLUS_Z
+	leg_entry.abduction_axis = SignedAxis.Axis.PLUS_X
+	leg_entry.rom_min = Vector3(deg_to_rad(-15.0), deg_to_rad(-45.0), 0.0)
+	leg_entry.rom_max = Vector3(deg_to_rad(100.0), deg_to_rad(45.0), deg_to_rad(40.0))
+	bp.bones[&"LeftUpperLeg"] = leg_entry
+
+	marionette.bone_profile = bp
+	root.add_child(marionette)
+	marionette.build_ragdoll()
+	return marionette
+
+
+func _find_simulator(marionette: Marionette) -> PhysicalBoneSimulator3D:
+	var skel: Skeleton3D = marionette.resolve_skeleton()
+	if skel == null:
+		return null
+	for child: Node in skel.get_children():
+		if child is PhysicalBoneSimulator3D:
+			return child
+	return null
+
+
+func _find_bone(sim: PhysicalBoneSimulator3D, bone_name: String) -> MarionetteBone:
+	for child: Node in sim.get_children():
+		if child is MarionetteBone and (child as MarionetteBone).bone_name == bone_name:
+			return child
+	return null
+
+
+func _test_build_ragdoll_synthetic_structure() -> bool:
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	if sim == null:
+		m.free()
+		return _fail("build_ragdoll_struct", "no PhysicalBoneSimulator3D under Skeleton3D")
+	if String(sim.name) != "MarionetteSim":
+		m.free()
+		return _fail("build_ragdoll_struct", "sim name=%s, expected MarionetteSim" % sim.name)
+
+	var bone_count: int = 0
+	for child: Node in sim.get_children():
+		if child is MarionetteBone:
+			bone_count += 1
+	if bone_count != 3:
+		m.free()
+		return _fail("build_ragdoll_struct", "expected 3 MarionetteBones, got %d" % bone_count)
+
+	var leg := _find_bone(sim, "LeftUpperLeg")
+	if leg == null:
+		m.free()
+		return _fail("build_ragdoll_struct", "LeftUpperLeg bone missing")
+	if leg.joint_type != PhysicalBone3D.JOINT_TYPE_6DOF:
+		m.free()
+		return _fail("build_ragdoll_struct", "joint_type=%d, expected 6DOF" % leg.joint_type)
+	# bone_entry forwarded.
+	if leg.bone_entry == null:
+		m.free()
+		return _fail("build_ragdoll_struct", "bone_entry not forwarded")
+	if leg.bone_entry.archetype != BoneArchetype.Type.BALL:
+		m.free()
+		return _fail("build_ragdoll_struct", "bone_entry.archetype mismatch")
+	# Has a CollisionShape3D child.
+	var has_shape := false
+	for child: Node in leg.get_children():
+		if child is CollisionShape3D:
+			has_shape = true
+			break
+	if not has_shape:
+		m.free()
+		return _fail("build_ragdoll_struct", "no CollisionShape3D on bone")
+	m.free()
+	return _ok("build_ragdoll_synthetic_structure")
+
+
+func _test_build_ragdoll_joint_rotation_baking() -> bool:
+	# joint_rotation should bake the bone_to_anatomical permutation. With the
+	# leg entry's permutation (flex=+Y, along=+Z, abd=+X), the joint frame
+	# basis is the rotation that maps identity to those columns. Round-trip
+	# via Basis.from_euler should reproduce that basis.
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var leg := _find_bone(sim, "LeftUpperLeg")
+	if leg == null:
+		m.free()
+		return _fail("build_ragdoll_jr", "leg bone missing")
+
+	var expected: Basis = leg.bone_entry.bone_to_anatomical_basis()
+	var got: Basis = Basis.from_euler(leg.joint_rotation)
+	if not got.is_equal_approx(expected):
+		m.free()
+		return _fail("build_ragdoll_jr",
+			"joint_rotation basis %s, expected %s" % [got, expected])
+	m.free()
+	return _ok("build_ragdoll_joint_rotation_baking")
+
+
+func _test_build_ragdoll_rom_round_trip() -> bool:
+	# Each angular limit should round-trip from BoneEntry through the dynamic
+	# property paths. linear_limits should be locked to (0, 0).
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var leg := _find_bone(sim, "LeftUpperLeg")
+	var entry := leg.bone_entry
+
+	var checks := {
+		"joint_constraints/x/angular_limit_lower": entry.rom_min.x,
+		"joint_constraints/x/angular_limit_upper": entry.rom_max.x,
+		"joint_constraints/y/angular_limit_lower": entry.rom_min.y,
+		"joint_constraints/y/angular_limit_upper": entry.rom_max.y,
+		"joint_constraints/z/angular_limit_lower": entry.rom_min.z,
+		"joint_constraints/z/angular_limit_upper": entry.rom_max.z,
+	}
+	for path: String in checks:
+		var got: float = leg.get(path)
+		var want: float = checks[path]
+		if not is_equal_approx(got, want):
+			m.free()
+			return _fail("build_ragdoll_rom",
+				"%s = %f, expected %f" % [path, got, want])
+	# Linear axes locked to zero.
+	for axis: String in ["x", "y", "z"]:
+		var lo: float = leg.get("joint_constraints/%s/linear_limit_lower" % axis)
+		var hi: float = leg.get("joint_constraints/%s/linear_limit_upper" % axis)
+		if not is_equal_approx(lo, 0.0) or not is_equal_approx(hi, 0.0):
+			m.free()
+			return _fail("build_ragdoll_rom",
+				"linear_limit_%s not locked: [%f, %f]" % [axis, lo, hi])
+	m.free()
+	return _ok("build_ragdoll_rom_round_trip")
+
+
+func _test_build_ragdoll_idempotent() -> bool:
+	# Calling build_ragdoll twice should not stack simulators — the second
+	# call clears the first.
+	var m := _build_synthetic_marionette()
+	m.build_ragdoll()  # second call
+
+	var skel: Skeleton3D = m.resolve_skeleton()
+	var sim_count: int = 0
+	for child: Node in skel.get_children():
+		if child is PhysicalBoneSimulator3D:
+			sim_count += 1
+	if sim_count != 1:
+		m.free()
+		return _fail("build_ragdoll_idempotent", "expected 1 simulator after rebuild, got %d" % sim_count)
+
+	# Clear should remove it cleanly.
+	m.clear_ragdoll()
+	var still: int = 0
+	for child: Node in skel.get_children():
+		if child is PhysicalBoneSimulator3D:
+			still += 1
+	if still != 0:
+		m.free()
+		return _fail("build_ragdoll_idempotent", "clear_ragdoll left %d simulators" % still)
+	m.free()
+	return _ok("build_ragdoll_idempotent")
+
+
+func _test_build_ragdoll_skips_unknown_bones() -> bool:
+	# Skeleton bones with no BoneProfile entry are silently skipped. Construct
+	# a 4-bone skeleton (extra cosmetic bone) but only populate 3 entries.
+	var skel := _make_3bone_skeleton()
+	skel.add_bone("CosmeticTail")  # idx 3, no profile entry
+	skel.set_bone_parent(3, 0)
+	skel.set_bone_rest(3, Transform3D(Basis.IDENTITY, Vector3(0.0, -0.1, 0.0)))
+
+	var marionette := Marionette.new()
+	marionette.name = "Marionette"
+	marionette.add_child(skel)
+	marionette.skeleton = NodePath("Skeleton3D")
+
+	var bp := BoneProfile.new()
+	bp.skeleton_profile = load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	var generic_entry := BoneEntry.new()
+	generic_entry.archetype = BoneArchetype.Type.ROOT
+	bp.bones[&"Root"] = generic_entry
+	bp.bones[&"Hips"] = generic_entry
+	bp.bones[&"LeftUpperLeg"] = generic_entry
+	marionette.bone_profile = bp
+
+	root.add_child(marionette)
+	marionette.build_ragdoll()
+
+	var sim: PhysicalBoneSimulator3D = null
+	for child: Node in skel.get_children():
+		if child is PhysicalBoneSimulator3D:
+			sim = child
+			break
+	var bone_count: int = 0
+	for child: Node in sim.get_children():
+		if child is MarionetteBone:
+			bone_count += 1
+	if bone_count != 3:
+		marionette.free()
+		return _fail("build_ragdoll_skip",
+			"expected 3 bones (cosmetic skipped), got %d" % bone_count)
+	# CosmeticTail bone should not exist.
+	if _find_bone(sim, "CosmeticTail") != null:
+		marionette.free()
+		return _fail("build_ragdoll_skip", "CosmeticTail should have been skipped")
+	marionette.free()
+	return _ok("build_ragdoll_skips_unknown_bones")
+
+
+# ---------- AnatomicalPose (P4.4) ----------
+
+func _test_anatomical_pose_zero_yields_identity() -> bool:
+	var entry := BoneEntry.new()
+	var q := AnatomicalPose.bone_local_rotation(entry, 0.0, 0.0, 0.0)
+	if not q.is_equal_approx(Quaternion.IDENTITY):
+		return _fail("anatomical_pose_zero", "zero angles → %s, expected IDENTITY" % q)
+	# Null entry must also degrade to IDENTITY (matches the early-return in
+	# AnatomicalPose.bone_local_rotation; defends inspector-time bones with
+	# no BoneEntry yet).
+	var q_null := AnatomicalPose.bone_local_rotation(null, 1.0, 1.0, 1.0)
+	if not q_null.is_equal_approx(Quaternion.IDENTITY):
+		return _fail("anatomical_pose_zero", "null entry → %s, expected IDENTITY" % q_null)
+	return _ok("anatomical_pose_zero_yields_identity")
+
+
+func _test_anatomical_pose_single_axis_flex_default_permutation() -> bool:
+	# Default BoneEntry: flex=+X, along=+Y, abd=+Z. flex-only input must
+	# collapse to a pure rotation around bone-local +X.
+	var entry := BoneEntry.new()
+	var angle := deg_to_rad(30.0)
+	var q := AnatomicalPose.bone_local_rotation(entry, angle, 0.0, 0.0)
+	var expected := Quaternion(Vector3(1.0, 0.0, 0.0), angle)
+	if not q.is_equal_approx(expected):
+		return _fail("anatomical_pose_default_flex", "got %s, expected %s" % [q, expected])
+	return _ok("anatomical_pose_single_axis_flex_default_permutation")
+
+
+func _test_anatomical_pose_permuted_flex_axis() -> bool:
+	# Bone-local +Z encodes flex (e.g., a roll-rotated rest basis). Single-axis
+	# flex must rotate around +Z, not +X.
+	var entry := BoneEntry.new()
+	entry.flex_axis = SignedAxis.Axis.PLUS_Z
+	var angle := deg_to_rad(45.0)
+	var q := AnatomicalPose.bone_local_rotation(entry, angle, 0.0, 0.0)
+	var expected := Quaternion(Vector3(0.0, 0.0, 1.0), angle)
+	if not q.is_equal_approx(expected):
+		return _fail("anatomical_pose_permuted_flex", "got %s, expected %s" % [q, expected])
+	return _ok("anatomical_pose_permuted_flex_axis")
+
+
+func _test_anatomical_pose_negative_axis() -> bool:
+	# -X flex axis: flex by +θ should rotate around -X by θ, equivalently +X
+	# by -θ. Catches sign-bit drops in SignedAxis.to_vector3 wiring.
+	var entry := BoneEntry.new()
+	entry.flex_axis = SignedAxis.Axis.MINUS_X
+	var angle := deg_to_rad(60.0)
+	var q := AnatomicalPose.bone_local_rotation(entry, angle, 0.0, 0.0)
+	var expected := Quaternion(Vector3(-1.0, 0.0, 0.0), angle)
+	if not q.is_equal_approx(expected):
+		return _fail("anatomical_pose_negative_axis", "got %s, expected %s" % [q, expected])
+	var equiv := Quaternion(Vector3(1.0, 0.0, 0.0), -angle)
+	if not q.is_equal_approx(equiv):
+		return _fail("anatomical_pose_negative_axis",
+				"-X by +θ should equal +X by -θ; got %s" % q)
+	return _ok("anatomical_pose_negative_axis")
+
+
+func _test_anatomical_pose_compose_order() -> bool:
+	# Default permutation. flex=π/2 around +X composed with rot=π/2 around +Y
+	# yields q = qx * qy (the code's order). Probing q against bone-local +Y:
+	#   intrinsic order qx*qy:  qy(+Y)=+Y → qx(+Y)=+Z
+	#   extrinsic flip qy*qx:   qx(+Y)=+Z → qy(+Z)=+X  (must NOT be this)
+	# This is the discriminating probe — every other axis-input also differs
+	# between the two orders, but +Y → +Z is the cleanest readout.
+	var entry := BoneEntry.new()
+	var q := AnatomicalPose.bone_local_rotation(entry, PI / 2.0, PI / 2.0, 0.0)
+	var probe := q * Vector3.UP
+	if not probe.is_equal_approx(Vector3(0.0, 0.0, 1.0)):
+		return _fail("anatomical_pose_compose",
+				"intrinsic flex-then-rot on +Y should give +Z, got %s" % probe)
+	if probe.is_equal_approx(Vector3(1.0, 0.0, 0.0)):
+		return _fail("anatomical_pose_compose",
+				"extrinsic compose order detected (q*+Y = +X)")
+	return _ok("anatomical_pose_compose_order")
+
+
+# ---------- MarionetteBoneSliders (P4 inspector slider widget) ----------
+
+# Reuses _build_synthetic_marionette: LeftUpperLeg has all three ROM axes
+# non-zero with permuted basis (flex=+Y, along=+Z, abd=+X), so all three
+# sliders instantiate and a flex-only nudge produces a pure +Y rotation.
+#
+# Two harness quirks shape these tests:
+#   1. `_ready` doesn't auto-fire and `value_changed` doesn't propagate when
+#      a Control isn't inside the active scene tree. Headless SceneTree
+#      tests run synchronously in `_init`, so we drive the widget's
+#      lifecycle (`_ready`, `_apply_pose`, `_exit_tree`) directly. The
+#      signal connection itself is editor plumbing — verified in-editor,
+#      not in unit tests.
+#   2. `Skeleton3D.set/get_bone_pose_rotation` round-trips through Basis,
+#      which adds ~2e-4 of quaternion noise (Quaternion.is_equal_approx
+#      uses 1e-5 — too tight). Tests use _quat_close which compares via
+#      Quaternion.angle_to with a generous-but-conclusive 1e-3 rad bound.
+const _QUAT_TOL_RAD: float = 1.0e-3
+
+
+func _quat_close(a: Quaternion, b: Quaternion) -> bool:
+	return a.angle_to(b) < _QUAT_TOL_RAD
+
+
+func _test_muscle_slider_applies_pose() -> bool:
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	if bone == null:
+		m.free()
+		return _fail("muscle_slider_applies", "LeftUpperLeg MarionetteBone missing")
+	var skel: Skeleton3D = m.resolve_skeleton()
+	var bone_idx := skel.find_bone("LeftUpperLeg")
+	var rest := skel.get_bone_pose_rotation(bone_idx)
+
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null:
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_applies", "flex slider not built — check ROM gating")
+
+	widget._flex_slider.value = deg_to_rad(30.0)
+	var quantized: float = widget._flex_slider.value
+	widget._apply_pose()
+
+	var actual := skel.get_bone_pose_rotation(bone_idx)
+	# LeftUpperLeg flex_axis = +Y in our synthetic permutation.
+	var expected := rest * Quaternion(Vector3.UP, quantized)
+	var ok := _quat_close(actual, expected)
+
+	widget._exit_tree()
+	widget.free()
+	m.free()
+	if not ok:
+		return _fail("muscle_slider_applies",
+				"pose=%s, expected=%s, angle_to=%f" %
+				[actual, expected, actual.angle_to(expected)])
+	return _ok("muscle_slider_applies_pose")
+
+
+func _test_muscle_slider_restores_rest_on_exit_tree() -> bool:
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	var skel: Skeleton3D = m.resolve_skeleton()
+	var bone_idx := skel.find_bone("LeftUpperLeg")
+	var rest := skel.get_bone_pose_rotation(bone_idx)
+
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null:
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_restore", "flex slider not built")
+
+	widget._flex_slider.value = deg_to_rad(45.0)
+	widget._apply_pose()
+	var moved := skel.get_bone_pose_rotation(bone_idx)
+	if _quat_close(moved, rest):
+		widget._exit_tree()
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_restore", "_apply_pose did not displace pose")
+
+	# Inspector deselection in production runs via NOTIFICATION_EXIT_TREE →
+	# _exit_tree → _restore_rest. We invoke _exit_tree directly.
+	widget._exit_tree()
+	var after := skel.get_bone_pose_rotation(bone_idx)
+	var ok := _quat_close(after, rest)
+
+	widget.free()
+	m.free()
+	if not ok:
+		return _fail("muscle_slider_restore",
+				"after exit_tree=%s, rest=%s" % [after, rest])
+	return _ok("muscle_slider_restores_rest_on_exit_tree")
+
+
+func _test_muscle_slider_reset_button() -> bool:
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	var skel: Skeleton3D = m.resolve_skeleton()
+	var bone_idx := skel.find_bone("LeftUpperLeg")
+	var rest := skel.get_bone_pose_rotation(bone_idx)
+
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null or widget._abd_slider == null:
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_reset", "expected sliders not built")
+
+	widget._flex_slider.value = deg_to_rad(40.0)
+	widget._abd_slider.value = deg_to_rad(20.0)
+	widget._apply_pose()
+	var moved := skel.get_bone_pose_rotation(bone_idx)
+	if _quat_close(moved, rest):
+		widget._exit_tree()
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_reset", "_apply_pose did not displace pose pre-reset")
+
+	widget._on_reset_pressed()
+	var after := skel.get_bone_pose_rotation(bone_idx)
+	var pose_restored := _quat_close(after, rest)
+
+	widget.free()
+	m.free()
+	if not pose_restored:
+		return _fail("muscle_slider_reset",
+				"pose after reset=%s, rest=%s" % [after, rest])
+	return _ok("muscle_slider_reset_button")

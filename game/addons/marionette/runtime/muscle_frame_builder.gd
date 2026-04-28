@@ -1,3 +1,4 @@
+@tool
 class_name MuscleFrameBuilder
 extends RefCounted
 
@@ -148,23 +149,26 @@ static func compute_skeleton_world_rests(
 		else:
 			skeleton_global[i] = skeleton_global[parent] * local
 
-	# Resolve each profile bone to a skeleton bone index, with a two-step lookup:
-	#   1. Use the BoneMap to translate profile name -> rig name (e.g. ARP's
-	#      "thigh_stretch.l" pre-retarget). Try find_bone on that.
-	#   2. If the mapped name isn't on the skeleton (or no mapping was set),
-	#      fall back to looking up the profile name directly. This covers
-	#      Godot's import-time retargeting workflow, which renames source
-	#      bones to canonical SkeletonProfile names — leaving the BoneMap's
-	#      pre-retarget mappings stale but the skeleton self-describing.
+	# Resolve each skeleton bone to a profile bone via reverse lookup:
+	#   1. Ask BoneMap for the profile name that corresponds to this rig bone.
+	#      Using `find_profile_bone_name` rather than `get_skeleton_bone_name`
+	#      avoids the C++ error spam when the bone_map doesn't have a key for
+	#      every profile bone.
+	#   2. If unmapped, fall back to direct match — the post-retarget workflow
+	#      renames source bones to canonical SkeletonProfile names, leaving
+	#      the BoneMap's pre-retarget mappings stale but the skeleton itself
+	#      self-describing.
+	# Build the profile-bone-name set once for the fallback check.
+	var profile_names: Dictionary[StringName, bool] = {}
 	for i in range(profile.bone_size):
-		var profile_bone_name: StringName = profile.get_bone_name(i)
-		var rig_bone_name: StringName = bone_map.get_skeleton_bone_name(profile_bone_name)
-		var rig_bone_idx: int = -1
-		if rig_bone_name != &"":
-			rig_bone_idx = skeleton.find_bone(rig_bone_name)
-		if rig_bone_idx < 0:
-			rig_bone_idx = skeleton.find_bone(profile_bone_name)
-		if rig_bone_idx < 0:
-			continue
-		result[profile_bone_name] = skeleton_global[rig_bone_idx]
+		profile_names[profile.get_bone_name(i)] = true
+	for i in range(bone_count):
+		var skel_name: StringName = skeleton.get_bone_name(i)
+		var profile_name: StringName = bone_map.find_profile_bone_name(skel_name)
+		if profile_name == &"":
+			if profile_names.has(skel_name):
+				profile_name = skel_name
+			else:
+				continue
+		result[profile_name] = skeleton_global[i]
 	return result
