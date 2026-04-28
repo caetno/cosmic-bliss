@@ -186,6 +186,13 @@ func build_ragdoll() -> void:
 		if a != null and b != null:
 			a.add_collision_exception_with(b)
 
+	# Drive editor gizmos from the live skeleton: pose changes (slider drags,
+	# animation, IK) emit pose_updated, which queues a gizmo redraw so the ROM
+	# arcs / authoring tripods follow the armature instead of frozen at rest.
+	# is_connected check keeps repeated build_ragdoll calls idempotent.
+	if not skel.pose_updated.is_connected(update_gizmos):
+		skel.pose_updated.connect(update_gizmos)
+
 
 # Tears down any existing PhysicalBoneSimulator3D under the resolved skeleton.
 # Safe to call when no ragdoll exists.

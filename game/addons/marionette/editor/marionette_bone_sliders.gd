@@ -2,23 +2,33 @@
 class_name MarionetteBoneSliders
 extends VBoxContainer
 
-# P4 minimal — anatomical sliders for one MarionetteBone, injected into the
-# inspector. Drag a slider → bone's pose rotation updates via
-# Skeleton3D.set_bone_pose_rotation; releasing/leaving restores the rest
-# pose snapshot (no editor interaction ever leaves the scene non-default,
-# CLAUDE.md test policy adjacent).
+# P4 — anatomical sliders for one MarionetteBone, used by both the inspector
+# (one widget per selected bone) and the muscle-test dock (many widgets).
 #
-# Sliders presented per archetype DOF: any axis whose ROM range is wider
-# than _ZERO_RANGE shows a slider, others are skipped. Hinge bones get one
-# slider, Saddle two, Ball three, Fixed/Root none.
+# Compact 1-row-per-axis layout: [description+limits] [value] [colored
+# slider]. Colors mirror MarionetteJointLimitGizmo so a slider's color
+# matches the ROM arc it drives — flex red, medial rotation green,
+# abduction blue. No per-bone reset button: dock supplies "Reset All to
+# Rest"; callers (dock, tests) invoke `reset_to_rest()` directly.
 #
-# Skeleton resolution walks up parents from the MarionetteBone to find the
-# enclosing Skeleton3D. Works for the standard layout
-# Skeleton3D > PhysicalBoneSimulator3D > MarionetteBone but also tolerates
-# arbitrary nesting (in case the user reparents).
+# Lifecycle: snapshot rest pose in `_ready`, restore in `_exit_tree`. The
+# editor frees custom inspector controls on selection change, which
+# automatically restores rest. The dock relies on the same path when it
+# clears its content for a new ragdoll.
 
 const _ZERO_RANGE: float = 0.001
-const _SLIDER_STEP_RAD: float = 0.001  # ≈ 0.06°, smooth enough for visual sweep
+const _SLIDER_STEP_RAD: float = 0.001  # ≈ 0.06°
+
+# Match MarionetteJointLimitGizmo._COL_FLEX/_COL_ROT/_COL_ABD — kept local
+# (not imported) so this widget doesn't pull in the gizmo class for a UI
+# concern. Update both if the convention changes.
+const _COLOR_FLEX: Color = Color(1.0, 0.35, 0.35)
+const _COLOR_ROT: Color = Color(0.4, 1.0, 0.4)
+const _COLOR_ABD: Color = Color(0.4, 0.55, 1.0)
+
+const _DESC_WIDTH: float = 116.0
+const _VALUE_WIDTH: float = 38.0
+const _SLIDER_MIN_WIDTH: float = 60.0
 
 
 var _bone: MarionetteBone
@@ -34,6 +44,7 @@ var _value_labels: Dictionary[Object, Label] = {}
 
 func _init(bone: MarionetteBone) -> void:
 	_bone = bone
+	add_theme_constant_override("separation", 1)
 
 
 func _ready() -> void:
@@ -51,41 +62,32 @@ func _ready() -> void:
 	if _bone.bone_entry == null:
 		_add_label("(bone has no BoneEntry — regenerate the BoneProfile)")
 		return
-	# Snapshot eagerly so even if a single slider drag is the user's only
-	# action, _exit_tree restoration has something to write back.
 	_rest_pose = _skeleton.get_bone_pose_rotation(_bone_idx)
 	_has_snapshot = true
 	_build_ui()
 
 
 func _exit_tree() -> void:
-	# Editor inspector frees its custom controls when the selected node
-	# changes — that's our cue to restore. Also covers scene close, plugin
-	# disable, etc. Idempotent: no-op if we never snapshotted.
 	_restore_rest()
 
 
 func _build_ui() -> void:
 	var entry: BoneEntry = _bone.bone_entry
+
 	var header := Label.new()
-	header.text = "Muscle Test — %s" % _bone.bone_name
+	header.text = _bone.bone_name
+	header.add_theme_color_override("font_color", Color(0.78, 0.78, 0.85))
 	add_child(header)
 
 	if _axis_active(entry.rom_min.x, entry.rom_max.x):
-		_flex_slider = _add_axis_slider("Flexion", entry.rom_min.x, entry.rom_max.x)
+		_flex_slider = _add_axis_row("Flexion", entry.rom_min.x, entry.rom_max.x, _COLOR_FLEX)
 	if _axis_active(entry.rom_min.y, entry.rom_max.y):
-		_rot_slider = _add_axis_slider("Medial Rotation", entry.rom_min.y, entry.rom_max.y)
+		_rot_slider = _add_axis_row("Med Rot", entry.rom_min.y, entry.rom_max.y, _COLOR_ROT)
 	if _axis_active(entry.rom_min.z, entry.rom_max.z):
-		_abd_slider = _add_axis_slider("Abduction", entry.rom_min.z, entry.rom_max.z)
+		_abd_slider = _add_axis_row("Abduction", entry.rom_min.z, entry.rom_max.z, _COLOR_ABD)
 
 	if _flex_slider == null and _rot_slider == null and _abd_slider == null:
 		_add_label("(all axes locked — Fixed/Root or zero ROM)")
-		return
-
-	var reset_btn := Button.new()
-	reset_btn.text = "Reset to Rest"
-	reset_btn.pressed.connect(_on_reset_pressed)
-	add_child(reset_btn)
 
 
 func _axis_active(lo: float, hi: float) -> bool:
@@ -98,25 +100,39 @@ func _add_label(text: String) -> void:
 	add_child(label)
 
 
-func _add_axis_slider(label_text: String, lo: float, hi: float) -> HSlider:
-	var label := Label.new()
-	label.text = "%s (%.1f° to %.1f°)" % [label_text, rad_to_deg(lo), rad_to_deg(hi)]
-	add_child(label)
+# Single-row axis: [description with limits] [current value] [colored slider].
+# Description+value sit on the left so they don't shift when the slider
+# expands; value updates in-place as the slider moves.
+func _add_axis_row(axis_name: String, lo: float, hi: float, color: Color) -> HSlider:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 4)
+	add_child(row)
+
+	var desc := Label.new()
+	desc.text = "%s %.0f..%.0f°" % [axis_name, rad_to_deg(lo), rad_to_deg(hi)]
+	desc.custom_minimum_size = Vector2(_DESC_WIDTH, 0)
+	desc.tooltip_text = "%s — joint range %.1f° to %.1f°" % [axis_name, rad_to_deg(lo), rad_to_deg(hi)]
+	row.add_child(desc)
+
+	var value_label := Label.new()
+	value_label.text = "0°"
+	value_label.custom_minimum_size = Vector2(_VALUE_WIDTH, 0)
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(value_label)
 
 	var slider := HSlider.new()
 	slider.min_value = lo
 	slider.max_value = hi
 	slider.step = _SLIDER_STEP_RAD
 	slider.value = 0.0
-	slider.custom_minimum_size = Vector2(120, 0)
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.custom_minimum_size = Vector2(_SLIDER_MIN_WIDTH, 0)
+	slider.modulate = color
 	slider.value_changed.connect(_on_slider_changed)
-	add_child(slider)
+	row.add_child(slider)
 
-	var value_label := Label.new()
-	value_label.text = "0.0°"
-	add_child(value_label)
 	_value_labels[slider] = value_label
-
 	return slider
 
 
@@ -124,7 +140,11 @@ func _on_slider_changed(_v: float) -> void:
 	_apply_pose()
 
 
-func _on_reset_pressed() -> void:
+# Public reset entry point. Used by the dock's "Reset All to Rest" and by
+# unit tests; replaces the old per-bone Reset button. Zeros every active
+# slider, restores the snapshot rest pose, and re-snapshots so subsequent
+# slider drags compose on top of a clean base.
+func reset_to_rest() -> void:
 	if _flex_slider != null:
 		_flex_slider.set_value_no_signal(0.0)
 	if _rot_slider != null:
@@ -132,9 +152,8 @@ func _on_reset_pressed() -> void:
 	if _abd_slider != null:
 		_abd_slider.set_value_no_signal(0.0)
 	for slider: Object in _value_labels.keys():
-		_value_labels[slider].text = "0.0°"
+		_value_labels[slider].text = "0°"
 	_restore_rest()
-	# Re-snapshot so subsequent slider drags still have a base to compose on.
 	if _skeleton != null and _bone_idx >= 0:
 		_rest_pose = _skeleton.get_bone_pose_rotation(_bone_idx)
 		_has_snapshot = true
@@ -147,16 +166,13 @@ func _apply_pose() -> void:
 	var rot_v: float = _rot_slider.value if _rot_slider != null else 0.0
 	var abd_v: float = _abd_slider.value if _abd_slider != null else 0.0
 	if _flex_slider != null:
-		_value_labels[_flex_slider].text = "%.1f°" % rad_to_deg(flex_v)
+		_value_labels[_flex_slider].text = "%.0f°" % rad_to_deg(flex_v)
 	if _rot_slider != null:
-		_value_labels[_rot_slider].text = "%.1f°" % rad_to_deg(rot_v)
+		_value_labels[_rot_slider].text = "%.0f°" % rad_to_deg(rot_v)
 	if _abd_slider != null:
-		_value_labels[_abd_slider].text = "%.1f°" % rad_to_deg(abd_v)
+		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(abd_v)
 	var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
 			_bone.bone_entry, flex_v, rot_v, abd_v)
-	# Compose anatomical rotation onto the rest pose (post-multiply: the
-	# anatomical Quaternion is in the bone's local frame; it stacks after
-	# whatever rest rotation the bone already had).
 	_skeleton.set_bone_pose_rotation(_bone_idx, _rest_pose * anatomical)
 
 

@@ -71,6 +71,11 @@ func _init() -> void:
 		_test_muscle_slider_applies_pose,
 		_test_muscle_slider_restores_rest_on_exit_tree,
 		_test_muscle_slider_reset_button,
+		_test_bone_region_humanoid_total_84,
+		_test_bone_region_left_right_balance,
+		_test_bone_region_per_region_counts,
+		_test_bone_region_unknown_falls_back_to_other,
+		_test_bone_region_label_for_each,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -1703,7 +1708,7 @@ func _test_muscle_slider_reset_button() -> bool:
 		m.free()
 		return _fail("muscle_slider_reset", "_apply_pose did not displace pose pre-reset")
 
-	widget._on_reset_pressed()
+	widget.reset_to_rest()
 	var after := skel.get_bone_pose_rotation(bone_idx)
 	var pose_restored := _quat_close(after, rest)
 
@@ -1713,3 +1718,89 @@ func _test_muscle_slider_reset_button() -> bool:
 		return _fail("muscle_slider_reset",
 				"pose after reset=%s, rest=%s" % [after, rest])
 	return _ok("muscle_slider_reset_button")
+
+
+# ---------- MarionetteBoneRegion (P4.3 dock grouping) ----------
+
+func _test_bone_region_humanoid_total_84() -> bool:
+	# Every name in the archetype default map must classify into a real
+	# region — proves the dock won't lose bones to OTHER for a humanoid rig.
+	var unmapped: Array[StringName] = []
+	for bone_name: StringName in MarionetteArchetypeDefaults.HUMANOID_BY_BONE.keys():
+		if not MarionetteBoneRegion.has_mapping_for(bone_name):
+			unmapped.append(bone_name)
+	if unmapped.size() > 0:
+		return _fail("bone_region_humanoid_total",
+				"%d bones unmapped: %s" % [unmapped.size(), unmapped])
+	# And: total mapped count = 84 (cross-check with the archetype map).
+	var humanoid_count := MarionetteArchetypeDefaults.HUMANOID_BY_BONE.size()
+	if humanoid_count != 84:
+		return _fail("bone_region_humanoid_total",
+				"archetype map has %d bones, expected 84" % humanoid_count)
+	return _ok("bone_region_humanoid_total_84")
+
+
+func _test_bone_region_left_right_balance() -> bool:
+	# Left/right paired regions must have identical bone counts. Catches
+	# typos like a missing RightThumbDistal or asymmetric finger naming.
+	var counts := _count_humanoid_per_region()
+	var pairs: Array = [
+		[MarionetteBoneRegion.Region.LEFT_ARM, MarionetteBoneRegion.Region.RIGHT_ARM, "Arm"],
+		[MarionetteBoneRegion.Region.LEFT_HAND, MarionetteBoneRegion.Region.RIGHT_HAND, "Hand"],
+		[MarionetteBoneRegion.Region.LEFT_LEG, MarionetteBoneRegion.Region.RIGHT_LEG, "Leg"],
+		[MarionetteBoneRegion.Region.LEFT_FOOT, MarionetteBoneRegion.Region.RIGHT_FOOT, "Foot"],
+	]
+	for pair: Array in pairs:
+		var l: int = counts.get(pair[0], 0)
+		var r: int = counts.get(pair[1], 0)
+		if l != r:
+			return _fail("bone_region_lr_balance",
+					"%s asymmetric: left=%d right=%d" % [pair[2], l, r])
+	return _ok("bone_region_left_right_balance")
+
+
+func _test_bone_region_per_region_counts() -> bool:
+	# Spot-check exact per-region counts so a stray reclassification
+	# (moving Hips out of Spine, dropping Jaw, etc.) trips the test.
+	var counts := _count_humanoid_per_region()
+	var expectations: Array = [
+		[MarionetteBoneRegion.Region.SPINE, 5, "Spine: Root+Hips+Spine+Chest+UpperChest"],
+		[MarionetteBoneRegion.Region.HEAD_NECK, 5, "Head/Neck: Neck+Head+Jaw+LeftEye+RightEye"],
+		[MarionetteBoneRegion.Region.LEFT_ARM, 3, "Left arm: Shoulder+UpperArm+LowerArm"],
+		[MarionetteBoneRegion.Region.LEFT_HAND, 16, "Left hand: Hand + 15 finger bones"],
+		[MarionetteBoneRegion.Region.LEFT_LEG, 2, "Left leg: UpperLeg+LowerLeg"],
+		[MarionetteBoneRegion.Region.LEFT_FOOT, 16, "Left foot: Foot+Toes + 14 toe bones"],
+	]
+	for ex: Array in expectations:
+		var actual: int = counts.get(ex[0], 0)
+		if actual != ex[1]:
+			return _fail("bone_region_per_count",
+					"%s expected %d got %d" % [ex[2], ex[1], actual])
+	return _ok("bone_region_per_region_counts")
+
+
+func _test_bone_region_unknown_falls_back_to_other() -> bool:
+	var r := MarionetteBoneRegion.region_for(&"CosmeticTail")
+	if r != MarionetteBoneRegion.Region.OTHER:
+		return _fail("bone_region_other", "unknown bone got region %d, expected OTHER" % r)
+	if MarionetteBoneRegion.has_mapping_for(&"CosmeticTail"):
+		return _fail("bone_region_other", "has_mapping_for should be false for unknown")
+	return _ok("bone_region_unknown_falls_back_to_other")
+
+
+func _test_bone_region_label_for_each() -> bool:
+	# Every region in ORDER must have a non-empty label — guards against
+	# adding a Region enum value but forgetting the LABELS entry.
+	for region: int in MarionetteBoneRegion.ORDER:
+		var label := MarionetteBoneRegion.label_for(region)
+		if label == "" or label == "Region":
+			return _fail("bone_region_label", "region %d missing label" % region)
+	return _ok("bone_region_label_for_each")
+
+
+func _count_humanoid_per_region() -> Dictionary[int, int]:
+	var counts: Dictionary[int, int] = {}
+	for bone_name: StringName in MarionetteArchetypeDefaults.HUMANOID_BY_BONE.keys():
+		var region := MarionetteBoneRegion.region_for(bone_name)
+		counts[region] = counts.get(region, 0) + 1
+	return counts

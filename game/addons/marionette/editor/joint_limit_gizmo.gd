@@ -70,10 +70,13 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	var bone_map: BoneMap = node.bone_map
 	var use_live: bool = live_skeleton != null and bone_map != null
 
+	# Live path uses current bone poses (get_bone_global_pose) so the arcs
+	# follow the armature as sliders move it. Template path stays on rest
+	# since there's no live skeleton to follow.
 	var world_rests: Dictionary[StringName, Transform3D]
 	var source_to_local: Transform3D = Transform3D.IDENTITY
 	if use_live:
-		world_rests = MuscleFrameBuilder.compute_skeleton_world_rests(live_skeleton, profile, bone_map)
+		world_rests = MuscleFrameBuilder.compute_skeleton_global_poses(live_skeleton, profile, bone_map)
 		source_to_local = node.global_transform.affine_inverse() * live_skeleton.global_transform
 	else:
 		world_rests = MuscleFrameBuilder.compute_world_rests(profile)

@@ -172,3 +172,30 @@ static func compute_skeleton_world_rests(
 				continue
 		result[profile_name] = skeleton_global[i]
 	return result
+
+
+# Live-pose variant of compute_skeleton_world_rests: returns each profile
+# bone's *current* skeleton-local transform via get_bone_global_pose, so
+# gizmos that read this follow the armature when sliders / animation move
+# bones. Same name-resolution rules (BoneMap then direct match).
+static func compute_skeleton_global_poses(
+		skeleton: Skeleton3D,
+		profile: SkeletonProfile,
+		bone_map: BoneMap) -> Dictionary[StringName, Transform3D]:
+	var result: Dictionary[StringName, Transform3D] = {}
+	if skeleton == null or profile == null or bone_map == null:
+		return result
+	var profile_names: Dictionary[StringName, bool] = {}
+	for i in range(profile.bone_size):
+		profile_names[profile.get_bone_name(i)] = true
+	var bone_count: int = skeleton.get_bone_count()
+	for i in range(bone_count):
+		var skel_name: StringName = skeleton.get_bone_name(i)
+		var profile_name: StringName = bone_map.find_profile_bone_name(skel_name)
+		if profile_name == &"":
+			if profile_names.has(skel_name):
+				profile_name = skel_name
+			else:
+				continue
+		result[profile_name] = skeleton.get_bone_global_pose(i)
+	return result

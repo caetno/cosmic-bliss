@@ -113,7 +113,10 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	# skeleton-local -> world -> marionette-local.
 	var source_to_local: Transform3D = Transform3D.IDENTITY
 	if use_live:
-		world_rests = MuscleFrameBuilder.compute_skeleton_world_rests(live_skeleton, profile, bone_map)
+		# Use current poses so per-bone tripods follow the armature when the
+		# muscle-test sliders pose bones. Muscle frame still derives from
+		# rest topology (hip mid + head bone).
+		world_rests = MuscleFrameBuilder.compute_skeleton_global_poses(live_skeleton, profile, bone_map)
 		muscle_frame = MuscleFrameBuilder.build_from_skeleton(live_skeleton, profile, bone_map)
 		source_to_local = node.global_transform.affine_inverse() * live_skeleton.global_transform
 	else:
