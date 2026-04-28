@@ -1,10 +1,707 @@
-[gd_resource type="Resource" script_class="BoneProfile" load_steps=3 format=3]
+[gd_resource type="Resource" script_class="BoneProfile" format=3 uid="uid://dhxy8mpmsdvvl"]
 
+[ext_resource type="Script" uid="uid://rl0pyf6bqvy1" path="res://addons/marionette/resources/bone_entry.gd" id="1_igw2a"]
 [ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/data/marionette_humanoid_profile.tres" id="1_skel"]
 [ext_resource type="Script" uid="uid://dbevicy4chs4i" path="res://addons/marionette/resources/bone_profile.gd" id="2_script"]
+
+[sub_resource type="Resource" id="Resource_3os0y"]
+script = ExtResource("1_igw2a")
+archetype = 4
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+
+[sub_resource type="Resource" id="Resource_sqhgq"]
+script = ExtResource("1_igw2a")
+archetype = 4
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+
+[sub_resource type="Resource" id="Resource_igw2a"]
+script = ExtResource("1_igw2a")
+archetype = 6
+
+[sub_resource type="Resource" id="Resource_kir2g"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ixptl"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_2wx4k"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.2617994, 0, -0.34906584)
+rom_max = Vector3(0.6981317, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ikpib"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(-0.9599311, 0, -0.2617994)
+rom_max = Vector3(0.9599311, 0, 0.61086524)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_li1yi"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ilpl0"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+along_bone_axis = 4
+abduction_axis = 2
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_eynxo"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_kobfg"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_xwt0j"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+along_bone_axis = 4
+abduction_axis = 2
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_vjmcu"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_lqb1w"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 4
+abduction_axis = 1
+rom_max = Vector3(2.443461, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ljfrw"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(2.3561945, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_2q8xy"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_npyau"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+along_bone_axis = 4
+abduction_axis = 2
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_2bn5p"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_71qny"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_t3dgm"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+along_bone_axis = 4
+abduction_axis = 2
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ybeko"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_ab03b"]
+script = ExtResource("1_igw2a")
+archetype = 5
+flex_axis = 4
+abduction_axis = 1
+rom_min = Vector3(-0.2617994, -0.2617994, -0.2617994)
+rom_max = Vector3(0.2617994, 0.2617994, 0.2617994)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_3wkcm"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 4
+abduction_axis = 1
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_3lsjq"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_rjwyl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 4
+along_bone_axis = 1
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_oi08f"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_l57qe"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_vesjk"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_8u8rm"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_g2cbg"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_n7fid"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_dglje"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_jlwol"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_yhu21"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_4ls45"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_dbeys"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_mln5e"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_v7hip"]
+script = ExtResource("1_igw2a")
+archetype = 0
+flex_axis = 2
+along_bone_axis = 4
+abduction_axis = 0
+rom_min = Vector3(0, -1.3089969, 0)
+rom_max = Vector3(2.6179938, 1.3089969, 2.6179938)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_x774u"]
+script = ExtResource("1_igw2a")
+archetype = 0
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.2617994, -0.7853982, 0)
+rom_max = Vector3(1.7453293, 0.7853982, 0.6981317)
+is_left_side = true
+
+[sub_resource type="Resource" id="Resource_0ihmu"]
+script = ExtResource("1_igw2a")
+archetype = 4
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+
+[sub_resource type="Resource" id="Resource_oypoo"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_7mndj"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_018qj"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.2617994, 0, -0.34906584)
+rom_max = Vector3(0.6981317, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_srimh"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(-0.9599311, 0, -0.2617994)
+rom_max = Vector3(0.9599311, 0, 0.61086524)
+
+[sub_resource type="Resource" id="Resource_03elu"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_mbw12"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_bas1x"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_yblou"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_gr36y"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_uhbpt"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_y8ssm"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 4
+abduction_axis = 1
+rom_max = Vector3(2.443461, 0, 0)
+
+[sub_resource type="Resource" id="Resource_wdnwa"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(2.3561945, 0, 0)
+
+[sub_resource type="Resource" id="Resource_yaggl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_thfmo"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_3eel6"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_yomct"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_vp57u"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_sh7ah"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_dsyxt"]
+script = ExtResource("1_igw2a")
+archetype = 5
+flex_axis = 4
+abduction_axis = 1
+rom_min = Vector3(-0.2617994, -0.2617994, -0.2617994)
+rom_max = Vector3(0.2617994, 0.2617994, 0.2617994)
+
+[sub_resource type="Resource" id="Resource_wdjlr"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+abduction_axis = 0
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_18o6l"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 5
+abduction_axis = 0
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_1kk5w"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 5
+along_bone_axis = 0
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_iw6et"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_ftlpl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_4s1xe"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_0qu8c"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_nbeou"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_qilni"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_7ca55"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_h10ju"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_mxx3l"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_agkcq"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_x6yki"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+
+[sub_resource type="Resource" id="Resource_38pew"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+
+[sub_resource type="Resource" id="Resource_6k7wc"]
+script = ExtResource("1_igw2a")
+archetype = 0
+flex_axis = 3
+along_bone_axis = 4
+abduction_axis = 1
+rom_min = Vector3(0, -1.3089969, 0)
+rom_max = Vector3(2.6179938, 1.3089969, 2.6179938)
+
+[sub_resource type="Resource" id="Resource_15d27"]
+script = ExtResource("1_igw2a")
+archetype = 0
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.2617994, -0.7853982, 0)
+rom_max = Vector3(1.7453293, 0.7853982, 0.6981317)
+
+[sub_resource type="Resource" id="Resource_8ij37"]
+script = ExtResource("1_igw2a")
+archetype = 4
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+
+[sub_resource type="Resource" id="Resource_8kpxv"]
+script = ExtResource("1_igw2a")
+archetype = 4
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
 
 [resource]
 script = ExtResource("2_script")
 skeleton_profile = ExtResource("1_skel")
-total_mass = 70.0
-bones = {}
+bones = Dictionary[StringName, ExtResource("1_igw2a")]({
+&"Chest": SubResource("Resource_3os0y"),
+&"Head": SubResource("Resource_sqhgq"),
+&"Hips": SubResource("Resource_igw2a"),
+&"LeftBigToeDistal": SubResource("Resource_kir2g"),
+&"LeftBigToeProximal": SubResource("Resource_ixptl"),
+&"LeftFoot": SubResource("Resource_2wx4k"),
+&"LeftHand": SubResource("Resource_ikpib"),
+&"LeftIndexDistal": SubResource("Resource_li1yi"),
+&"LeftIndexIntermediate": SubResource("Resource_ilpl0"),
+&"LeftIndexProximal": SubResource("Resource_eynxo"),
+&"LeftLittleDistal": SubResource("Resource_kobfg"),
+&"LeftLittleIntermediate": SubResource("Resource_xwt0j"),
+&"LeftLittleProximal": SubResource("Resource_vjmcu"),
+&"LeftLowerArm": SubResource("Resource_lqb1w"),
+&"LeftLowerLeg": SubResource("Resource_ljfrw"),
+&"LeftMiddleDistal": SubResource("Resource_2q8xy"),
+&"LeftMiddleIntermediate": SubResource("Resource_npyau"),
+&"LeftMiddleProximal": SubResource("Resource_2bn5p"),
+&"LeftRingDistal": SubResource("Resource_71qny"),
+&"LeftRingIntermediate": SubResource("Resource_t3dgm"),
+&"LeftRingProximal": SubResource("Resource_ybeko"),
+&"LeftShoulder": SubResource("Resource_ab03b"),
+&"LeftThumbDistal": SubResource("Resource_3wkcm"),
+&"LeftThumbMetacarpal": SubResource("Resource_3lsjq"),
+&"LeftThumbProximal": SubResource("Resource_rjwyl"),
+&"LeftToe2Distal": SubResource("Resource_oi08f"),
+&"LeftToe2Intermediate": SubResource("Resource_l57qe"),
+&"LeftToe2Proximal": SubResource("Resource_vesjk"),
+&"LeftToe3Distal": SubResource("Resource_8u8rm"),
+&"LeftToe3Intermediate": SubResource("Resource_g2cbg"),
+&"LeftToe3Proximal": SubResource("Resource_n7fid"),
+&"LeftToe4Distal": SubResource("Resource_dglje"),
+&"LeftToe4Intermediate": SubResource("Resource_jlwol"),
+&"LeftToe4Proximal": SubResource("Resource_yhu21"),
+&"LeftToe5Distal": SubResource("Resource_4ls45"),
+&"LeftToe5Intermediate": SubResource("Resource_dbeys"),
+&"LeftToe5Proximal": SubResource("Resource_mln5e"),
+&"LeftUpperArm": SubResource("Resource_v7hip"),
+&"LeftUpperLeg": SubResource("Resource_x774u"),
+&"Neck": SubResource("Resource_0ihmu"),
+&"RightBigToeDistal": SubResource("Resource_oypoo"),
+&"RightBigToeProximal": SubResource("Resource_7mndj"),
+&"RightFoot": SubResource("Resource_018qj"),
+&"RightHand": SubResource("Resource_srimh"),
+&"RightIndexDistal": SubResource("Resource_03elu"),
+&"RightIndexIntermediate": SubResource("Resource_mbw12"),
+&"RightIndexProximal": SubResource("Resource_bas1x"),
+&"RightLittleDistal": SubResource("Resource_yblou"),
+&"RightLittleIntermediate": SubResource("Resource_gr36y"),
+&"RightLittleProximal": SubResource("Resource_uhbpt"),
+&"RightLowerArm": SubResource("Resource_y8ssm"),
+&"RightLowerLeg": SubResource("Resource_wdnwa"),
+&"RightMiddleDistal": SubResource("Resource_yaggl"),
+&"RightMiddleIntermediate": SubResource("Resource_thfmo"),
+&"RightMiddleProximal": SubResource("Resource_3eel6"),
+&"RightRingDistal": SubResource("Resource_yomct"),
+&"RightRingIntermediate": SubResource("Resource_vp57u"),
+&"RightRingProximal": SubResource("Resource_sh7ah"),
+&"RightShoulder": SubResource("Resource_dsyxt"),
+&"RightThumbDistal": SubResource("Resource_wdjlr"),
+&"RightThumbMetacarpal": SubResource("Resource_18o6l"),
+&"RightThumbProximal": SubResource("Resource_1kk5w"),
+&"RightToe2Distal": SubResource("Resource_iw6et"),
+&"RightToe2Intermediate": SubResource("Resource_ftlpl"),
+&"RightToe2Proximal": SubResource("Resource_4s1xe"),
+&"RightToe3Distal": SubResource("Resource_0qu8c"),
+&"RightToe3Intermediate": SubResource("Resource_nbeou"),
+&"RightToe3Proximal": SubResource("Resource_qilni"),
+&"RightToe4Distal": SubResource("Resource_7ca55"),
+&"RightToe4Intermediate": SubResource("Resource_h10ju"),
+&"RightToe4Proximal": SubResource("Resource_mxx3l"),
+&"RightToe5Distal": SubResource("Resource_agkcq"),
+&"RightToe5Intermediate": SubResource("Resource_x6yki"),
+&"RightToe5Proximal": SubResource("Resource_38pew"),
+&"RightUpperArm": SubResource("Resource_6k7wc"),
+&"RightUpperLeg": SubResource("Resource_15d27"),
+&"Spine": SubResource("Resource_8ij37"),
+&"UpperChest": SubResource("Resource_8kpxv")
+})
