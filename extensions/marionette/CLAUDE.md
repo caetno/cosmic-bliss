@@ -208,7 +208,7 @@ Per soft region (gluteus, breast, belly, jowls, etc.), 1–2 child bones with tr
 ## Technical defaults
 
 - Godot 4.6+. Verify API signatures against `docs.godotengine.org`; don't rely on memory.
-- **Pure GDScript addon.** Everything — runtime SPD, orchestrator, resources, editor tooling — is GDScript. A targeted C++ port of the SPD hot path is held in reserve as optional Phase 12, triggered only by profiling evidence at realistic character count. Do not introduce GDExtension scaffolding pre-emptively.
+- **C++ GDExtension with GDScript glue.** The active-ragdoll core ships in C++ via SConstruct: `MarionetteBone` (SPD via `_integrate_forces`), `SPDMath`, `MarionetteComposer` (cost-weighted IK soup, posture-pattern blending, strain, engagement pump), `RhythmReadout`, `IKChainSolver`. GDScript ships: all `Resource` types (`BoneEntry`, `BoneProfile`, `BoneStateProfile`, `RagdollPose`, `PosturePattern`, `EngagementProfile`, `FrequencyComplianceCurve`, etc.), archetype solvers (authoring-time only), `MuscleFrameBuilder` (authoring-time), `Marionette.gd` autoload wrapper that owns the C++ composer instance, gizmos, editor tooling, inspector panels, import workflow scripts, test harnesses. Data flows GDScript → C++ via cached resource handoffs and once-per-change bound-method calls; C++ does not read GDScript callbacks per tick.
 - Use static typing everywhere in GDScript. Typed GDScript is ~2-3x faster than dynamic and catches most coordinate-space bugs at parse time.
 - Prefer nodes over nested resources for inspector-configured objects. Exception: `BoneProfile`, `RagdollPose`, etc. are resources because they're shared across characters.
 - When referencing Jolt semantics, verify against Jolt docs and godot-jolt repo.
@@ -246,24 +246,37 @@ Flag proactively:
 
 ## File organization
 
-Marionette lives in the monorepo as `extensions/marionette/`. `tools/build.sh marionette`
-deploys `gdscript/` → `game/addons/marionette/` (flat, since this is a pure-GDScript addon).
-`plugin.cfg` at the extension root is lifted to the addon root on deploy.
+Marionette lives in the monorepo as `extensions/marionette/` and builds as a C++ GDExtension.
+`tools/build.sh marionette` compiles `src/` via SConstruct, deploys the resulting `.so` to
+`game/addons/marionette/bin/`, and copies `gdscript/` → `game/addons/marionette/scripts/`
+(mixed-mode `HAS_CPP=true` path). `plugin.cfg` at the extension root declares both the
+`.gdextension` and the editor plugin entry point; it is lifted to the addon root on deploy.
 
 ```
 extensions/marionette/
 ├── CLAUDE.md
 ├── plugin.cfg                          (addon manifest — lifted to game/addons/marionette/ on build)
-├── gdscript/                           (deploys to game/addons/marionette/)
+├── marionette.gdextension              (GDExtension manifest)
+├── SConstruct                          (godot-cpp submodule build, output to bin/)
+├── src/                                (C++ core)
+│   ├── register_types.cpp / .h         (registers MarionetteCore et al.)
+│   ├── marionette_core.cpp / .h        (autoload-facing root class)
+│   ├── marionette_bone.cpp / .h        (extends PhysicalBone3D; SPD in _integrate_forces)
+│   ├── spd_math.cpp / .h               (static helpers)
+│   ├── marionette_composer.cpp / .h    (cost-weighted IK soup, engagement pump, strain)
+│   ├── rhythm_readout.cpp / .h         (band-pass filter, drive-axis estimators)
+│   └── ik_chain_solver.cpp / .h        (DLS Jacobian, Huber-loss soft constraints)
+├── gdscript/                           (deploys to game/addons/marionette/scripts/)
 │   ├── plugin.gd
 │   ├── resources/                      (Resource subclasses)
-│   ├── runtime/                        (MarionetteBone, Marionette controller, evaluators)
-│   │   └── archetype_solvers/          (one file per archetype)
+│   ├── runtime/
+│   │   ├── marionette.gd               (autoload wrapper that owns the C++ composer)
+│   │   └── archetype_solvers/          (one file per archetype, authoring-time only)
 │   ├── editor/                         (EditorPlugin, gizmos, docks, inspectors)
 │   ├── data/                           (shipped .tres: profile, default BoneProfile, etc.)
 │   ├── poses/, cyclic/, macros/, emotions/, overlays/   (preset libraries)
+│   ├── posture_patterns/               (PosturePattern.tres library)
 │   └── textures/                       (foot textures for profile BoneMap display)
-├── src/                                (does not exist yet; created only if Phase 12 profiling triggers SPD math port)
 └── tests/
 
 docs/marionette/                        (plan, ARP mapping, BoneMap notes — repo-level)
