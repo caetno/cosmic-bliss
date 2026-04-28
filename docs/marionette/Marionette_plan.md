@@ -34,7 +34,7 @@ Read these before every phase. Full detail in `CLAUDE.md`.
 - Smoke test (asserts `1 + 1 == 2`).
 - `demo/empty.tscn` with `Node3D` root opens cleanly.
 
-**Note**: no GDExtension / C++ scaffolding here. The addon ships as pure GDScript. A targeted C++ port of SPD math is held in reserve as an optional Phase 12, triggered only by profiling evidence.
+**Note**: Marionette ships as a C++ GDExtension from the start. The active-ragdoll core (SPD math, per-bone integration, composer, IK, strain, engagement) runs in C++ to avoid design compromises imposed by GDScript per-tick cost at 60Hz × 84 bones × 30 DOFs. Resources, archetype solvers (authoring-time), muscle frame builder, gizmos, editor tooling, and test harnesses remain GDScript. Tunables (cost weights, frequency bands, mindset curves, posture pattern libraries) live in `.tres` resources or `@export` properties on the GDScript wrapper, so iteration on parameters does not require a rebuild. Phase 0 ships the empty addon; Phase 2.0 adds the C++ extension scaffold.
 
 ### Milestone
 
@@ -122,6 +122,27 @@ docs/
 demo/
 └── profile_test.tscn
 ```
+
+---
+
+## Phase 2.0 — Marionette C++ extension scaffold
+
+**Goal**: `extensions/marionette/` builds as a C++ GDExtension; the addon registers a `MarionetteCore` class accessible from GDScript with a no-op tick. Establishes the GDScript → C++ bridge that all later phases (P5 SPD, P10 composer/IK/engagement, P14 balance) build on.
+
+### Tasks
+
+- **P2.0.1** — `extensions/marionette/SConstruct` (mirror `extensions/tentacletech/SConstruct` structure — godot-cpp submodule, output to `bin/`).
+- **P2.0.2** — `extensions/marionette/marionette.gdextension` manifest.
+- **P2.0.3** — `src/register_types.cpp` / `register_types.h` — registers placeholder `MarionetteCore` class.
+- **P2.0.4** — `src/marionette_core.cpp` / `.h` — placeholder C++ class with `_process(delta)` no-op + `hello()` returning a string. Confirms GDScript can call into the extension.
+- **P2.0.5** — `tools/build.sh marionette` deploys to `game/addons/marionette/bin/`. Build script already supports both pure-GDScript and C++ addons; ensure mixed-mode (`HAS_CPP=true` path) deploys `gdscript/` → `addons/marionette/scripts/`.
+- **P2.0.6** — Update `extensions/marionette/plugin.cfg` to declare both the `.gdextension` and the editor plugin entry point.
+- **P2.0.7** — Sanity test: GDScript test harness instantiates `MarionetteCore`, calls `hello()`, asserts return value. Establishes the bridge.
+
+### Milestone
+
+- Build succeeds. GDScript test calls into C++. Existing GDScript-side resources (`BoneEntry`, `BoneProfile`, archetype solvers from P2.1+) are unaffected. Subsequent phases populate `MarionetteCore` with real logic.
+- Video artifact: none (text-level milestone — captured in build log + test pass).
 
 ---
 
@@ -387,28 +408,30 @@ demo/
 
 **Goal**: `MarionetteBone` runs SPD; the character actively poses itself via muscle sliders. Hip tether enables in-place testing. Strength parameter takes character from limp to rigid continuously.
 
+**Implementation language**: the SPD hot path (`SPDMath`, `MarionetteBone._integrate_forces`, strength application, contact-triggered alpha reduction) ships in C++ from the first commit of this phase, building on the Phase 2.0 scaffold. GDScript holds the orchestrator wrapper (`Marionette.gd`), the hip-tether scaffolding (P5.6–P5.9), and unit-test harnesses; sliders write to `Marionette.set_bone_target()` (GDScript) which forwards once-per-change to C++ via a bound method.
+
 ### Tasks
 
-- **P5.1** — `SPDMath` static helpers: `error_quaternion(current, target)`, `compute_torque(error_axis_angle, omega, kp, kd, dt)` using SPD formulation.
-- **P5.2** — Alpha/damping_ratio → kp/kd converter. Inputs: alpha, damping_ratio, bone mass, physics dt. Output: kp, kd. Formulation: `omega_n = 1 / (alpha * dt)`, `kp = mass * omega_n²`, `kd = mass * 2 * damping_ratio * omega_n`.
-- **P5.3** — `MarionetteBone._integrate_forces(state)` implementation:
+- **P5.1** — `SPDMath` static helpers in `src/spd_math.cpp` / `.h`: `error_quaternion(current, target)`, `compute_torque(error_axis_angle, omega, kp, kd, dt)` using SPD formulation. Bound to GDScript via godot-cpp class registration only for unit-test access.
+- **P5.2** — Alpha/damping_ratio → kp/kd converter (static C++). Inputs: alpha, damping_ratio, bone mass, physics dt. Output: kp, kd. Formulation: `omega_n = 1 / (alpha * dt)`, `kp = mass * omega_n²`, `kd = mass * 2 * damping_ratio * omega_n`.
+- **P5.3** — `MarionetteBone` in C++ (`src/marionette_bone.cpp` / `.h`), extending `PhysicalBone3D` from godot-cpp. SPD runs in `_integrate_forces`. Reads target rotation from a cached value set by the composer/wrapper (no per-tick GDScript dispatch):
   - If `current_state == Kinematic`: return (body is frozen, skeleton drives it)
   - If `current_state == Unpowered`: return (pure ragdoll, no control torques)
   - If `current_state == Powered`:
-    - Read anatomical target from `Marionette.get_bone_target(bone_name)`
+    - Read cached anatomical target written by `MarionetteCore` from `Marionette.set_bone_target(...)` (GDScript wrapper hands it across once per change).
     - Convert anatomical target to joint-local quaternion (joint-local = anatomical post-creation, so identity rotation, just axis-angle construction)
     - Compute current rotation relative to parent `MarionetteBone`
     - Compute SPD torque with strength-scaled kp, kd, max_torque
     - Apply torque via `state.apply_torque()`
-  - Contact-triggered alpha reduction: if any contact detected this frame, reduce effective alpha for N frames (configurable) to prevent wall vibration.
-- **P5.4** — `Marionette` orchestrator gains:
-  - `global_strength: float = 1.0`
-  - Per-bone anatomical target storage: `Dictionary<StringName, Vector3>` (flex, rot, abd)
-  - Per-bone strength override: `Dictionary<StringName, float>`
-  - `set_bone_target(bone_name, anatomical_vec3)` API
-  - `set_bone_strength(bone_name, value)` API
-  - `set_global_strength(value)` API
-- **P5.5** — Gravity handling: `gravity_scale` property on `Marionette` applied to all `MarionetteBone` bodies. Optional `hip_upward_nudge` constant force on root bone while `global_strength > threshold` to counter sagging.
+  - Contact-triggered alpha reduction: if any contact detected this frame, reduce effective alpha for N frames (configurable) to prevent wall vibration. Implemented in C++.
+- **P5.4** — `Marionette` orchestrator (GDScript wrapper `Marionette.gd` + C++ `MarionetteCore::set_global_strength(float)`):
+  - `global_strength: float = 1.0` (applied in C++)
+  - Per-bone anatomical target storage in C++ cache; GDScript-side `Dictionary<StringName, Vector3>` mirror for tooling.
+  - Per-bone strength override forwarded to C++ via bound method.
+  - `set_bone_target(bone_name, anatomical_vec3)` API on `Marionette.gd`, calls C++.
+  - `set_bone_strength(bone_name, value)` API, calls C++.
+  - `set_global_strength(value)` API, calls C++.
+- **P5.5** — Gravity handling (C++ `MarionetteCore`): `gravity_scale` property applied to all `MarionetteBone` bodies. Optional `hip_upward_nudge` constant force on root bone while `global_strength > threshold` to counter sagging.
 - **P5.6** — Alpha ramp-up helper: when strength changes from low to high (e.g., 0 → 1), effective strength ramps over N seconds to prevent snap-to-pose pop.
 - **P5.7** — Hierarchical constraint validator: at `build_ragdoll()`, validate `BoneStateProfile` — if any `Powered` bone has a `Kinematic` ancestor, log warning or auto-fix (promote ancestor to at least `Unpowered`).
 - **P5.8** — Muscle Test tab gains mode toggle: "Skeleton3D Preview" (P4 behavior) vs "Ragdoll Test". Ragdoll Test mode:
@@ -419,7 +442,7 @@ demo/
   - Sliders drive SPD targets via `Marionette.set_bone_target()` instead of kinematic writes.
   - "Apply Impulse" tool: click-drag on a bone in the viewport applies a test impulse.
 - **P5.9** — Rest-pose guard extended: exiting Ragdoll Test mode stops physics, resets all bones to rest, removes tether.
-- **P5.10** — Unit tests: SPD torque matches hand-computed reference for known inputs; alpha/damping → kp/kd conversion correct; anatomical→joint-local target conversion is identity post-creation (roundtrip verified).
+- **P5.10** — Unit tests: GDScript test harness calls into C++ `SPDMath` via bound methods. SPD torque matches hand-computed reference for known inputs (bit-equivalent against a reference vector); alpha/damping → kp/kd conversion correct; anatomical→joint-local target conversion is identity post-creation (roundtrip verified).
 
 ### Milestone
 
@@ -436,19 +459,22 @@ demo/
 ### Files
 
 ```
-addons/marionette/
-├── runtime/
-│   ├── spd_math.gd
-│   ├── spd_gain_converter.gd
-│   ├── hip_tether.gd
-│   └── strength_ramp.gd
-├── editor/
-│   ├── ragdoll_test_mode.gd
-│   ├── impulse_tool.gd
-│   └── diagnostic_overlay.gd
-tests/
-├── test_spd_math.gd
-└── test_gain_converter.gd
+extensions/marionette/
+├── src/
+│   ├── spd_math.cpp / .h               (P5.1 — C++ SPD helpers)
+│   ├── spd_gain_converter.cpp / .h     (P5.2 — alpha/damping → kp/kd)
+│   └── marionette_bone.cpp / .h        (P5.3 — _integrate_forces SPD)
+├── gdscript/
+│   ├── runtime/
+│   │   ├── hip_tether.gd               (P5.8 scaffolding)
+│   │   └── strength_ramp.gd            (P5.6)
+│   └── editor/
+│       ├── ragdoll_test_mode.gd
+│       ├── impulse_tool.gd
+│       └── diagnostic_overlay.gd
+└── tests/
+    ├── test_spd_math.gd                (P5.10 — calls into C++ via bound methods)
+    └── test_gain_converter.gd
 demo/
 └── ragdoll_test_scene.tscn
 ```
@@ -782,52 +808,147 @@ demo/
 
 ---
 
-## Phase 10 — Self-balancing and foot IK
+## Phase 10 — Composer, cost-weighted IK soup, engagement vector, strain
 
-**Goal**: character stands against small pushes, takes a procedural catch-step against larger pushes, falls cleanly on overwhelming pushes.
+**Goal**: `MarionetteComposer` (C++) takes a soup of weighted goals (anchors, end-effector positions, posture priors from pattern library, engagement-vector pumping) and produces per-bone target rotations consumed by SPD. Strain is published as a continuous Stimulus Bus channel. Frequency compliance integrates `body_rhythm_frequency` from a Reverie-proposed value through a mindset-gated curve.
+
+Self-balancing, catch-step, support polygon, COM PD, and ground-tracking foot IK are **deferred to Phase 14**.
+
+### Architectural commitments
+
+These are binding for this phase. Implement them; don't renegotiate.
+
+1. **Composer is soup-of-goals, not layered priority.** Single weighted-cost optimization per tick. Hard-anchor goals get high weight (~100); primary reach goals moderate (~10); engagement-pump targets ~5; posture priors low (~1). Soft constraints use **Huber loss**, not L2 — prevents ugly compromise poses when goals conflict.
+2. **Composer feeds SPD as soft targets, not hard constraints.** SPD chases; failure is graceful. SPD itself is unchanged in structure (per-bone PD), just C++-resident from P5.
+3. **Engagement pump is 100% predictive.** Composer maintains cycle-averaged drive-direction estimators (`drive_axis_linear`, `drive_axis_angular`) updated once per cycle from pelvis velocity. Per-bone target oscillations are written using `cos(body_rhythm_phase + engagement_phase)`, not by reading instantaneous velocity. No filter latency in the active output.
+4. **Posture priors are pattern-library superposition.** Mindset distribution writes weights into a stack of `PosturePattern` resources (toe curl, back arch, jaw slack, hand grasp, hip drop, neck loll, etc.). Composer sums weighted patterns into the posture-prior cost term. Reverie reaction profiles point at pattern stacks.
+5. **Strain feeds Reverie via continuous Stimulus Bus channel `body_strain`.** Composer publishes scalar per tick = Σ saturation across all SPD-driven joints. Reverie consumes for vocal grunt / breath / facial tension / mindset drift toward Overwhelmed.
+6. **Frequency lerp is slew-rate-limited per mindset.** `df_dt_max(mindset)` capped — body cannot jump tempos suddenly. Slow for resistant/overwhelmed; fast for aroused/edge.
+7. **Two-stage strain.** IK solves once without strain cost (cheap path, most ticks). If any joint saturates in the solved pose, re-solve with strain penalty added. Avoids paying inverse-dynamics cost every tick.
+8. **Pelvis is the single rhythm-readout anchor for v1.** Composer reads only pelvis linear + angular velocity for drive-axis estimation. Future expansion (sternum, head) is one-line addition; not in v1.
 
 ### Tasks
 
-- **P10.1** — Foot IK modifier. Verify Godot 4.6 provides a usable IK `SkeletonModifier3D`; if yes, use it; if no, implement 2-segment FABRIK as a custom `SkeletonModifier3D`.
-- **P10.2** — Per-leg foot IK config: target position (world space), target orientation, hip bone, foot bone. Outputs hip/knee/ankle bone poses.
-- **P10.3** — Ground raycast per foot: from ankle position downward, hit provides target foot position + normal for orientation.
-- **P10.4** — IK outputs feed SPD as targets (target generator pattern). Not hard constraints.
-- **P10.5** — COM computation from mass-weighted `MarionetteBone` positions.
-- **P10.6** — Support polygon: convex hull of foot contact points (or foot rectangles when grounded).
-- **P10.7** — Balance PD controller: COM offset from support polygon center → hip target adjustment + ankle torque bias. Separate PD on COM velocity.
-- **P10.8** — Procedural catch-step:
-  - Trigger condition: COM exits support polygon beyond threshold AND COM velocity exceeds threshold
-  - Compute step target: COM projection + velocity × step_lead_time (crude capture point)
-  - Generate foot trajectory: Hermite through (current foot, apex above midpoint, target), duration = f(step length)
-  - During step: swing leg strength stays high (tracks trajectory), stance leg stays high, hip target shifts toward stance foot
-  - On foot contact or trajectory complete: switch stance, return to Standing
-- **P10.9** — State machine: `Standing`, `Stepping`, `Falling`. Transitions based on COM-outside-polygon duration + body tilt.
-- **P10.10** — Balance tab in right dock: support polygon visualization, COM gizmo, tilt threshold slider, step parameters (lead time, apex height, min/max step length).
+- **P10.1** — `IKChainSolver` (C++, `src/ik_chain_solver.cpp`/.h): damped-least-squares Jacobian solver. Inputs: chain bones, goal stack, ROM limits per joint. Output: per-joint angle deltas. Soft constraints use Huber loss, not L2. Single iteration per tick (DLS converges acceptably in 1–2 iterations for soft-target chases). Hard goals (anchors) get weight ~100; primary reach goals ~10; posture prior ~1; engagement-pump targets ~5.
+- **P10.2** — Goal types: `PositionGoal(end_effector_bone, target_world_pos, weight)`, `OrientationGoal(end_effector_bone, target_quat, weight)`, `PinAnchor(bone, world_pos, hard_weight=100)`. All soft (composer feeds SPD as targets, not hard constraints).
+- **P10.3** — Posture-prior cost: composer maintains a stack of `PosturePattern` resources with weights. Each pattern is a per-bone delta map (StringName → Quaternion delta). Composer sums weighted deltas; the composed offset is applied as a low-weight cost term toward the perturbed rest pose.
+- **P10.4** — Engagement vector input: `MarionetteComposer::set_engagement_vector(magnitude, phase, phase_noise)`. Reverie writes per tick. Composer reads.
+- **P10.5** — `RhythmReadout` (C++, `src/rhythm_readout.cpp`/.h): biquad band-pass filter on pelvis linear + angular velocity, bandwidth scaled to current `body_rhythm_frequency` (Q ≈ 2–3). Output cycle-averaged `drive_axis_linear` (3-vec) and `drive_axis_angular` (3-vec) updated once per cycle (not per tick — averaging window = one rhythm period).
+- **P10.6** — Predictive engagement pump:
+
+  ```
+  for each bone b in PropagationGraph with weight w_b > 0:
+    pump_offset_lin = w_b × magnitude × |drive_axis_linear|
+                    × drive_axis_linear_unit × cos(body_rhythm_phase + engagement_phase)
+    pump_offset_ang = (analogous, using angular axis)
+    bone_target[b] += pump_offset_lin (translated into per-bone rotation contribution)
+    bone_target[b] += pump_offset_ang
+    if engagement_phase_noise > 0:
+      bone_target[b] += per-bone-decoherent jitter scaled by phase_noise
+  ```
+
+  Pump direction is observed (estimator), pump phase is committed (read from `body_rhythm_phase` directly). No filter lag in the active output.
+- **P10.7** — Strain computation: per-tick, composer queries each `MarionetteBone` for current required-vs-clamp ratio. `body_strain = Σ smoothstep(0.7, 1.0, required_torque[j] / max_torque[j])²`. Published on Stimulus Bus continuous channel `body_strain`.
+- **P10.8** — Two-stage strain solve: solve IK once without strain cost. Compute strain. If any joint saturates above threshold, re-solve with `strain_cost` term added. Most ticks pay only the cheap pass.
+- **P10.9** — Frequency compliance integration: composer reads `body_rhythm_frequency_proposed` (Reverie writes) and lerps `body_rhythm_frequency` toward it at rate `compliance × dt × responsiveness`, capped by `df_dt_max` from the current mindset's frequency compliance curve.
+- **P10.10** — `body_rhythm_phase` integration in C++ — never reset, monotonically increasing modulo 2π for evaluation, integrated continuously from `body_rhythm_frequency × dt`. (P7.10 commits this; this task confirms the integrator lives in `MarionetteComposer`.)
+- **P10.11** — Bind composer API to GDScript on `Marionette.gd`: `set_engagement_vector(magnitude, phase, phase_noise)`, `add_position_goal(end_effector, world_pos, weight)`, `add_orientation_goal(end_effector, world_quat, weight)`, `add_pin_anchor(bone, world_pos, weight)`, `clear_goals()`, `set_posture_pattern_weights(Array of {pattern, weight})`, `set_proposed_rhythm_frequency(hz)`, `set_frequency_compliance_curve(curve)`, `get_body_rhythm_phase()`, `get_body_rhythm_frequency()`, `get_body_strain()`, `get_strain_per_bone()`.
+- **P10.12** — `RhythmAnchorBone` config resource: lists which bones the rhythm-readout reads from. Default: pelvis only. Future-extensible to sternum/head without breaking the API.
+- **P10.13** — Composer diagnostic gizmo: in editor mode, draw `drive_axis_linear`, `drive_axis_angular`, current strain per joint as colored badge, current `body_rhythm_phase` and frequency, current engagement vector. Editor-only, no runtime cost.
+
+### Composer tick ordering
+
+Document the order in the composer's C++ header comment. Per physics tick:
+
+1. Integrate `body_rhythm_frequency` toward `body_rhythm_frequency_proposed` (slew-limited by `df_dt_max`).
+2. Integrate `body_rhythm_phase` from current `body_rhythm_frequency`.
+3. Update `RhythmReadout` estimators (cycle-avg if a cycle just completed).
+4. Build goal soup (pin anchors, position/orientation goals, posture-prior cost from pattern stack).
+5. Solve IK (cheap pass, no strain cost).
+6. Compute strain.
+7. If saturated, re-solve with strain term.
+8. Apply engagement-pump offsets to bone targets.
+9. Hand targets to SPD.
+10. Publish `body_strain` on the Stimulus Bus.
+
+### Cost-term formulas
+
+```
+hard_anchor_cost  = weight_anchor × |bone.world_pos − target|²       (Huber for soft, L2 acceptable for hard)
+position_goal     = huber(weight_goal,    |end_effector.world_pos − target|, δ_pos)
+orientation_goal  = huber(weight_orient,  |angle(end_effector.quat, target_quat)|, δ_ang)
+posture_prior     = Σ_b weight_posture × |bone.quat − (rest.quat × pattern_delta[b])|²
+engagement_pump   = handled separately — written directly into bone_target as oscillating offset, not as a cost term
+strain_penalty    = Σ_j smoothstep(0.7, 1.0, required_torque[j] / max_torque[j])²
+                    (only included in second-stage solve)
+
+total_objective = Σ all_cost_terms
+```
+
+Huber loss with parameter δ:
+```
+huber(weight, error, δ) = weight × {  0.5 × error²              if |error| ≤ δ
+                                    {  δ × (|error| − 0.5 × δ)  otherwise
+```
+
+Default δ starting points (tunable via `@export` per cost term): `δ_pos = 0.05 m`, `δ_ang = 0.1 rad`, `δ_posture = 0.05 rad`. Each cost term has its own scale.
+
+### IK solver — DLS Jacobian
+
+```
+J  = ∂goals/∂joint_angles    // stacked Jacobian, one row per scalar goal
+λ  = damping (0.01..0.1, scaled by goal-error magnitude)
+Δθ = J^T (J J^T + λ² I)⁻¹ × goal_error
+```
+
+For a 30-DOF chain × ~10 scalar goals, the matrix `(J J^T + λ² I)` is 10×10 — invert via Cholesky or LU; well under 1000 ops in C++.
+
+### Performance budget (informational, profile to confirm)
+
+Per character per physics tick:
+- IK soup (DLS Jacobian on ~30 DOFs, ~5–10 cost terms, 1–2 iterations): target ≤ 0.3 ms in C++
+- Engagement readout + cycle-avg: ≤ 0.05 ms
+- Posture pattern stack blend: ≤ 0.05 ms
+- Strain (two-stage, mostly single-stage): ≤ 0.1 ms avg
+- SPD per bone × 84 bones: ≤ 0.1 ms
+- **Total composer + SPD ≤ 0.6 ms per character.**
+
+If profiling shows the Jacobian operation dominates, the cheap mitigation is **chain decomposition**: solve `(anchor → root)` and `(root → end_effector)` as separate sub-problems sharing the root, instead of one full-body block. Reserved as a fallback; not in P10.1.
+
+### Pitfalls
+
+- **Soup weights need calibration before posture costs are tuned.** If hard-anchor weights are too low, the body floats away from anchors when other goals conflict. Default starting weights: anchors 100, primary goals 10, engagement-pump targets 5, posture priors 1. Verify before authoring patterns.
+- **Drive-axis estimator needs warm-up.** First cycle after rhythm starts has no estimate; `engagement_magnitude` should ramp from 0 over ~one cycle to avoid jumps. Author the ramp inside the composer, not as a Reverie obligation.
+- **Pattern stack ordering matters when patterns conflict.** Two patterns prescribing opposing deltas on the same bone produce a weighted average; soup will sum and compromise. If a pattern *must* override (e.g., "back arch" overrides a less-specific "spine relax"), give it a much higher weight rather than relying on order.
+- **Frequency slew rate limit interacts with phase integration.** When `body_rhythm_frequency` is changing, `body_rhythm_phase` keeps advancing smoothly because it integrates the *current* frequency every tick. There's no phase glitch on frequency change. Document this in the composer comment.
+- **Strain channel can oscillate near threshold.** Add hysteresis (Schmitt-trigger style): emit "high strain" when strain > 0.6; emit "strain cleared" only when strain < 0.4. Otherwise Reverie sees flutter at a single threshold.
+- **Per-bone pumpable flag is unnecessary.** `PropagationGraph` weights of 0 already exclude bones from the pump. Don't add a parallel flag.
 
 ### Milestone
 
-- Character stands in place with strength 1.0: stable for 30+ seconds, small COM oscillations as balance PD compensates.
-- Small push (200N impulse to chest): character sways but recovers without stepping.
-- Medium push (500N impulse): character takes one catch-step in the push direction, recovers upright.
-- Large push (1500N impulse): character steps but loses balance, enters Falling, collapses cleanly.
-- Uneven ground: feet IK to terrain, character remains level and balanced.
+- GDScript test harness writes anchor goals + a position goal; composer produces a pose; SPD chases; final pose error ≤ 5 cm at the goal end-effector under no contact.
+- Engagement vector at `(magnitude=0.7, phase=π/2, phase_noise=0)` on a tethered character produces visible velocity-phase pumping along whatever DOF the test rig drives the pelvis along (vertical drive → vertical bob; rotational drive → pelvic rocking). Same code path; different DOF emerges.
+- Strain channel publishes scalar > 0 when goal is geometrically reachable but torque-bounded; composer's two-stage solve redistributes load; channel value drops once a feasible distribution is found.
+- Frequency compliance: in a "calm" mindset (preferred band 0.3–0.6 Hz), proposed frequency = 1.5 Hz produces only slow drift in `body_rhythm_frequency` (does not converge). In an "aroused" mindset (preferred 0.8–1.5 Hz), same proposed frequency converges within ~2–3 cycles.
 - Video artifact: `docs/videos/phase_10_milestone.mp4`.
 
 ### Files
 
 ```
-addons/marionette/
-├── runtime/
-│   ├── foot_ik_modifier.gd
-│   ├── com_computer.gd
-│   ├── support_polygon.gd
-│   ├── balance_controller.gd
-│   ├── catch_step_planner.gd
-│   └── balance_state_machine.gd
-├── editor/
-│   └── balance_tab.gd
-demo/
-└── balancing_character.tscn
+extensions/marionette/
+├── src/
+│   ├── marionette_composer.cpp / .h    (P10.1–P10.11 — soup, engagement, strain, frequency compliance)
+│   ├── ik_chain_solver.cpp / .h        (P10.1 — DLS Jacobian, Huber loss)
+│   └── rhythm_readout.cpp / .h         (P10.5 — band-pass + cycle-avg drive axis)
+├── gdscript/
+│   ├── resources/
+│   │   ├── posture_pattern.gd          (P10.3)
+│   │   ├── engagement_profile.gd       (P10.4 — embedded in ReactionProfile)
+│   │   ├── frequency_compliance_curve.gd (P10.9)
+│   │   └── rhythm_anchor_bone.gd       (P10.12)
+│   ├── posture_patterns/               (P10.3 default library: toe_curl, back_arch, jaw_slack, hand_grasp, hip_drop_*, neck_loll, eye_roll)
+│   └── editor/
+│       └── composer_diagnostic_gizmo.gd (P10.13)
 ```
 
 ---
@@ -866,27 +987,6 @@ demo/
 
 ---
 
-## Phase 12 (optional) — Targeted C++ port of SPD hot path
-
-**Goal**: triggered only if profiling at realistic character count shows `_integrate_forces` SPD math as the dominant cost. Port *only* `MarionetteBone._integrate_forces` and `SPDMath`; leave orchestrator, resources, composition, and editor tooling in GDScript.
-
-**Trigger condition**: at target character count, SPD torque computation dominates frame cost AND the overhead is clearly GDScript dispatch (not Jolt's own solver, not contact resolution, not composition math). Record in `docs/perf_profile.md` before starting the port.
-
-### Tasks
-
-- **P12.1** — Profile runs at representative load (N characters × 84 bones × 60Hz physics). Record flamegraph / per-system cost. If SPD is not dominant, close the phase — the pure-GDScript build ships as-is.
-- **P12.2** — Set up godot-cpp submodule (verify current 4.6+ compatible branch on github.com/godotengine/godot-cpp), SConstruct, `marionette.gdextension` manifest, `register_types.cpp`.
-- **P12.3** — Port `MarionetteBone._integrate_forces` and `SPDMath` to C++. Public API surface unchanged. GDScript fallback path preserved for users without a C++ toolchain (manifest lists the library as optional or ships prebuilt binaries per platform).
-- **P12.4** — C++ doctest ports of existing SPD math unit tests. GDScript and C++ implementations must produce bit-equivalent torque for the reference test vectors.
-
-### Milestone
-
-- Profile rerun: same scenes, same character count, C++ SPD < 2ms/frame total at target load.
-- Public API surface unchanged from the GDScript baseline.
-- Pure-GDScript install still works end-to-end for users who skip the native build.
-
----
-
 ## Phase 13 — Polish and editor tooling
 
 **Goal**: production-quality authoring experience.
@@ -904,6 +1004,59 @@ demo/
 
 - External developer produces working active ragdoll in under 15 minutes from an unfamiliar ARP character.
 - Documentation covers: profile authoring, ragdoll creation wizard, muscle test, pose/cyclic authoring, emotion states, balancing, common problems.
+
+---
+
+## Phase 14 — Self-balancing, catch-step, foot IK as ground-tracking
+
+**Goal**: character stands against small pushes, takes a procedural catch-step against larger pushes, falls cleanly on overwhelming pushes. Feet track uneven ground.
+
+This phase contains the task list previously assigned to Phase 10, deferred until the composer + IK + engagement system (new P10) has stabilized. Foot IK in this phase is *as a goal in the composer's soup* — feet contribute a `PositionGoal` toward ground-raycast points with moderate weight. SPD-feed wiring is satisfied by P10's existing soup-of-goals path; this phase only adds the new goals + balance machinery on top.
+
+### Tasks
+
+- **P14.1** — Foot IK as a composer goal. Verify Godot 4.6 provides a usable IK `SkeletonModifier3D` for any in-editor authoring needs; runtime foot IK is contributed as a `PositionGoal` in the composer's soup, weighted moderately, not as a standalone solver. (Original P10.1's "FABRIK as `SkeletonModifier3D`" path is no longer needed; the composer subsumes it.)
+- **P14.2** — Per-leg foot goal config: target world position, target orientation, hip bone, foot bone. Output: a `PositionGoal` (and optionally `OrientationGoal`) added to the composer per leg per tick.
+- **P14.3** — Ground raycast per foot: from ankle position downward, hit provides target foot position + normal for orientation. Feeds P14.2.
+- **P14.4** — Foot ground-track goal added to composer's goal stack at a per-leg weight (replaces original P10.4's "IK outputs feed SPD as targets" — that wiring is satisfied by the composer's existing soup).
+- **P14.5** — COM computation from mass-weighted `MarionetteBone` positions.
+- **P14.6** — Support polygon: convex hull of foot contact points (or foot rectangles when grounded).
+- **P14.7** — Balance PD controller: COM offset from support polygon center → hip target adjustment + ankle torque bias. Separate PD on COM velocity.
+- **P14.8** — Procedural catch-step:
+  - Trigger condition: COM exits support polygon beyond threshold AND COM velocity exceeds threshold
+  - Compute step target: COM projection + velocity × step_lead_time (crude capture point)
+  - Generate foot trajectory: Hermite through (current foot, apex above midpoint, target), duration = f(step length)
+  - During step: swing leg strength stays high (tracks trajectory), stance leg stays high, hip target shifts toward stance foot
+  - On foot contact or trajectory complete: switch stance, return to Standing
+- **P14.9** — State machine: `Standing`, `Stepping`, `Falling`. Transitions based on COM-outside-polygon duration + body tilt.
+- **P14.10** — Balance tab in right dock: support polygon visualization, COM gizmo, tilt threshold slider, step parameters (lead time, apex height, min/max step length).
+
+### Milestone
+
+- Character stands in place with strength 1.0: stable for 30+ seconds, small COM oscillations as balance PD compensates.
+- Small push (200N impulse to chest): character sways but recovers without stepping.
+- Medium push (500N impulse): character takes one catch-step in the push direction, recovers upright.
+- Large push (1500N impulse): character steps but loses balance, enters Falling, collapses cleanly.
+- Uneven ground: feet IK to terrain, character remains level and balanced.
+- Video artifact: `docs/videos/phase_14_milestone.mp4`.
+
+### Files
+
+```
+extensions/marionette/
+├── gdscript/
+│   ├── runtime/
+│   │   ├── foot_ground_goal.gd         (P14.2/P14.3 — adds composer goal per leg)
+│   │   ├── com_computer.gd             (P14.5)
+│   │   ├── support_polygon.gd          (P14.6)
+│   │   ├── balance_controller.gd       (P14.7)
+│   │   ├── catch_step_planner.gd       (P14.8)
+│   │   └── balance_state_machine.gd    (P14.9)
+│   └── editor/
+│       └── balance_tab.gd              (P14.10)
+demo/
+└── balancing_character.tscn
+```
 
 ---
 
