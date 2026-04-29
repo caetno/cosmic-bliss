@@ -28,6 +28,8 @@ func _init() -> void:
 		_test_solver_dispatch_orthonormal_for_all_archetypes,
 		_test_ball_solver_t_pose_left_arm,
 		_test_hinge_solver_bent_knee,
+		_test_hinge_solver_a_pose_elbow,
+		_test_saddle_solver_bent_wrist,
 		_test_clavicle_solver_flex_axis_is_up,
 		_test_spine_solver_along_is_up,
 		_test_permutation_matcher_candidate_count,
@@ -49,6 +51,7 @@ func _init() -> void:
 		_test_bone_profile_generator_rom_spot_checks,
 		_test_bone_profile_generator_root_and_fixed_left_at_defaults,
 		_test_bone_profile_generator_idempotent,
+		_test_bone_profile_generator_preserves_missing_rig_bones,
 		_test_bone_profile_generator_null_skeleton_profile_errors,
 		_test_generator_template_upper_arm_joint_frame,
 		_test_generator_template_upper_leg_joint_frame,
@@ -60,6 +63,8 @@ func _init() -> void:
 		_test_marionette_bone_extends_physical_bone3d,
 		_test_build_ragdoll_synthetic_structure,
 		_test_build_ragdoll_joint_rotation_baking,
+		_test_bone_entry_anatomical_basis_branches_on_flag,
+		_test_build_ragdoll_bakes_calculated_frame_when_flag_set,
 		_test_build_ragdoll_rom_round_trip,
 		_test_build_ragdoll_idempotent,
 		_test_build_ragdoll_skips_unknown_bones,
@@ -76,6 +81,16 @@ func _init() -> void:
 		_test_bone_region_per_region_counts,
 		_test_bone_region_unknown_falls_back_to_other,
 		_test_bone_region_label_for_each,
+		_test_macro_arms_flex_ext_covers_arm_bones,
+		_test_macro_legs_med_lat_axis_only,
+		_test_macro_all_covers_every_mapped_bone,
+		_test_macro_hands_excludes_arms,
+		_test_macro_body_covers_spine_and_head_neck,
+		_test_macro_group_keys_partition_anatomical_set,
+		_test_validator_template_profile_all_ok,
+		_test_validator_flips_sign_error,
+		_test_validator_swaps_axis_misassignment,
+		_test_motion_validator_template_profile_no_wrongs,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -557,26 +572,22 @@ func _test_ball_solver_t_pose_left_arm() -> bool:
 
 func _test_hinge_solver_bent_knee() -> bool:
 	# Bent-knee fixture: upper leg goes from hip (0.1, 1.0, 0) downward to knee
-	# (0.1, 0.5, 0). Lower leg's bone-rest is *bent forward* — its bone-local
-	# +Y points forward-and-down. Child (ankle) is forward of the knee.
-	# Hinge axis should land on the lateral axis.
+	# (0.1, 0.5, 0). Lower leg is bent forward by 30°. Ankle sits forward-and-
+	# below the knee. The hinge axis = parent_along × along, both in the YZ
+	# plane, so the result lies along world ±X (body lateral).
 	var frame := _make_muscle_frame_fixture()
-	# The "bone" (lower leg) sits at the knee. Its rest basis has +Y along the
-	# lower-leg direction, which is bent forward by say 30°.
-	var bend := Basis.from_euler(Vector3(deg_to_rad(-30.0), 0, 0))   # rotate around +X
+	var hip := Transform3D(Basis.IDENTITY, Vector3(0.1, 1.0, 0))
+	var bend := Basis.from_euler(Vector3(deg_to_rad(-30.0), 0, 0))
 	var lower_leg := Transform3D(bend, Vector3(0.1, 0.5, 0))
-	# Ankle world position: knee + bend * (0,-0.5,0) = knee + (0, -0.5*cos30, 0.5*sin30)
-	# Note: rotating (0,-0.5,0) by -30° around +X gives (0, -0.433, 0.25).
 	var ankle_offset := bend * Vector3(0, -0.5, 0)
 	var ankle := Transform3D(Basis.IDENTITY, lower_leg.origin + ankle_offset)
 
-	var basis := MarionetteHingeSolver.solve(lower_leg, ankle, frame, true)
+	var basis := MarionetteHingeSolver.solve(lower_leg, ankle, frame, true, hip)
 	if not _basis_is_orthonormal(basis):
 		return _fail("hinge_solver_bent_knee", "non-orthonormal basis")
-	# Hinge axis (basis.x = flex) should align with the body lateral axis,
-	# which is the cross product of the bone's parent_along and the
-	# child-direction. In this fixture both vectors lie in the YZ plane, so
-	# the hinge axis lies along world ±X. We just check it's nearly lateral.
+	# Hinge axis (basis.x = flex) should align with the body lateral axis. In
+	# this fixture parent_along (knee→hip's reverse, i.e., (0,-1,0)) and along
+	# (knee→ankle, in the YZ plane) cross to produce ±X.
 	var dot_with_lateral: float = absf(basis.x.dot(Vector3.RIGHT))
 	if dot_with_lateral < 0.99:
 		return _fail("hinge_solver_bent_knee",
@@ -588,21 +599,65 @@ func _test_hinge_solver_bent_knee() -> bool:
 	return _ok("hinge_solver_bent_knee")
 
 
+func _test_hinge_solver_a_pose_elbow() -> bool:
+	# A-pose left elbow in the XY plane. The convention now is that +flex
+	# produces forward motion of the bone tip (motion = flex × along ≈
+	# muscle_frame.forward). Lock that down rather than the axis direction —
+	# the axis itself sits in the XY plane (perpendicular to forearm,
+	# orthogonal to forward), not along ±Z as an earlier attempt assumed.
+	var frame := _make_muscle_frame_fixture()
+	var shoulder := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.5, 0.0))
+	var elbow := Transform3D(Basis.IDENTITY, Vector3(0.5, 1.0, 0.0))
+	var wrist := Transform3D(Basis.IDENTITY, Vector3(0.9, 0.4, 0.0))
+	var basis := MarionetteHingeSolver.solve(elbow, wrist, frame, true, shoulder)
+	if not _basis_is_orthonormal(basis):
+		return _fail("hinge_a_pose_elbow", "non-orthonormal basis")
+	var motion: Vector3 = basis.x.cross(basis.y).normalized()
+	var fwd_dot: float = motion.dot(frame.forward)
+	if fwd_dot < 0.95:
+		return _fail("hinge_a_pose_elbow",
+			"+flex motion %s not aligned with forward %s (dot=%f)" %
+			[motion, frame.forward, fwd_dot])
+	return _ok("hinge_solver_a_pose_elbow")
+
+
+func _test_saddle_solver_bent_wrist() -> bool:
+	# A-pose wrist in the XY plane. Same motion-direction lock-down as the
+	# hinge test: +flex on a wrist drives the hand tip forward (palmar flex
+	# in the body's anterior direction).
+	var frame := _make_muscle_frame_fixture()
+	var elbow := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
+	var wrist := Transform3D(Basis.IDENTITY, Vector3(0.4, 0.6, 0.0))   # forearm in XY
+	var hand_tip := Transform3D(Basis.IDENTITY, Vector3(0.5, 0.2, 0.0))  # bend at wrist, still XY
+	var basis := MarionetteSaddleSolver.solve(wrist, hand_tip, frame, true, elbow)
+	if not _basis_is_orthonormal(basis):
+		return _fail("saddle_bent_wrist", "non-orthonormal basis")
+	var motion: Vector3 = basis.x.cross(basis.y).normalized()
+	var fwd_dot: float = motion.dot(frame.forward)
+	if fwd_dot < 0.95:
+		return _fail("saddle_bent_wrist",
+			"+flex motion %s not aligned with forward %s (dot=%f)" %
+			[motion, frame.forward, fwd_dot])
+	return _ok("saddle_solver_bent_wrist")
+
+
 func _test_clavicle_solver_flex_axis_is_up() -> bool:
 	# Synthetic left clavicle: bone at base of neck, runs laterally to shoulder.
-	# Flex axis should be UP (so flex motion = shrug elevation).
+	# Anatomical clavicle flex = elevation; the bone tip moves +up. The new
+	# solver derives flex via along × up, so the flex axis lands at +Z (the
+	# rotation axis whose +rotation lifts a +X bone toward +Y), not +Y itself.
 	var frame := _make_muscle_frame_fixture()
 	var clav := Transform3D(Basis.IDENTITY, Vector3(0, 1.5, 0))
 	var shoulder := Transform3D(Basis.IDENTITY, Vector3(0.15, 1.5, 0))   # along +X (lateral)
 	var basis := MarionetteClavicleSolver.solve(clav, shoulder, frame, true)
 	if not _basis_is_orthonormal(basis):
 		return _fail("clavicle_flex_axis", "non-orthonormal")
-	# Along-bone should be +X (lateral). Flex axis should be perpendicular to
-	# it AND closest to +Y (up).
 	if not basis.y.is_equal_approx(Vector3.RIGHT):
 		return _fail("clavicle_flex_axis", "along=%s, expected (1,0,0)" % basis.y)
-	if not basis.x.is_equal_approx(Vector3.UP):
-		return _fail("clavicle_flex_axis", "flex=%s, expected (0,1,0)" % basis.x)
+	# Flex (basis.x) = along × up = +X × +Y = +Z. Motion = flex × along
+	# = +Z × +X = +Y (up). That's the elevation direction.
+	if not basis.x.is_equal_approx(Vector3.BACK):
+		return _fail("clavicle_flex_axis", "flex=%s, expected (0,0,1)" % basis.x)
 	return _ok("clavicle_solver_flex_axis_is_up")
 
 
@@ -616,9 +671,10 @@ func _test_spine_solver_along_is_up() -> bool:
 		return _fail("spine_along", "non-orthonormal")
 	if not basis.y.is_equal_approx(Vector3.UP):
 		return _fail("spine_along", "along=%s, expected (0,1,0)" % basis.y)
-	# Flex axis should be lateral (+X = body left = -muscle_frame.right).
-	if not basis.x.is_equal_approx(Vector3.RIGHT):
-		return _fail("spine_along", "flex=%s, expected (1,0,0)" % basis.x)
+	# Spine flex = along × forward = +Y × -Z = -X. Motion = flex × along
+	# = -X × +Y = -Z (forward) — anatomical trunk-flex direction.
+	if not basis.x.is_equal_approx(Vector3.LEFT):
+		return _fail("spine_along", "flex=%s, expected (-1,0,0)" % basis.x)
 	return _ok("spine_solver_along_is_up")
 
 
@@ -1083,11 +1139,14 @@ func _generated_joint_world(bp: BoneProfile, bone_name: StringName) -> Basis:
 	# Generates the BoneProfile against the template (no live skeleton) and
 	# returns the joint-in-world basis for `bone_name` — i.e., what the
 	# JointLimitGizmo would draw at that bone if the rig matched the template.
+	# Uses the same dispatch as runtime (anatomical_basis_in_bone_local) so
+	# unmatched bones with use_calculated_frame=true round-trip via their
+	# stored calculated_anatomical_basis.
 	var profile: SkeletonProfile = bp.skeleton_profile
 	var rests := MuscleFrameBuilder.compute_world_rests(profile)
 	var entry: BoneEntry = bp.bones[bone_name]
 	var bone_world: Transform3D = rests[bone_name]
-	return bone_world.basis * entry.bone_to_anatomical_basis()
+	return bone_world.basis * entry.anatomical_basis_in_bone_local()
 
 
 # Locks down the template-path expectation for shoulder Ball joints. If this
@@ -1097,11 +1156,9 @@ func _test_generator_template_upper_arm_joint_frame() -> bool:
 	var bp := _make_humanoid_bone_profile()
 	BoneProfileGenerator.generate(bp)
 
-	# Left shoulder: along bone points laterally outward to the character's
-	# left. With template's hip-mid → +X = LeftUpperLeg side, "left lateral"
-	# = world +X. Flex axis perpendicular to along, falls back to +Y world
-	# (vertical) because make_anatomical_basis's perpendicular-of-along
-	# fallback picks +Y when along == ±X.
+	# Left shoulder: along = +X (lateral out to left). Flex = along × forward
+	# = +X × -Z = +Y. Motion = flex × along = +Y × +X = -Z (forward), the
+	# anatomical "raise arm forward" direction.
 	var left := _generated_joint_world(bp, &"LeftUpperArm")
 	if not left.y.is_equal_approx(Vector3(1, 0, 0)):
 		return _fail("template_upper_arm",
@@ -1109,14 +1166,17 @@ func _test_generator_template_upper_arm_joint_frame() -> bool:
 	if not left.x.is_equal_approx(Vector3(0, 1, 0)):
 		return _fail("template_upper_arm",
 			"LeftUpperArm flex=%v, expected (0,1,0)" % left.x)
-	# Right shoulder mirrors: along = -X. Flex stays +Y (single body axis).
+	# Right shoulder is mirrored: along = -X. The new sign-aware solver gives
+	# flex = along × forward = -X × -Z = -Y, the *opposite* of the left side.
+	# That's the whole point of the fix — same +flex slider on both sides
+	# rotates each arm forward, not in mirror directions.
 	var right := _generated_joint_world(bp, &"RightUpperArm")
 	if not right.y.is_equal_approx(Vector3(-1, 0, 0)):
 		return _fail("template_upper_arm",
 			"RightUpperArm along=%v, expected (-1,0,0)" % right.y)
-	if not right.x.is_equal_approx(Vector3(0, 1, 0)):
+	if not right.x.is_equal_approx(Vector3(0, -1, 0)):
 		return _fail("template_upper_arm",
-			"RightUpperArm flex=%v, expected (0,1,0)" % right.x)
+			"RightUpperArm flex=%v, expected (0,-1,0)" % right.x)
 	return _ok("generator_template_upper_arm_joint_frame")
 
 
@@ -1143,6 +1203,60 @@ func _test_generator_template_upper_leg_joint_frame() -> bool:
 		return _fail("template_upper_leg",
 			"RightUpperLeg flex=%v, expected (1,0,0)" % right.x)
 	return _ok("generator_template_upper_leg_joint_frame")
+
+
+func _test_bone_profile_generator_preserves_missing_rig_bones() -> bool:
+	# Calibrating against a partial live rig should not shrink the BoneProfile
+	# dict. Bones absent from the live skeleton stay at their previous
+	# (template-derived) entries, and the report logs them under preserved.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	if bp.bones.size() != 84:
+		return _fail("generator_preserves_missing", "template-path size %d != 84" % bp.bones.size())
+
+	# Synthetic 5-bone partial rig: just enough for the muscle-frame builder
+	# (LeftUpperLeg + RightUpperLeg + Head). Profile-name match — no BoneMap
+	# entries needed; the generator falls back to direct-match resolution.
+	var skel := Skeleton3D.new()
+	skel.name = "Skeleton3D"
+	skel.add_bone("Hips")                    # 0
+	skel.set_bone_rest(0, Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0)))
+	skel.add_bone("LeftUpperLeg")            # 1
+	skel.set_bone_parent(1, 0)
+	skel.set_bone_rest(1, Transform3D(Basis.IDENTITY, Vector3(0.1, 0.0, 0.0)))
+	skel.add_bone("RightUpperLeg")           # 2
+	skel.set_bone_parent(2, 0)
+	skel.set_bone_rest(2, Transform3D(Basis.IDENTITY, Vector3(-0.1, 0.0, 0.0)))
+	skel.add_bone("Spine")                   # 3
+	skel.set_bone_parent(3, 0)
+	skel.set_bone_rest(3, Transform3D(Basis.IDENTITY, Vector3(0.0, 0.2, 0.0)))
+	skel.add_bone("Head")                    # 4
+	skel.set_bone_parent(4, 3)
+	skel.set_bone_rest(4, Transform3D(Basis.IDENTITY, Vector3(0.0, 0.4, 0.0)))
+
+	var bm := BoneMap.new()
+	bm.profile = bp.skeleton_profile
+
+	var report := BoneProfileGenerator.generate(bp, skel, bm)
+	if report.error != "":
+		skel.free()
+		return _fail("generator_preserves_missing", "report.error=%s" % report.error)
+	# 5 bones present in the partial rig should be regenerated; the other 79
+	# should be preserved from the template pass.
+	if report.generated != 5:
+		skel.free()
+		return _fail("generator_preserves_missing",
+			"generated=%d, expected 5 (Hips/LUL/RUL/Spine/Head)" % report.generated)
+	if report.preserved != 79:
+		skel.free()
+		return _fail("generator_preserves_missing",
+			"preserved=%d, expected 79 (84 - 5)" % report.preserved)
+	if bp.bones.size() != 84:
+		skel.free()
+		return _fail("generator_preserves_missing",
+			"final size=%d, expected 84 (no entries lost)" % bp.bones.size())
+	skel.free()
+	return _ok("generator_preserves_missing_rig_bones")
 
 
 func _test_bone_profile_generator_null_skeleton_profile_errors() -> bool:
@@ -1396,6 +1510,78 @@ func _test_build_ragdoll_joint_rotation_baking() -> bool:
 			"joint_rotation basis %s, expected %s" % [got, expected])
 	m.free()
 	return _ok("build_ragdoll_joint_rotation_baking")
+
+
+func _test_bone_entry_anatomical_basis_branches_on_flag() -> bool:
+	# Default (use_calculated_frame=false) returns the signed-permutation
+	# basis built from the *_axis enums. Flipping the flag returns the stored
+	# calculated_anatomical_basis verbatim so non-axis-aligned rigs survive.
+	var entry := BoneEntry.new()
+	entry.flex_axis = SignedAxis.Axis.PLUS_Y
+	entry.along_bone_axis = SignedAxis.Axis.PLUS_Z
+	entry.abduction_axis = SignedAxis.Axis.PLUS_X
+	var perm_expected := Basis(Vector3.UP, Vector3.BACK, Vector3.RIGHT)
+	if not entry.anatomical_basis_in_bone_local().is_equal_approx(perm_expected):
+		return _fail("entry_basis_branch", "default (matched) path didn't return signed-permutation basis")
+
+	# Pick a non-axis-aligned basis: rotate identity 30° around X. Stored
+	# verbatim and returned when flag flips.
+	var calculated := Basis.IDENTITY.rotated(Vector3.RIGHT, deg_to_rad(30.0))
+	entry.calculated_anatomical_basis = calculated
+	entry.use_calculated_frame = true
+	if not entry.anatomical_basis_in_bone_local().is_equal_approx(calculated):
+		return _fail("entry_basis_branch", "flag-on path didn't return calculated basis")
+	return _ok("bone_entry_anatomical_basis_branches_on_flag")
+
+
+func _test_build_ragdoll_bakes_calculated_frame_when_flag_set() -> bool:
+	# When the generator falls back (use_calculated_frame=true), build_ragdoll
+	# bakes calculated_anatomical_basis into joint_rotation directly instead
+	# of the signed-permutation basis. Round-trip via Basis.from_euler.
+	var skel := _make_3bone_skeleton()
+	var marionette := Marionette.new()
+	marionette.name = "Marionette"
+	marionette.add_child(skel)
+	marionette.skeleton = NodePath("Skeleton3D")
+
+	var bp := BoneProfile.new()
+	bp.skeleton_profile = load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	bp.total_mass = 70.0
+	bp.bones[&"Root"] = BoneEntry.new()
+	bp.bones[&"Root"].archetype = BoneArchetype.Type.ROOT
+	bp.bones[&"Hips"] = BoneEntry.new()
+	bp.bones[&"Hips"].archetype = BoneArchetype.Type.ROOT
+
+	var leg_entry := BoneEntry.new()
+	leg_entry.archetype = BoneArchetype.Type.BALL
+	# A non-axis-aligned target frame the matcher could never reproduce with
+	# 24 signed-permutation candidates (it's 30° off every axis pair).
+	leg_entry.calculated_anatomical_basis = Basis.IDENTITY \
+			.rotated(Vector3.RIGHT, deg_to_rad(30.0)) \
+			.rotated(Vector3.UP, deg_to_rad(20.0))
+	leg_entry.use_calculated_frame = true
+	leg_entry.rom_min = Vector3.ZERO
+	leg_entry.rom_max = Vector3(deg_to_rad(20.0), 0.0, 0.0)
+	bp.bones[&"LeftUpperLeg"] = leg_entry
+
+	marionette.bone_profile = bp
+	root.add_child(marionette)
+	marionette.build_ragdoll()
+
+	var sim := _find_simulator(marionette)
+	var leg := _find_bone(sim, "LeftUpperLeg")
+	if leg == null:
+		marionette.free()
+		return _fail("build_ragdoll_calc_frame", "leg bone missing")
+
+	var expected: Basis = leg_entry.calculated_anatomical_basis
+	var got: Basis = Basis.from_euler(leg.joint_rotation)
+	if not got.is_equal_approx(expected):
+		marionette.free()
+		return _fail("build_ragdoll_calc_frame",
+			"joint_rotation basis %s, expected calculated %s" % [got, expected])
+	marionette.free()
+	return _ok("build_ragdoll_bakes_calculated_frame_when_flag_set")
 
 
 func _test_build_ragdoll_rom_round_trip() -> bool:
@@ -1804,3 +1990,205 @@ func _count_humanoid_per_region() -> Dictionary[int, int]:
 		var region := MarionetteBoneRegion.region_for(bone_name)
 		counts[region] = counts.get(region, 0) + 1
 	return counts
+
+
+# ---------- MarionetteMacroPresets — anatomical-axis macros (per-region groups) ----------
+
+func _test_macro_arms_flex_ext_covers_arm_bones() -> bool:
+	# Arms group should target every LEFT_ARM + RIGHT_ARM bone with the flex
+	# axis (1, 0, 0) and nothing else.
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_ARMS_FLEX_EXT)
+	var must_have: Array[StringName] = [
+		&"LeftShoulder", &"LeftUpperArm", &"LeftLowerArm",
+		&"RightShoulder", &"RightUpperArm", &"RightLowerArm",
+	]
+	for bn: StringName in must_have:
+		if not inf.has(bn):
+			return _fail("macro_arms_flex", "missing %s" % bn)
+		if not (inf[bn] as Vector3).is_equal_approx(Vector3(1, 0, 0)):
+			return _fail("macro_arms_flex", "%s coeff=%s expected (1,0,0)" % [bn, inf[bn]])
+	# Reject leg / hand / spine bones — outside arm scope.
+	for outsider: StringName in [&"LeftHand", &"RightUpperLeg", &"Spine", &"LeftIndexProximal"]:
+		if inf.has(outsider):
+			return _fail("macro_arms_flex", "unexpected bone %s in arms scope" % outsider)
+	return _ok("macro_arms_flex_ext_covers_arm_bones")
+
+
+func _test_macro_legs_med_lat_axis_only() -> bool:
+	# Leg medial/lateral macro should set anatomical Y on every leg bone.
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_LEGS_MED_LAT)
+	if not inf.has(&"LeftUpperLeg"):
+		return _fail("macro_legs_medlat", "missing LeftUpperLeg")
+	var v: Vector3 = inf[&"LeftUpperLeg"] as Vector3
+	if not v.is_equal_approx(Vector3(0, 1, 0)):
+		return _fail("macro_legs_medlat", "LeftUpperLeg coeff=%s expected (0,1,0)" % v)
+	if inf.has(&"LeftFoot"):
+		return _fail("macro_legs_medlat", "feet should not appear in legs scope")
+	return _ok("macro_legs_med_lat_axis_only")
+
+
+func _test_macro_all_covers_every_mapped_bone() -> bool:
+	# all_abd_add should include EVERY region-mapped bone.
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_ALL_ABD_ADD)
+	var mapped: Array[StringName] = MarionetteBoneRegion.all_mapped_bones()
+	if inf.size() != mapped.size():
+		return _fail("macro_all", "inf size %d, mapped %d" % [inf.size(), mapped.size()])
+	for bn: StringName in mapped:
+		if not inf.has(bn):
+			return _fail("macro_all", "missing %s" % bn)
+		if not (inf[bn] as Vector3).is_equal_approx(Vector3(0, 0, 1)):
+			return _fail("macro_all", "%s coeff=%s expected (0,0,1)" % [bn, inf[bn]])
+	return _ok("macro_all_covers_every_mapped_bone")
+
+
+func _test_macro_hands_excludes_arms() -> bool:
+	# Hand macros should drive finger bones and the wrist (LEFT_HAND /
+	# RIGHT_HAND regions) but not Shoulder / UpperArm / LowerArm.
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_HANDS_FLEX_EXT)
+	if not inf.has(&"LeftHand"):
+		return _fail("macro_hands", "LeftHand missing")
+	if not inf.has(&"LeftIndexProximal"):
+		return _fail("macro_hands", "LeftIndexProximal missing")
+	for outsider: StringName in [&"LeftShoulder", &"LeftUpperArm", &"LeftLowerArm"]:
+		if inf.has(outsider):
+			return _fail("macro_hands", "arm bone %s leaked into hands scope" % outsider)
+	return _ok("macro_hands_excludes_arms")
+
+
+func _test_macro_body_covers_spine_and_head_neck() -> bool:
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_BODY_FLEX_EXT)
+	for bn: StringName in [&"Spine", &"Chest", &"UpperChest", &"Neck", &"Head", &"Hips"]:
+		if not inf.has(bn):
+			return _fail("macro_body", "missing %s" % bn)
+	for outsider: StringName in [&"LeftUpperArm", &"RightUpperLeg", &"LeftHand", &"LeftFoot"]:
+		if inf.has(outsider):
+			return _fail("macro_body", "%s leaked into body scope" % outsider)
+	return _ok("macro_body_covers_spine_and_head_neck")
+
+
+func _test_macro_group_keys_partition_anatomical_set() -> bool:
+	# Every key referenced by GROUP_KEYS must exist in ORDER and have a label.
+	# Catches typos in either table.
+	var seen: Dictionary[StringName, bool] = {}
+	for group: StringName in MarionetteMacroPresets.GROUP_ORDER:
+		var keys: Array = MarionetteMacroPresets.keys_for_group(group)
+		if keys.is_empty():
+			return _fail("macro_group_keys", "group %s has no keys" % group)
+		for key in keys:
+			var sn: StringName = key
+			if seen.has(sn):
+				return _fail("macro_group_keys", "key %s appears in multiple groups" % sn)
+			seen[sn] = true
+			if not MarionetteMacroPresets.ORDER.has(sn):
+				return _fail("macro_group_keys", "%s missing from ORDER" % sn)
+			if MarionetteMacroPresets.label_for(sn) == String(sn):
+				return _fail("macro_group_keys", "%s missing from LABELS" % sn)
+	# All ORDER entries should be reached via groups.
+	for key: StringName in MarionetteMacroPresets.ORDER:
+		if not seen.has(key):
+			return _fail("macro_group_keys", "%s in ORDER but no group references it" % key)
+	return _ok("macro_group_keys_partition_anatomical_set")
+
+
+func _test_motion_validator_template_profile_no_wrongs() -> bool:
+	# Generate the template profile, run the dynamic motion test, expect zero
+	# WRONG outcomes. Every bone's anatomical flex axis should produce motion
+	# in the archetype-expected direction (forward for limb/spine, up for
+	# clavicle). If a future solver change breaks this — say swapping a sign
+	# or picking the wrong cross-product orientation — the motion test catches
+	# it where the static validator can't.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var report := MarionetteFrameValidator.validate_motion(bp)
+	if report.error != "":
+		return _fail("motion_template", "error: %s" % report.error)
+	if report.wrong_count != 0:
+		# Build a list of offenders for the failure message — the dynamic
+		# test exists precisely to surface these so debugging is easy.
+		var wrongs: Array[StringName] = report.by_status("WRONG")
+		return _fail("motion_template", "%d bones moved the wrong direction on +flex: %s" %
+				[report.wrong_count, wrongs])
+	# Some bones can legitimately come out as WEAK (e.g., clavicles with
+	# along-axis nearly parallel to up; spine segments where forward dot is
+	# noisy due to muscle-frame rounding). Don't fail on those.
+	if report.diagnoses.is_empty():
+		return _fail("motion_template", "no diagnoses produced — empty profile?")
+	return _ok("motion_validator_template_profile_no_wrongs")
+
+
+# ---------- MarionetteFrameValidator ----------
+
+func _test_validator_template_profile_all_ok() -> bool:
+	# A freshly-generated template profile is consistent with the solver by
+	# construction (the matcher just picked among candidates of the same
+	# input). Every SPD bone should validate as OK.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var report := MarionetteFrameValidator.validate(bp)
+	if report.error != "":
+		return _fail("validator_template", "error: %s" % report.error)
+	if report.flipped_count != 0:
+		return _fail("validator_template",
+			"%d FLIPPED on a fresh template — solver/matcher disagreement" % report.flipped_count)
+	if report.swapped_count != 0:
+		return _fail("validator_template",
+			"%d SWAPPED on a fresh template" % report.swapped_count)
+	if report.bad_count != 0:
+		return _fail("validator_template", "%d BAD on a fresh template" % report.bad_count)
+	# OK + WEAK is acceptable on the template (some bones legitimately have
+	# rest bases that score in the WEAK band, e.g. clavicle with along-axis
+	# nearly parallel to lateral).
+	if report.ok_count + report.weak_count == 0:
+		return _fail("validator_template", "no bones validated — empty diagnoses?")
+	return _ok("validator_template_profile_all_ok")
+
+
+func _test_validator_flips_sign_error() -> bool:
+	# Manually invert the flex axis on one entry — validator should classify
+	# that bone as FLIPPED, leave the rest at their previous status.
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var entry: BoneEntry = bp.bones[&"LeftLowerArm"]
+	# Replace flex_axis with its inverse (PLUS_X → MINUS_X, etc.).
+	entry.flex_axis = SignedAxis.inverse(entry.flex_axis)
+	# Make sure the calculated-frame fallback isn't shadowing the change.
+	entry.use_calculated_frame = false
+	var report := MarionetteFrameValidator.validate(bp)
+	var found_flipped: bool = false
+	for d: MarionetteFrameValidator.BoneDiagnosis in report.diagnoses:
+		if d.bone_name == &"LeftLowerArm":
+			if d.status != "FLIPPED":
+				return _fail("validator_flip",
+					"LeftLowerArm status=%s, expected FLIPPED (flex_dot=%f)" %
+					[d.status, d.flex_dot])
+			found_flipped = true
+	if not found_flipped:
+		return _fail("validator_flip", "LeftLowerArm missing from diagnoses")
+	return _ok("validator_flips_sign_error")
+
+
+func _test_validator_swaps_axis_misassignment() -> bool:
+	# Swap the flex and abd axes on an entry — both end up high-correlation
+	# with the *wrong* target column. Validator should catch this as SWAPPED
+	# (or at worst FLIPPED — both signal the entry is broken; SWAPPED is the
+	# more specific classification).
+	var bp := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate(bp)
+	var entry: BoneEntry = bp.bones[&"LeftUpperArm"]
+	var saved_flex: SignedAxis.Axis = entry.flex_axis
+	entry.flex_axis = entry.abduction_axis
+	entry.abduction_axis = saved_flex
+	entry.use_calculated_frame = false
+	var report := MarionetteFrameValidator.validate(bp)
+	var found_misclass: bool = false
+	for d: MarionetteFrameValidator.BoneDiagnosis in report.diagnoses:
+		if d.bone_name == &"LeftUpperArm":
+			# Must not pass as OK after a hand-broken swap.
+			if d.status == "OK":
+				return _fail("validator_swap",
+					"LeftUpperArm passed as OK despite axis swap (flex_dot=%f abd_dot=%f)" %
+					[d.flex_dot, d.abd_dot])
+			found_misclass = true
+	if not found_misclass:
+		return _fail("validator_swap", "LeftUpperArm missing from diagnoses")
+	return _ok("validator_swaps_axis_misassignment")

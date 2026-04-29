@@ -35,6 +35,40 @@ extends Resource
 
 @export var is_left_side: bool = false
 
+# Calculated-frame fallback: when the bone's rest basis is too far from the
+# solver's target anatomical basis for any signed permutation to track it
+# (matcher score < threshold), we abandon the permutation path and bake the
+# calculated target directly into joint_rotation. Lets non-T-pose rigs work
+# without re-export.
+#
+# `calculated_anatomical_basis` columns are (flex, along-bone, abduction) unit
+# vectors expressed in *bone-local* space. It is the inverse of the bone's
+# rest basis applied to the solver target, so it round-trips to the world-
+# space target when composed back with bone_world.basis.
+#
+# When `use_calculated_frame` is false (the matched-bone default), the signed-
+# axis fields above are authoritative and consumers go through
+# bone_to_anatomical_basis(). When true, calculated_anatomical_basis is
+# authoritative and the signed-axis fields are kept only for debug display.
+@export var calculated_anatomical_basis: Basis = Basis.IDENTITY
+@export var use_calculated_frame: bool = false
+
+# Chirality compensation for the abduction axis.
+#
+# A right-handed basis with `flex × along = abd` forces +rotation around the
+# abd axis to produce motion in the -flex direction. For some bone+side
+# combinations that direction is anatomically correct; for others it's
+# sign-flipped from the expected anatomical motion (LEFT shoulder/hip,
+# RIGHT foot, etc — see the validator's abd_dot column for the live data).
+#
+# When this flag is true, the runtime treats the +abd slider value and the
+# rom_z constraint bounds as anti-aligned with basis.z, sign-flipping at
+# both endpoints so anatomical "+abd" produces anatomical abduction motion
+# regardless of which side the chirality landed on. Authoring data
+# (rom_min.z / rom_max.z) stays in the standard positive-abduction
+# convention; this flag is the runtime translation layer.
+@export var mirror_abd: bool = false
+
 
 # Returns the bone-local basis whose columns are (flex, along-bone, abduction)
 # unit vectors. Used by ragdoll creation (P3.7) to derive joint_rotation, and
@@ -45,3 +79,12 @@ func bone_to_anatomical_basis() -> Basis:
 		SignedAxis.to_vector3(along_bone_axis),
 		SignedAxis.to_vector3(abduction_axis),
 	)
+
+
+# Returns the bone-local anatomical basis that should actually be baked into
+# joint_rotation. Branches on use_calculated_frame so all consumers
+# (ragdoll build, anatomical pose, gizmos) stay aligned on which frame is live.
+func anatomical_basis_in_bone_local() -> Basis:
+	if use_calculated_frame:
+		return calculated_anatomical_basis
+	return bone_to_anatomical_basis()

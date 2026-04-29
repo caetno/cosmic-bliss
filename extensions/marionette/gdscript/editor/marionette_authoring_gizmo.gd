@@ -2,6 +2,25 @@
 class_name MarionetteAuthoringGizmo
 extends EditorNode3DGizmoPlugin
 
+# Singleton handle: the EditorPlugin only ever instantiates one of these. We
+# stash the live instance so editor-side scripts (e.g., MarionetteBoneSliders)
+# can request a synchronous redraw without walking the EditorPlugin tree. The
+# deferred Node3D.update_gizmos() path doesn't reliably drive the gizmo
+# scheduler from @tool scripts, so this static path exists as the workaround.
+static var _instance: MarionetteAuthoringGizmo
+
+
+# Iterates every active gizmo of this plugin owned by `node` and runs
+# `_redraw` directly. Synchronous; safe to call mid-pose-change.
+static func redraw_for_node(node: Node3D) -> void:
+	if _instance == null or node == null:
+		return
+	for gizmo: EditorNode3DGizmo in _instance.get_current_gizmos():
+		if not is_instance_valid(gizmo):
+			continue
+		if gizmo.get_node_3d() == node:
+			_instance._redraw(gizmo)
+
 # Authoring-time gizmo for visually verifying P2.6 (archetype solvers) and
 # P2.7 (muscle frame builder) on a Marionette node before the rest of Phase 2
 # lands (no editor button, no shipped BoneProfile yet).
@@ -61,6 +80,7 @@ const _COL_BONE_UNMATCHED: Color = Color(1.0, 1.0, 0.0)
 
 
 func _init() -> void:
+	_instance = self
 	# on_top=true on every material so our lines win against the default
 	# Skeleton3D gizmo's bone fan. EditorNode3DGizmoPlugin.create_material
 	# signature: (name, color, billboard, on_top, use_vertex_color).
@@ -205,19 +225,32 @@ func _draw_per_bone_targets(
 			child_world.origin = bone_world.origin + nudge
 
 		var is_left_side: bool = String(bone_name).begins_with("Left")
-		var basis: Basis = MarionetteArchetypeSolverDispatch.solve(
-				archetype, bone_world, child_world, muscle_frame, is_left_side)
+		var parent_name: StringName = profile.get_bone_parent(i)
+		var parent_world: Transform3D = world_rests[parent_name] if (parent_name != &"" and world_rests.has(parent_name)) else Transform3D()
+		var target_basis: Basis = MarionetteArchetypeSolverDispatch.solve(
+				archetype, bone_world, child_world, muscle_frame, is_left_side, parent_world)
 
-		# Run the permutation matcher (P2.8) against the bone's rest basis
-		# so the gizmo can flag bones whose rest frame can't cleanly hold
-		# the anatomical target. ROOT and FIXED bones aren't subject to SPD
-		# limits, so we don't paint them yellow even if their permutation is
-		# weak (the score is meaningless for those archetypes).
+		# What gets drawn = what gets baked.
+		#   ROOT / FIXED: no SPD frame; show the target so the muscle frame
+		#     derivation is still visualizable. Saturated RGB.
+		#   Matched SPD bone: show the permuted bone basis the matcher
+		#     committed to — the actual joint frame after baking. Saturated
+		#     RGB.
+		#   Unmatched SPD bone: the generator falls back to baking the
+		#     calculated target; that *is* the joint frame at runtime. Yellow
+		#     to signal the rig couldn't axis-align cleanly here.
+		var draw_basis_in_source: Basis = target_basis
 		var unmatched: bool = false
 		if archetype != BoneArchetype.Type.ROOT and archetype != BoneArchetype.Type.FIXED:
 			var match_result: MarionettePermutationMatch = MarionettePermutationMatcher.find_match(
-					bone_world.basis, basis)
+					bone_world.basis, target_basis)
 			unmatched = not match_result.matched
+			if not unmatched:
+				var perm: Basis = Basis(
+						SignedAxis.to_vector3(match_result.flex_axis),
+						SignedAxis.to_vector3(match_result.along_bone_axis),
+						SignedAxis.to_vector3(match_result.abduction_axis))
+				draw_basis_in_source = bone_world.basis * perm
 
 		var origin: Vector3 = source_to_local * bone_world.origin
 		# Bone length drives tripod size — long bones (humerus, femur) get
@@ -228,9 +261,9 @@ func _draw_per_bone_targets(
 		var mat_x: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_X
 		var mat_y: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_Y
 		var mat_z: StringName = _MAT_BONE_UNMATCHED if unmatched else _MAT_BONE_Z
-		_draw_line(gizmo, origin, origin + (direction_basis * basis.x) * len, mat_x)
-		_draw_line(gizmo, origin, origin + (direction_basis * basis.y) * len, mat_y)
-		_draw_line(gizmo, origin, origin + (direction_basis * basis.z) * len, mat_z)
+		_draw_line(gizmo, origin, origin + (direction_basis * draw_basis_in_source.x) * len, mat_x)
+		_draw_line(gizmo, origin, origin + (direction_basis * draw_basis_in_source.y) * len, mat_y)
+		_draw_line(gizmo, origin, origin + (direction_basis * draw_basis_in_source.z) * len, mat_z)
 
 
 static func _segment(a: Vector3, b: Vector3) -> PackedVector3Array:

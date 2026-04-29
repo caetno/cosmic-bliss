@@ -1,34 +1,49 @@
-[gd_resource type="Resource" script_class="BoneProfile" format=3 uid="uid://dhxy8mpmsdvvl"]
+[gd_resource type="Resource" script_class="BoneProfile" format=3 uid="uid://dwplgmbh0we3m"]
 
 [ext_resource type="Script" uid="uid://rl0pyf6bqvy1" path="res://addons/marionette/resources/bone_entry.gd" id="1_igw2a"]
 [ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/data/marionette_humanoid_profile.tres" id="1_skel"]
 [ext_resource type="Script" uid="uid://dbevicy4chs4i" path="res://addons/marionette/resources/bone_profile.gd" id="2_script"]
 
+[sub_resource type="Resource" id="Resource_0ihmu"]
+script = ExtResource("1_igw2a")
+archetype = 4
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+calculated_anatomical_basis = Basis(-1, 1.062623e-12, 2.7514952e-08, -8.259181e-09, 0.95387393, -0.30020747, -2.6246115e-08, -0.30020747, -0.95387393)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_v7hip"]
+script = ExtResource("1_igw2a")
+archetype = 4
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+calculated_anatomical_basis = Basis(-1, 0, 2.6182072e-08, 0, 1, 0, -2.6182072e-08, 0, -1)
+use_calculated_frame = true
+mirror_abd = true
+
 [sub_resource type="Resource" id="Resource_3os0y"]
-script = ExtResource("1_igw2a")
-archetype = 4
-rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
-rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
-
-[sub_resource type="Resource" id="Resource_sqhgq"]
-script = ExtResource("1_igw2a")
-archetype = 4
-rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
-rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
-
-[sub_resource type="Resource" id="Resource_igw2a"]
 script = ExtResource("1_igw2a")
 archetype = 6
 
-[sub_resource type="Resource" id="Resource_kir2g"]
+[sub_resource type="Resource" id="Resource_3lsjq"]
+script = ExtResource("1_igw2a")
+
+[sub_resource type="Resource" id="Resource_yhu21"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.9999024, 1.1175871e-08, -0.013968438, 4.4703484e-08, 0.99999964, 2.9802322e-08, 0.013968436, -2.9802322e-08, -0.9999025)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_ixptl"]
+[sub_resource type="Resource" id="Resource_8u8rm"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
@@ -36,166 +51,191 @@ abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
 is_left_side = true
-
-[sub_resource type="Resource" id="Resource_2wx4k"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 1
-abduction_axis = 5
-rom_min = Vector3(-0.2617994, 0, -0.34906584)
-rom_max = Vector3(0.6981317, 0, 0.34906584)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_ikpib"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 2
-along_bone_axis = 4
-abduction_axis = 0
-rom_min = Vector3(-0.9599311, 0, -0.2617994)
-rom_max = Vector3(0.9599311, 0, 0.61086524)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_li1yi"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_ilpl0"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-along_bone_axis = 4
-abduction_axis = 2
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_eynxo"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 2
-along_bone_axis = 4
-abduction_axis = 0
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_kobfg"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_xwt0j"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-along_bone_axis = 4
-abduction_axis = 2
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_vjmcu"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 2
-along_bone_axis = 4
-abduction_axis = 0
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-is_left_side = true
+calculated_anatomical_basis = Basis(-0.97395575, -0.2254329, 0.0242931, -0.2191641, 0.9085421, -0.35569268, 0.05811356, -0.35175332, -0.9342871)
+use_calculated_frame = true
+mirror_abd = true
 
 [sub_resource type="Resource" id="Resource_lqb1w"]
 script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 4
-abduction_axis = 1
-rom_max = Vector3(2.443461, 0, 0)
 is_left_side = true
 
-[sub_resource type="Resource" id="Resource_ljfrw"]
-script = ExtResource("1_igw2a")
-archetype = 1
-rom_max = Vector3(2.3561945, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_2q8xy"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_npyau"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-along_bone_axis = 4
-abduction_axis = 2
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_2bn5p"]
+[sub_resource type="Resource" id="Resource_kir2g"]
 script = ExtResource("1_igw2a")
 archetype = 2
-flex_axis = 2
-along_bone_axis = 4
-abduction_axis = 0
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
+rom_min = Vector3(-0.2617994, 0, -0.34906584)
+rom_max = Vector3(0.6981317, 0, 0.34906584)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.9953402, 0, 0.09642564, 0, 1, 0, -0.09642564, 0, 0.9953402)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_71qny"]
+[sub_resource type="Resource" id="Resource_ilpl0"]
 script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(-0.9599311, 0, -0.2617994)
+rom_max = Vector3(0.9599311, 0, 0.61086524)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.9854163, -0.11060552, 0.1293106, 0.16998947, 0.67400503, -0.7189026, -0.0076413904, 0.7303997, 0.68297726)
+use_calculated_frame = true
+mirror_abd = true
 
 [sub_resource type="Resource" id="Resource_t3dgm"]
 script = ExtResource("1_igw2a")
 archetype = 1
-flex_axis = 1
-along_bone_axis = 4
-abduction_axis = 2
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.99444467, 0, -0.10526069, 0, 1, 0, 0.10526069, 0, 0.99444467)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_ybeko"]
 script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 2
+archetype = 1
 along_bone_axis = 4
-abduction_axis = 0
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9902306, -0.082054816, 0.11274009, 0.13922772, 0.62635374, -0.767005, -0.007678723, 0.7752084, 0.631659)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_2q8xy"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.9525569, -0.20429641, 0.22560652, 0.30427086, 0.6571875, -0.68958235, -0.0073865848, 0.72551197, 0.68816996)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_ab03b"]
+[sub_resource type="Resource" id="Resource_18o6l"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.98753417, 0, 0.1574049, 0, 1, 0, -0.1574049, 0, 0.98753417)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_srimh"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9854543, 0.118798025, -0.121518895, -0.16976872, 0.65603673, -0.73538727, -0.0076416857, 0.7453206, 0.6666624)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_y8ssm"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.95510477, 0.2047712, -0.21411137, -0.29617575, 0.64186513, -0.7073112, -0.0074063335, 0.7389708, 0.67369676)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_eynxo"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(2.443461, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.7457996, 0.63888955, 0.18868801, 0.6661453, 0.71277183, 0.21956035, 0.0057833055, 0.28944165, -0.95717824)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_ixptl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(2.3561945, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9771849, 0.09567682, -0.18961981, -0.116992086, 0.98761064, -0.10458535, 0.17726415, 0.12438323, 0.9762716)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_xwt0j"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9981036, 0, -0.06155647, 0, 1, 0, 0.06155647, 0, 0.9981036)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_vjmcu"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.996435, -0.047554858, 0.06968411, 0.08400973, 0.6349657, -0.767959, -0.0077268365, 0.77107537, 0.6366971)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_71qny"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9932711, -0.07277957, 0.090086825, 0.11555594, 0.6745496, -0.72912943, -0.0077023045, 0.7346332, 0.6784208)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_6k7wc"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.99879414, 0, 0.049095538, 0, 1, 0, -0.049095538, 0, 0.99879414)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_dsyxt"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9987074, 0.037925325, -0.03384059, -0.050234843, 0.635039, -0.770845, -0.0077444552, 0.77154857, 0.6361233)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_kobfg"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+calculated_anatomical_basis = Basis(0.9957249, 0.06705394, -0.06352722, -0.092045195, 0.6628146, -0.7431047, -0.0077213245, 0.7457752, 0.666153)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_rjwyl"]
 script = ExtResource("1_igw2a")
 archetype = 5
-flex_axis = 4
-abduction_axis = 1
 rom_min = Vector3(-0.2617994, -0.2617994, -0.2617994)
 rom_max = Vector3(0.2617994, 0.2617994, 0.2617994)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.9999531, -0.0062774555, 0.0073752194, 0.0058029327, 0.9980163, 0.06268857, -0.007754113, -0.06264283, 0.9980059)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_3wkcm"]
+[sub_resource type="Resource" id="Resource_npyau"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 4
 abduction_axis = 1
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.0063313837, 0, -0.99998015, 1.1920929e-07, 1.0006081, 6.9849193e-10, 1.000588, -8.940697e-08, 0.0063352333)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_3lsjq"]
+[sub_resource type="Resource" id="Resource_li1yi"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 4
@@ -203,8 +243,11 @@ abduction_axis = 1
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.0023476884, -0.6722876, -0.7402863, 0.60375, 0.59165496, -0.535394, 0.7979328, -0.445691, 0.40728274)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_rjwyl"]
+[sub_resource type="Resource" id="Resource_2bn5p"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 4
@@ -212,56 +255,18 @@ along_bone_axis = 1
 abduction_axis = 3
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(0.0037236288, -0.80337965, -0.5954555, 0.43922168, 0.5366644, -0.72131294, 0.899048, -0.25885105, 0.35486007)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_oi08f"]
+[sub_resource type="Resource" id="Resource_mln5e"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
-
-[sub_resource type="Resource" id="Resource_l57qe"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_vesjk"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 1
-abduction_axis = 5
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_8u8rm"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_g2cbg"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_n7fid"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 1
-abduction_axis = 5
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-is_left_side = true
+calculated_anatomical_basis = Basis(-0.99954927, 7.450581e-09, -0.030027702, -4.4703484e-08, 0.99999994, 2.0535663e-07, 0.030027697, 7.450581e-09, -0.99954927)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_dglje"]
 script = ExtResource("1_igw2a")
@@ -270,16 +275,10 @@ flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.9675461, -0.23787764, 0.08525752, -0.2516641, 0.87665737, -0.4100449, 0.022798892, -0.41819382, -0.90807176)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_jlwol"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_yhu21"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
@@ -287,6 +286,19 @@ abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.96615756, -0.2577191, 0.010980209, -0.23345304, 0.855495, -0.46219862, 0.10972392, -0.44912016, -0.8867083)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_7mndj"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.990372, -3.3527613e-08, -0.13843328, -8.568168e-08, 1.0000004, 7.0780516e-08, 0.13843326, 0, -0.99037206)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_4ls45"]
 script = ExtResource("1_igw2a")
@@ -295,16 +307,10 @@ flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.9450739, -0.32656243, 0.013874358, -0.29468855, 0.83293074, -0.46838564, 0.14140081, -0.44674778, -0.88341534)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_dbeys"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-is_left_side = true
-
-[sub_resource type="Resource" id="Resource_mln5e"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
@@ -312,8 +318,82 @@ abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.93395174, -0.35615304, -0.02982187, -0.30831796, 0.84508455, -0.43677416, 0.18076047, -0.39873135, -0.8990767)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_v7hip"]
+[sub_resource type="Resource" id="Resource_ftlpl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.9814478, -1.15484e-07, -0.19172937, -1.8626451e-07, 0.99999934, 8.940697e-08, 0.19172935, -4.4703484e-08, -0.9814479)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_4s1xe"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.93046623, -0.35884973, -0.07389322, -0.289817, 0.84428865, -0.4507573, 0.22414139, -0.39799908, -0.88958293)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_oypoo"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.9457245, -0.29573053, -0.13471736, -0.21022314, 0.8728716, -0.44034123, 0.2478134, -0.3881209, -0.88766575)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_nbeou"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.9541687, 1.937151e-07, -0.29926953, 5.9604645e-08, 0.99999964, 1.4901161e-07, 0.29926962, -4.4703484e-08, -0.95416903)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_qilni"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.95875645, -0.25440466, -0.12674631, -0.17932662, 0.8873997, -0.4246918, 0.22051829, -0.3844474, -0.89642197)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_iw6et"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+is_left_side = true
+calculated_anatomical_basis = Basis(-0.89799577, -0.43957803, -0.019363556, -0.3830249, 0.80260926, -0.45728478, 0.21655375, -0.4032231, -0.8891093)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_vesjk"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+is_left_side = true
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_3wkcm"]
 script = ExtResource("1_igw2a")
 archetype = 0
 flex_axis = 2
@@ -322,8 +402,11 @@ abduction_axis = 0
 rom_min = Vector3(0, -1.3089969, 0)
 rom_max = Vector3(2.6179938, 1.3089969, 2.6179938)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.005047807, 0.036481287, 0.9993216, 0.7591029, 0.65066594, -0.019918839, -0.6509512, 0.7584873, -0.030977482)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_x774u"]
+[sub_resource type="Resource" id="Resource_018qj"]
 script = ExtResource("1_igw2a")
 archetype = 0
 flex_axis = 1
@@ -331,223 +414,230 @@ abduction_axis = 5
 rom_min = Vector3(-0.2617994, -0.7853982, 0)
 rom_max = Vector3(1.7453293, 0.7853982, 0.6981317)
 is_left_side = true
+calculated_anatomical_basis = Basis(-0.9917484, -0.12797259, -0.0076242355, -0.12819563, 0.99042445, 0.051238425, 0.0009941157, 0.05179302, -0.9986574)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_0ihmu"]
+[sub_resource type="Resource" id="Resource_ab03b"]
 script = ExtResource("1_igw2a")
 archetype = 4
+flex_axis = 1
+abduction_axis = 5
 rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
 rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+calculated_anatomical_basis = Basis(-1, 8.700263e-12, 2.6927404e-08, 6.4977126e-09, 0.9705273, 0.24099126, -2.6131683e-08, 0.24099126, -0.9705273)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_oypoo"]
+[sub_resource type="Resource" id="Resource_mxx3l"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9999024, 1.1920929e-07, 0.013968378, 1.0058284e-07, 0.9999999, 2.9802322e-08, -0.01396838, 0, -0.99990255)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_7mndj"]
+[sub_resource type="Resource" id="Resource_0qu8c"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
 abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.9739558, 0.2254331, -0.02429314, 0.21916437, 0.90854245, -0.35569286, -0.0581136, -0.3517534, -0.9342873)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_018qj"]
+[sub_resource type="Resource" id="Resource_ikpib"]
+script = ExtResource("1_igw2a")
+
+[sub_resource type="Resource" id="Resource_n7fid"]
 script = ExtResource("1_igw2a")
 archetype = 2
-flex_axis = 1
-abduction_axis = 5
 rom_min = Vector3(-0.2617994, 0, -0.34906584)
 rom_max = Vector3(0.6981317, 0, 0.34906584)
-
-[sub_resource type="Resource" id="Resource_srimh"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 3
-along_bone_axis = 4
-abduction_axis = 1
-rom_min = Vector3(-0.9599311, 0, -0.2617994)
-rom_max = Vector3(0.9599311, 0, 0.61086524)
-
-[sub_resource type="Resource" id="Resource_03elu"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.99534017, 0, -0.096425846, 0, 1, 0, 0.096425846, 0, 0.99534017)
+use_calculated_frame = true
+mirror_abd = true
 
 [sub_resource type="Resource" id="Resource_mbw12"]
 script = ExtResource("1_igw2a")
-archetype = 1
+archetype = 2
 along_bone_axis = 4
 abduction_axis = 3
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_bas1x"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 3
-along_bone_axis = 4
-abduction_axis = 1
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-
-[sub_resource type="Resource" id="Resource_yblou"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_gr36y"]
-script = ExtResource("1_igw2a")
-archetype = 1
-along_bone_axis = 4
-abduction_axis = 3
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_uhbpt"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 3
-along_bone_axis = 4
-abduction_axis = 1
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-
-[sub_resource type="Resource" id="Resource_y8ssm"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 4
-abduction_axis = 1
-rom_max = Vector3(2.443461, 0, 0)
-
-[sub_resource type="Resource" id="Resource_wdnwa"]
-script = ExtResource("1_igw2a")
-archetype = 1
-rom_max = Vector3(2.3561945, 0, 0)
-
-[sub_resource type="Resource" id="Resource_yaggl"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_thfmo"]
-script = ExtResource("1_igw2a")
-archetype = 1
-along_bone_axis = 4
-abduction_axis = 3
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_3eel6"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 3
-along_bone_axis = 4
-abduction_axis = 1
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-
-[sub_resource type="Resource" id="Resource_yomct"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 5
-abduction_axis = 0
-rom_max = Vector3(1.3962634, 0, 0)
+rom_min = Vector3(-0.9599311, 0, -0.2617994)
+rom_max = Vector3(0.9599311, 0, 0.61086524)
+calculated_anatomical_basis = Basis(0.9854164, 0.11060528, -0.12931, -0.16998887, 0.674006, -0.71890175, 0.0076413862, 0.7303988, 0.6829783)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_vp57u"]
 script = ExtResource("1_igw2a")
 archetype = 1
-along_bone_axis = 4
-abduction_axis = 3
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.99444467, 0, 0.10526092, 0, 1, 0, -0.10526092, 0, 0.99444467)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_sh7ah"]
 script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 3
+archetype = 1
 along_bone_axis = 4
-abduction_axis = 1
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.9902306, 0.082054995, -0.1127403, -0.139228, 0.62635374, -0.7670049, 0.007678719, 0.7752084, 0.631659)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_yaggl"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(0.95255697, 0.20429657, -0.22560616, -0.30427068, 0.65718836, -0.6895817, 0.007386565, 0.7255112, 0.6881708)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_dsyxt"]
+[sub_resource type="Resource" id="Resource_wdnwa"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.9875342, 0, -0.15740451, 0, 1, 0, 0.15740451, 0, 0.9875342)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_15d27"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.9854545, -0.11879755, 0.121517956, 0.16976771, 0.6560381, -0.73538625, 0.007641676, 0.7453195, 0.6666637)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_2wx4k"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(0.955107, -0.20476833, 0.21410435, 0.29616868, 0.6418729, -0.70730716, 0.007406349, 0.738965, 0.6737032)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_bas1x"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(2.443461, 0, 0)
+calculated_anatomical_basis = Basis(-0.7457993, -0.63888985, -0.18868807, -0.6661456, 0.7127716, 0.21956019, -0.005783271, 0.28944156, -0.95717824)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_oi08f"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(2.3561945, 0, 0)
+calculated_anatomical_basis = Basis(0.9771849, -0.09567703, 0.18961978, 0.1169923, 0.98761064, -0.1045854, -0.17726408, 0.12438332, 0.9762716)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_gr36y"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.9981036, 0, 0.06155669, 0, 1, 0, -0.06155669, 0, 0.9981036)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_uhbpt"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.99643505, 0.047554802, -0.069683276, -0.08400901, 0.6349702, -0.76795536, 0.007726834, 0.7710717, 0.6367016)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_yomct"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(0.9932712, 0.07277891, -0.09008668, -0.11555541, 0.67454714, -0.72913176, 0.007702302, 0.7346356, 0.6784182)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_ljfrw"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.99879414, 0, -0.049095344, 0, 1, 0, 0.049095344, 0, 0.99879414)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_x774u"]
+script = ExtResource("1_igw2a")
+archetype = 1
+along_bone_axis = 4
+abduction_axis = 3
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.9987074, -0.037925232, 0.033840608, 0.050234783, 0.63503766, -0.770846, 0.007744454, 0.7715497, 0.6361219)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_yblou"]
+script = ExtResource("1_igw2a")
+archetype = 2
+along_bone_axis = 4
+abduction_axis = 3
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(0.99572486, -0.06705404, 0.06352741, 0.092045404, 0.66281414, -0.74310505, 0.0077213207, 0.74577564, 0.66615254)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_1kk5w"]
 script = ExtResource("1_igw2a")
 archetype = 5
-flex_axis = 4
-abduction_axis = 1
 rom_min = Vector3(-0.2617994, -0.2617994, -0.2617994)
 rom_max = Vector3(0.2617994, 0.2617994, 0.2617994)
+calculated_anatomical_basis = Basis(0.9999531, 0.00627761, -0.0073752166, -0.005803097, 0.99801636, 0.06268733, 0.007754113, -0.06264159, 0.998006)
+use_calculated_frame = true
+mirror_abd = true
 
-[sub_resource type="Resource" id="Resource_wdjlr"]
+[sub_resource type="Resource" id="Resource_thfmo"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 5
 abduction_axis = 0
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.006331365, 0, 0.99998015, -1.1920929e-07, 1.0006081, 9.313226e-10, -1.000588, -8.940697e-08, 0.0063352142)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_18o6l"]
+[sub_resource type="Resource" id="Resource_03elu"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 5
 abduction_axis = 0
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(0.0023476325, 0.6722913, 0.7402829, -0.60375166, 0.5916512, -0.53539616, -0.79793155, -0.44569016, 0.407286)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_1kk5w"]
+[sub_resource type="Resource" id="Resource_3eel6"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 5
 along_bone_axis = 0
 abduction_axis = 3
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(0.003723567, 0.80338037, 0.59545463, -0.4392262, 0.5366623, -0.7213117, -0.8990457, -0.2588534, 0.35486403)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_iw6et"]
+[sub_resource type="Resource" id="Resource_38pew"]
 script = ExtResource("1_igw2a")
 archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_ftlpl"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_4s1xe"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 1
-abduction_axis = 5
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
-
-[sub_resource type="Resource" id="Resource_0qu8c"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_nbeou"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_qilni"]
-script = ExtResource("1_igw2a")
-archetype = 2
-flex_axis = 1
-abduction_axis = 5
-rom_min = Vector3(0, 0, -0.34906584)
-rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.99954927, 1.2665987e-07, 0.030027602, 1.6391277e-07, 1, 1.2433156e-07, -0.030027587, -3.259629e-08, -0.9995494)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_7ca55"]
 script = ExtResource("1_igw2a")
@@ -555,21 +645,27 @@ archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9675463, 0.23787653, -0.08525722, 0.25166306, 0.8766576, -0.4100452, -0.02279878, -0.41819412, -0.90807176)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_h10ju"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_mxx3l"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
 abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.96615773, 0.2577185, -0.010980263, 0.23345256, 0.8554952, -0.4621988, -0.10972364, -0.4491204, -0.88670856)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_3ldt6"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9903719, 1.0058284e-07, 0.13843323, 1.9744039e-07, 0.9999999, 2.0116568e-07, -0.13843325, 1.4901161e-08, -0.9903722)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_agkcq"]
 script = ExtResource("1_igw2a")
@@ -577,23 +673,82 @@ archetype = 1
 flex_axis = 1
 abduction_axis = 5
 rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9450747, 0.3265599, -0.013873246, 0.2946858, 0.8329315, -0.46838522, -0.14140046, -0.44674766, -0.8834156)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_x6yki"]
-script = ExtResource("1_igw2a")
-archetype = 1
-flex_axis = 1
-abduction_axis = 5
-rom_max = Vector3(1.3962634, 0, 0)
-
-[sub_resource type="Resource" id="Resource_38pew"]
 script = ExtResource("1_igw2a")
 archetype = 2
 flex_axis = 1
 abduction_axis = 5
 rom_min = Vector3(0, 0, -0.34906584)
 rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.933951, 0.35615507, 0.029821347, 0.3083199, 0.8450838, -0.43677384, -0.18076086, -0.39873105, -0.899077)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_6k7wc"]
+[sub_resource type="Resource" id="Resource_8d6gl"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9814478, 2.7567148e-07, 0.1917292, 3.017485e-07, 0.9999999, 5.9604645e-08, -0.19172925, 8.195639e-08, -0.9814478)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_uty88"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.9304666, 0.3588482, 0.0738935, 0.28981516, 0.84428877, -0.4507592, -0.22414154, -0.3980008, -0.8895819)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_yci3x"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.94572395, 0.29573348, 0.13471584, 0.21022636, 0.87287104, -0.44034237, -0.24781346, -0.3881214, -0.8876658)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_kyts0"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.95416856, -2.5331974e-07, 0.29926947, -3.427267e-07, 1.0000005, -8.195639e-08, -0.2992696, -5.9604645e-08, -0.954169)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_pwb56"]
+script = ExtResource("1_igw2a")
+archetype = 1
+flex_axis = 1
+abduction_axis = 5
+rom_max = Vector3(1.3962634, 0, 0)
+calculated_anatomical_basis = Basis(-0.95875585, 0.2544078, 0.12674409, 0.1793305, 0.8873996, -0.42469174, -0.22051755, -0.3844465, -0.8964226)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_gjshx"]
+script = ExtResource("1_igw2a")
+archetype = 2
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(0, 0, -0.34906584)
+rom_max = Vector3(1.5707964, 0, 0.34906584)
+calculated_anatomical_basis = Basis(-0.89799684, 0.43957597, 0.019364296, 0.3830229, 0.80261064, -0.4572857, -0.21655376, -0.40322402, -0.8891092)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_g2cbg"]
+script = ExtResource("1_igw2a")
+archetype = 1
+rom_max = Vector3(1.3962634, 0, 0)
+use_calculated_frame = true
+
+[sub_resource type="Resource" id="Resource_wdjlr"]
 script = ExtResource("1_igw2a")
 archetype = 0
 flex_axis = 3
@@ -601,107 +756,131 @@ along_bone_axis = 4
 abduction_axis = 1
 rom_min = Vector3(0, -1.3089969, 0)
 rom_max = Vector3(2.6179938, 1.3089969, 2.6179938)
+calculated_anatomical_basis = Basis(-0.0050477674, -0.036481313, -0.99932164, -0.7591028, 0.650666, -0.01991889, 0.65095127, 0.7584872, -0.03097748)
+use_calculated_frame = true
 
-[sub_resource type="Resource" id="Resource_15d27"]
+[sub_resource type="Resource" id="Resource_l57qe"]
 script = ExtResource("1_igw2a")
 archetype = 0
 flex_axis = 1
 abduction_axis = 5
 rom_min = Vector3(-0.2617994, -0.7853982, 0)
 rom_max = Vector3(1.7453293, 0.7853982, 0.6981317)
+calculated_anatomical_basis = Basis(-0.9917484, 0.12797278, 0.0076241894, 0.12819584, 0.9904244, 0.051238373, -0.0009940655, 0.051792964, -0.9986574)
+use_calculated_frame = true
 
 [sub_resource type="Resource" id="Resource_8ij37"]
 script = ExtResource("1_igw2a")
-archetype = 4
-rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
-rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+archetype = 6
 
 [sub_resource type="Resource" id="Resource_8kpxv"]
 script = ExtResource("1_igw2a")
 archetype = 4
+flex_axis = 1
+abduction_axis = 5
 rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
 rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+calculated_anatomical_basis = Basis(-1, 1.0913926e-11, 2.641759e-08, -3.3224317e-09, 0.992008, -0.12617573, -2.6207834e-08, -0.12617573, -0.992008)
+use_calculated_frame = true
+mirror_abd = true
+
+[sub_resource type="Resource" id="Resource_sqhgq"]
+script = ExtResource("1_igw2a")
+archetype = 4
+flex_axis = 1
+abduction_axis = 5
+rom_min = Vector3(-0.17453292, -0.17453292, -0.17453292)
+rom_max = Vector3(0.17453292, 0.17453292, 0.17453292)
+calculated_anatomical_basis = Basis(-1, 7.613976e-12, 2.6514689e-08, 4.394446e-09, 0.9862177, 0.1654531, -2.6147994e-08, 0.1654531, -0.9862177)
+use_calculated_frame = true
+mirror_abd = true
 
 [resource]
 script = ExtResource("2_script")
 skeleton_profile = ExtResource("1_skel")
 bones = Dictionary[StringName, ExtResource("1_igw2a")]({
-&"Chest": SubResource("Resource_3os0y"),
-&"Head": SubResource("Resource_sqhgq"),
-&"Hips": SubResource("Resource_igw2a"),
-&"LeftBigToeDistal": SubResource("Resource_kir2g"),
-&"LeftBigToeProximal": SubResource("Resource_ixptl"),
-&"LeftFoot": SubResource("Resource_2wx4k"),
-&"LeftHand": SubResource("Resource_ikpib"),
-&"LeftIndexDistal": SubResource("Resource_li1yi"),
-&"LeftIndexIntermediate": SubResource("Resource_ilpl0"),
-&"LeftIndexProximal": SubResource("Resource_eynxo"),
-&"LeftLittleDistal": SubResource("Resource_kobfg"),
-&"LeftLittleIntermediate": SubResource("Resource_xwt0j"),
-&"LeftLittleProximal": SubResource("Resource_vjmcu"),
-&"LeftLowerArm": SubResource("Resource_lqb1w"),
-&"LeftLowerLeg": SubResource("Resource_ljfrw"),
-&"LeftMiddleDistal": SubResource("Resource_2q8xy"),
-&"LeftMiddleIntermediate": SubResource("Resource_npyau"),
-&"LeftMiddleProximal": SubResource("Resource_2bn5p"),
-&"LeftRingDistal": SubResource("Resource_71qny"),
-&"LeftRingIntermediate": SubResource("Resource_t3dgm"),
-&"LeftRingProximal": SubResource("Resource_ybeko"),
-&"LeftShoulder": SubResource("Resource_ab03b"),
-&"LeftThumbDistal": SubResource("Resource_3wkcm"),
-&"LeftThumbMetacarpal": SubResource("Resource_3lsjq"),
-&"LeftThumbProximal": SubResource("Resource_rjwyl"),
-&"LeftToe2Distal": SubResource("Resource_oi08f"),
-&"LeftToe2Intermediate": SubResource("Resource_l57qe"),
-&"LeftToe2Proximal": SubResource("Resource_vesjk"),
-&"LeftToe3Distal": SubResource("Resource_8u8rm"),
-&"LeftToe3Intermediate": SubResource("Resource_g2cbg"),
-&"LeftToe3Proximal": SubResource("Resource_n7fid"),
-&"LeftToe4Distal": SubResource("Resource_dglje"),
-&"LeftToe4Intermediate": SubResource("Resource_jlwol"),
-&"LeftToe4Proximal": SubResource("Resource_yhu21"),
-&"LeftToe5Distal": SubResource("Resource_4ls45"),
-&"LeftToe5Intermediate": SubResource("Resource_dbeys"),
-&"LeftToe5Proximal": SubResource("Resource_mln5e"),
-&"LeftUpperArm": SubResource("Resource_v7hip"),
-&"LeftUpperLeg": SubResource("Resource_x774u"),
-&"Neck": SubResource("Resource_0ihmu"),
-&"RightBigToeDistal": SubResource("Resource_oypoo"),
-&"RightBigToeProximal": SubResource("Resource_7mndj"),
-&"RightFoot": SubResource("Resource_018qj"),
-&"RightHand": SubResource("Resource_srimh"),
-&"RightIndexDistal": SubResource("Resource_03elu"),
-&"RightIndexIntermediate": SubResource("Resource_mbw12"),
-&"RightIndexProximal": SubResource("Resource_bas1x"),
-&"RightLittleDistal": SubResource("Resource_yblou"),
-&"RightLittleIntermediate": SubResource("Resource_gr36y"),
-&"RightLittleProximal": SubResource("Resource_uhbpt"),
-&"RightLowerArm": SubResource("Resource_y8ssm"),
-&"RightLowerLeg": SubResource("Resource_wdnwa"),
-&"RightMiddleDistal": SubResource("Resource_yaggl"),
-&"RightMiddleIntermediate": SubResource("Resource_thfmo"),
-&"RightMiddleProximal": SubResource("Resource_3eel6"),
-&"RightRingDistal": SubResource("Resource_yomct"),
-&"RightRingIntermediate": SubResource("Resource_vp57u"),
-&"RightRingProximal": SubResource("Resource_sh7ah"),
-&"RightShoulder": SubResource("Resource_dsyxt"),
-&"RightThumbDistal": SubResource("Resource_wdjlr"),
-&"RightThumbMetacarpal": SubResource("Resource_18o6l"),
-&"RightThumbProximal": SubResource("Resource_1kk5w"),
-&"RightToe2Distal": SubResource("Resource_iw6et"),
-&"RightToe2Intermediate": SubResource("Resource_ftlpl"),
-&"RightToe2Proximal": SubResource("Resource_4s1xe"),
-&"RightToe3Distal": SubResource("Resource_0qu8c"),
-&"RightToe3Intermediate": SubResource("Resource_nbeou"),
-&"RightToe3Proximal": SubResource("Resource_qilni"),
-&"RightToe4Distal": SubResource("Resource_7ca55"),
-&"RightToe4Intermediate": SubResource("Resource_h10ju"),
-&"RightToe4Proximal": SubResource("Resource_mxx3l"),
-&"RightToe5Distal": SubResource("Resource_agkcq"),
-&"RightToe5Intermediate": SubResource("Resource_x6yki"),
-&"RightToe5Proximal": SubResource("Resource_38pew"),
-&"RightUpperArm": SubResource("Resource_6k7wc"),
-&"RightUpperLeg": SubResource("Resource_15d27"),
-&"Spine": SubResource("Resource_8ij37"),
-&"UpperChest": SubResource("Resource_8kpxv")
+&"Chest": SubResource("Resource_0ihmu"),
+&"Head": SubResource("Resource_v7hip"),
+&"Hips": SubResource("Resource_3os0y"),
+&"Jaw": SubResource("Resource_3lsjq"),
+&"LeftBigToeDistal": SubResource("Resource_yhu21"),
+&"LeftBigToeProximal": SubResource("Resource_8u8rm"),
+&"LeftEye": SubResource("Resource_lqb1w"),
+&"LeftFoot": SubResource("Resource_kir2g"),
+&"LeftHand": SubResource("Resource_ilpl0"),
+&"LeftIndexDistal": SubResource("Resource_t3dgm"),
+&"LeftIndexIntermediate": SubResource("Resource_ybeko"),
+&"LeftIndexProximal": SubResource("Resource_2q8xy"),
+&"LeftLittleDistal": SubResource("Resource_18o6l"),
+&"LeftLittleIntermediate": SubResource("Resource_srimh"),
+&"LeftLittleProximal": SubResource("Resource_y8ssm"),
+&"LeftLowerArm": SubResource("Resource_eynxo"),
+&"LeftLowerLeg": SubResource("Resource_ixptl"),
+&"LeftMiddleDistal": SubResource("Resource_xwt0j"),
+&"LeftMiddleIntermediate": SubResource("Resource_vjmcu"),
+&"LeftMiddleProximal": SubResource("Resource_71qny"),
+&"LeftRingDistal": SubResource("Resource_6k7wc"),
+&"LeftRingIntermediate": SubResource("Resource_dsyxt"),
+&"LeftRingProximal": SubResource("Resource_kobfg"),
+&"LeftShoulder": SubResource("Resource_rjwyl"),
+&"LeftThumbDistal": SubResource("Resource_npyau"),
+&"LeftThumbMetacarpal": SubResource("Resource_li1yi"),
+&"LeftThumbProximal": SubResource("Resource_2bn5p"),
+&"LeftToe2Distal": SubResource("Resource_mln5e"),
+&"LeftToe2Intermediate": SubResource("Resource_dglje"),
+&"LeftToe2Proximal": SubResource("Resource_jlwol"),
+&"LeftToe3Distal": SubResource("Resource_7mndj"),
+&"LeftToe3Intermediate": SubResource("Resource_4ls45"),
+&"LeftToe3Proximal": SubResource("Resource_dbeys"),
+&"LeftToe4Distal": SubResource("Resource_ftlpl"),
+&"LeftToe4Intermediate": SubResource("Resource_4s1xe"),
+&"LeftToe4Proximal": SubResource("Resource_oypoo"),
+&"LeftToe5Distal": SubResource("Resource_nbeou"),
+&"LeftToe5Intermediate": SubResource("Resource_qilni"),
+&"LeftToe5Proximal": SubResource("Resource_iw6et"),
+&"LeftToes": SubResource("Resource_vesjk"),
+&"LeftUpperArm": SubResource("Resource_3wkcm"),
+&"LeftUpperLeg": SubResource("Resource_018qj"),
+&"Neck": SubResource("Resource_ab03b"),
+&"RightBigToeDistal": SubResource("Resource_mxx3l"),
+&"RightBigToeProximal": SubResource("Resource_0qu8c"),
+&"RightEye": SubResource("Resource_ikpib"),
+&"RightFoot": SubResource("Resource_n7fid"),
+&"RightHand": SubResource("Resource_mbw12"),
+&"RightIndexDistal": SubResource("Resource_vp57u"),
+&"RightIndexIntermediate": SubResource("Resource_sh7ah"),
+&"RightIndexProximal": SubResource("Resource_yaggl"),
+&"RightLittleDistal": SubResource("Resource_wdnwa"),
+&"RightLittleIntermediate": SubResource("Resource_15d27"),
+&"RightLittleProximal": SubResource("Resource_2wx4k"),
+&"RightLowerArm": SubResource("Resource_bas1x"),
+&"RightLowerLeg": SubResource("Resource_oi08f"),
+&"RightMiddleDistal": SubResource("Resource_gr36y"),
+&"RightMiddleIntermediate": SubResource("Resource_uhbpt"),
+&"RightMiddleProximal": SubResource("Resource_yomct"),
+&"RightRingDistal": SubResource("Resource_ljfrw"),
+&"RightRingIntermediate": SubResource("Resource_x774u"),
+&"RightRingProximal": SubResource("Resource_yblou"),
+&"RightShoulder": SubResource("Resource_1kk5w"),
+&"RightThumbDistal": SubResource("Resource_thfmo"),
+&"RightThumbMetacarpal": SubResource("Resource_03elu"),
+&"RightThumbProximal": SubResource("Resource_3eel6"),
+&"RightToe2Distal": SubResource("Resource_38pew"),
+&"RightToe2Intermediate": SubResource("Resource_7ca55"),
+&"RightToe2Proximal": SubResource("Resource_h10ju"),
+&"RightToe3Distal": SubResource("Resource_3ldt6"),
+&"RightToe3Intermediate": SubResource("Resource_agkcq"),
+&"RightToe3Proximal": SubResource("Resource_x6yki"),
+&"RightToe4Distal": SubResource("Resource_8d6gl"),
+&"RightToe4Intermediate": SubResource("Resource_uty88"),
+&"RightToe4Proximal": SubResource("Resource_yci3x"),
+&"RightToe5Distal": SubResource("Resource_kyts0"),
+&"RightToe5Intermediate": SubResource("Resource_pwb56"),
+&"RightToe5Proximal": SubResource("Resource_gjshx"),
+&"RightToes": SubResource("Resource_g2cbg"),
+&"RightUpperArm": SubResource("Resource_wdjlr"),
+&"RightUpperLeg": SubResource("Resource_l57qe"),
+&"Root": SubResource("Resource_8ij37"),
+&"Spine": SubResource("Resource_8kpxv"),
+&"UpperChest": SubResource("Resource_sqhgq")
 })

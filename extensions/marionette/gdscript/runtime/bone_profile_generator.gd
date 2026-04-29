@@ -6,13 +6,16 @@ extends RefCounted
 #   muscle frame -> archetype lookup -> per-archetype solver
 #   -> permutation matcher -> clinical ROM defaults.
 #
-# Pure data path; the inspector button (`MarionetteBoneProfileInspector`)
-# wraps this with a press handler. CLI tests call `generate()` directly.
+# Pure data path; the inspector button (`MarionetteBoneProfileInspector`) and
+# the Marionette node's "Calibrate Profile from Skeleton" button wrap this
+# with a press handler. CLI tests call `generate()` directly.
 #
-# Existing entries in the BoneProfile are replaced — regeneration is
-# idempotent. Bones not in `MarionetteArchetypeDefaults` (or absent from the
-# data source's world rests) are left absent from the dict so the user can
-# hand-author them; they show up in `report.skipped_bones`.
+# Per-bone update. Existing entries on the BoneProfile are kept by default and
+# overwritten only for bones the generator actually solves this pass; bones
+# that aren't in the data source (e.g. a live rig missing toe bones) keep
+# their previous (template-derived) entry instead of disappearing. Bones not
+# in `MarionetteArchetypeDefaults` are reported in `skipped_bones` and never
+# touched by the generator.
 #
 # By default the SkeletonProfile's reference poses drive the muscle frame and
 # rest bases (the path the inspector button takes — the shipped default
@@ -30,15 +33,18 @@ class GenerateReport extends RefCounted:
 	var matched: int = 0
 	var unmatched: int = 0
 	var skipped: int = 0
+	var preserved: int = 0
 	var unmatched_bones: Array[StringName] = []
 	var skipped_bones: Array[StringName] = []
+	var preserved_bones: Array[StringName] = []
 	var error: String = ""
 
 
 static func generate(
 		bone_profile: BoneProfile,
 		live_skeleton: Skeleton3D = null,
-		bone_map: BoneMap = null) -> GenerateReport:
+		bone_map: BoneMap = null,
+		verbose: bool = false) -> GenerateReport:
 	var report := GenerateReport.new()
 	if bone_profile == null:
 		report.error = "bone_profile is null"
@@ -61,6 +67,11 @@ static func generate(
 		world_rests = MuscleFrameBuilder.compute_world_rests(profile)
 		muscle_frame = MuscleFrameBuilder.build(profile)
 
+	if verbose:
+		print("[BoneProfileGenerator] %s pass against %d-bone profile (rig has %d resolvable bones)"
+				% ["live-skeleton" if use_live else "template",
+					profile.bone_size, world_rests.size()])
+
 	# parent-name -> first-listed-child-name lookup, for the child-hint each
 	# solver needs when SkeletonProfile.get_bone_tail() isn't set.
 	var first_child: Dictionary[StringName, StringName] = {}
@@ -69,7 +80,21 @@ static func generate(
 		if pn != &"" and not first_child.has(pn):
 			first_child[pn] = profile.get_bone_name(i)
 
+	# Start from the existing entries so bones missing from a live rig keep
+	# their previous (template-derived) entries — calibrate against an
+	# 84-bone profile with a 78-bone skeleton no longer drops 6 entries.
+	#
+	# Deep-duplicate each preserved entry so the new dict owns fresh
+	# BoneEntry instances. A shallow duplicate keeps the original
+	# sub-resource references that came from the on-disk .tres file, and
+	# Godot's serializer was dropping those preserved 6 entries on
+	# ResourceSaver.save — visible as the bones array snapping back from
+	# 84 to 78 on project reload.
 	var entries: Dictionary[StringName, BoneEntry] = {}
+	for existing_key: StringName in bone_profile.bones.keys():
+		var existing_entry: BoneEntry = bone_profile.bones[existing_key]
+		if existing_entry != null:
+			entries[existing_key] = existing_entry.duplicate(true)
 
 	for i in range(profile.bone_size):
 		var bone_name: StringName = profile.get_bone_name(i)
@@ -77,14 +102,30 @@ static func generate(
 		if archetype < 0:
 			report.skipped += 1
 			report.skipped_bones.append(bone_name)
+			if verbose:
+				print("  %-28s SKIPPED (no archetype mapping)" % bone_name)
 			continue
 		if not world_rests.has(bone_name):
-			report.skipped += 1
-			report.skipped_bones.append(bone_name)
+			# Not in the data source. Preserve any existing entry so per-bone
+			# state survives a partial-rig calibrate.
+			if entries.has(bone_name):
+				report.preserved += 1
+				report.preserved_bones.append(bone_name)
+				if verbose:
+					print("  %-28s MISSING from rig — preserved existing entry"
+							% bone_name)
+			else:
+				report.skipped += 1
+				report.skipped_bones.append(bone_name)
+				if verbose:
+					print("  %-28s MISSING from rig — no existing entry to preserve"
+							% bone_name)
 			continue
 
 		var bone_world: Transform3D = world_rests[bone_name]
 		var child_world: Transform3D = _resolve_child_world(profile, i, bone_world, world_rests, first_child)
+		var parent_name: StringName = profile.get_bone_parent(i)
+		var parent_world: Transform3D = world_rests[parent_name] if (parent_name != &"" and world_rests.has(parent_name)) else Transform3D()
 		var is_left_side: bool = String(bone_name).begins_with("Left")
 
 		var entry := BoneEntry.new()
@@ -94,24 +135,67 @@ static func generate(
 		# ROOT and FIXED bones aren't SPD-driven; the matcher score is
 		# meaningless for them. Leave permutation at BoneEntry defaults
 		# (PLUS_X / PLUS_Y / PLUS_Z) — write_into() would only echo that anyway.
+		var outcome_label: String = "GENERATED (no SPD frame)"
 		if archetype != BoneArchetype.Type.ROOT and archetype != BoneArchetype.Type.FIXED:
+			var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
+					bone_name, archetype, muscle_frame)
 			var target_basis: Basis = MarionetteArchetypeSolverDispatch.solve(
-					archetype, bone_world, child_world, muscle_frame, is_left_side)
+					archetype, bone_world, child_world, muscle_frame, is_left_side,
+					parent_world, motion_target)
 			var match_result: MarionettePermutationMatch = MarionettePermutationMatcher.find_match(
 					bone_world.basis, target_basis)
 			match_result.write_into(entry)
+			# Cache the calculated bone-local frame and always bake it as the
+			# runtime joint frame. The matcher's signed permutation is kept on
+			# the entry for diagnostics (validator + tripod gizmos signal the
+			# rig's calibration quality) but is NOT used for runtime motion —
+			# the 0.85 match threshold accepts up to ±31° of axis tilt, and
+			# even a 15° tilt makes shoulder flex rotate slightly off-plane.
+			# Always-calculated-frame eliminates that whole class of error.
+			# bone_world.basis is orthonormal (Skeleton3D rest), so .inverse()
+			# is the same as .transposed() up to FP error.
+			entry.calculated_anatomical_basis = bone_world.basis.inverse() * target_basis
+			entry.use_calculated_frame = true
+			# Detect chirality flip on the abduction axis and store the
+			# compensation flag. Compares the natural rotation motion (flex
+			# axis × along) of basis.z against the anatomically expected abd
+			# direction; if they're anti-aligned, runtime needs to sign-flip
+			# the abd input so +abd_slider produces anatomical abduction.
+			var expected_abd: Vector3 = MarionetteSolverUtils.expected_abd_motion_direction(
+					archetype, is_left_side, muscle_frame)
+			if expected_abd != Vector3.ZERO:
+				var along_world: Vector3 = (child_world.origin - bone_world.origin)
+				if along_world.length_squared() > 1e-9:
+					var natural_abd_motion: Vector3 = target_basis.z.cross(along_world.normalized())
+					if natural_abd_motion.length_squared() > 1e-9:
+						entry.mirror_abd = natural_abd_motion.normalized().dot(expected_abd) < 0.0
 			if match_result.matched:
 				report.matched += 1
+				outcome_label = "MATCHED  score=%.2f perm=[%s,%s,%s]" % [
+						match_result.score,
+						SignedAxis.to_name(match_result.flex_axis),
+						SignedAxis.to_name(match_result.along_bone_axis),
+						SignedAxis.to_name(match_result.abduction_axis)]
 			else:
 				report.unmatched += 1
 				report.unmatched_bones.append(bone_name)
+				outcome_label = "FALLBACK score=%.2f (calculated frame baked into joint_rotation)" % match_result.score
 
 		MarionetteRomDefaults.apply(entry, bone_name)
 
 		entries[bone_name] = entry
 		report.generated += 1
 
+		if verbose:
+			print("  %-28s %-8s %s" % [bone_name, BoneArchetype.to_name(archetype), outcome_label])
+
 	bone_profile.bones = entries
+
+	if verbose:
+		print("[BoneProfileGenerator] generated=%d matched=%d fallback=%d preserved=%d skipped=%d (final size=%d)"
+				% [report.generated, report.matched, report.unmatched,
+					report.preserved, report.skipped, bone_profile.bones.size()])
+
 	return report
 
 

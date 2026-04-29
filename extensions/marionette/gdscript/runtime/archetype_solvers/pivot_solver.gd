@@ -15,7 +15,8 @@ static func solve(
 		bone_world_rest: Transform3D,
 		child_world_rest: Transform3D,
 		muscle_frame: MuscleFrame,
-		is_left_side: bool) -> Basis:
+		is_left_side: bool,
+		_parent_world_rest: Transform3D = Transform3D()) -> Basis:
 	var along: Vector3 = MarionetteSolverUtils.along_bone_direction(bone_world_rest, child_world_rest)
 	if along == Vector3.ZERO:
 		along = bone_world_rest.basis.y.normalized()

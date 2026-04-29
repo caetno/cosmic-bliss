@@ -11,6 +11,7 @@ static func solve(
 		bone_world_rest: Transform3D,
 		_child_world_rest: Transform3D,
 		_muscle_frame: MuscleFrame,
-		_is_left_side: bool) -> Basis:
+		_is_left_side: bool,
+		_parent_world_rest: Transform3D = Transform3D()) -> Basis:
 	# Just echo the bone's own rest basis so the gizmo aligns with the bone.
 	return bone_world_rest.basis.orthonormalized()

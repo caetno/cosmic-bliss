@@ -167,3 +167,24 @@ static func label_for(region: int) -> String:
 
 static func has_mapping_for(bone_name: StringName) -> bool:
 	return _BY_BONE.has(bone_name)
+
+
+# Returns every bone that has a region mapping. Order matches the source dict
+# (i.e., declaration order: Spine → Head/Neck → Left arm → ...). Used by
+# MarionetteMacroPresets to enumerate bones for the region-scoped anatomical
+# macros (All / Arms / Legs / Hands / Feet / Body).
+static func all_mapped_bones() -> Array[StringName]:
+	var out: Array[StringName] = []
+	for bone_name: StringName in _BY_BONE.keys():
+		out.append(bone_name)
+	return out
+
+
+# Returns just the bones in the given Region. Useful for region-scoped macro
+# influence tables.
+static func bones_in_region(region: int) -> Array[StringName]:
+	var out: Array[StringName] = []
+	for bone_name: StringName in _BY_BONE.keys():
+		if _BY_BONE[bone_name] == region:
+			out.append(bone_name)
+	return out

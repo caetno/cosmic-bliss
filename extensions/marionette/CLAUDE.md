@@ -51,14 +51,19 @@ Designers authoring content never see axis terminology. Developers debugging phy
 
 ### 3. Anatomical frame is baked into physics at ragdoll creation
 
-This is the core architectural decision. At ragdoll creation time:
+This is the core architectural decision. At authoring time:
 1. Geometric pipeline computes the target anatomical basis per bone (muscle frame derivation + archetype-specific solvers).
-2. Permutation matcher finds the signed permutation of the bone's rest basis that best aligns with the target.
-3. Result is baked into `MarionetteBone.joint_rotation` (the internal 6DOF joint's local frame).
+2. Permutation matcher finds the signed permutation of the bone's rest basis that best aligns with the target. Result is stored on the entry's `flex_axis` / `along_bone_axis` / `abduction_axis` fields **for diagnostics only** — the validator and authoring gizmos use it as a calibration-quality signal.
+3. The exact (un-quantized) target basis is also stored, in bone-local space, as `BoneEntry.calculated_anatomical_basis`. `use_calculated_frame` is set to `true` unconditionally for SPD bones.
+4. At ragdoll creation, `MarionetteBone.joint_rotation` is set from `BoneEntry.anatomical_basis_in_bone_local()`, which returns `calculated_anatomical_basis` when `use_calculated_frame` is true. Joint frame's columns are (flex, along-bone, abduction).
 
 **After creation, the joint's local +X is literally the flex axis.** Runtime SPD, limit authoring, gizmos, debug panels all operate in joint-local space, which equals anatomical space. No per-frame permutation layer on SPD output.
 
-The only runtime permutation is on the *input* side: reading bone-local animation poses from `Skeleton3D` and converting to anatomical angles requires applying the bone-to-anatomical mapping (stored in `BoneEntry`). This is a static, cheap transform (sign flips + axis swap).
+Earlier the matcher's choice was authoritative for runtime baking, with the calculated frame as a fallback when score < threshold. That produced subtle motion errors: the 0.85 threshold accepted up to ±31° of axis tilt, so an A-pose elbow whose bone-local +X happens to be ~20° off the true perpendicular-to-limb-plane would bake a tilted joint frame. Slider drives then rotated around the tilted axis — anatomically wrong. Defaulting to the calculated frame eliminates this whole class of error: runtime motion always rotates around the exact solver-computed axis. The matcher result remains valuable as the calibration-quality signal — bones whose match score is low indicate ill-rolled or non-T-pose rigs that the user might want to fix in Blender, but the ragdoll works correctly either way.
+
+Cost of always-calculated-frame: joint-local axes are not aligned to any single bone-local axis, so the authoring gizmo's tripod and the JointLimitGizmo's arcs render tilted at that bone. That's the joint frame, drawn truthfully.
+
+The only runtime permutation is on the *input* side: reading bone-local animation poses from `Skeleton3D` and converting to anatomical angles. Done via basis-column rotations around `entry.anatomical_basis_in_bone_local()`'s columns, uniform across all bones.
 
 ### 4. Archetype-dispatched geometric authoring
 
@@ -341,11 +346,11 @@ Each indicates an architectural assumption is wrong and needs discussion.
 | Concern | Where computed |
 |---|---|
 | Muscle frame | Authoring time (during "Generate from Skeleton") |
-| Per-bone anatomical basis permutation | Authoring time, baked into `BoneProfile` |
-| `MarionetteBone.joint_rotation` | Ragdoll creation time, from `BoneProfile` |
+| Per-bone anatomical basis (permutation or calculated-frame fallback) | Authoring time, baked into `BoneProfile` |
+| `MarionetteBone.joint_rotation` | Ragdoll creation time, from `BoneEntry.anatomical_basis_in_bone_local()` |
 | Joint ROM limits | Ragdoll creation time, from `BoneProfile` |
 | Anatomical → joint-local target rotation | Runtime, but joint-local = anatomical post-creation, so it's identity |
-| Bone-local (animation) → anatomical angles | Runtime, cheap sign-flip/swap via cached permutation |
+| Bone-local (animation) → anatomical angles | Runtime, basis-column rotation via cached anatomical basis |
 | SPD torque | Runtime, `_integrate_forces` |
 | Emotion state blend math | Runtime, in anatomical space |
 | Overlay envelope evaluation | Runtime, per-tick |

@@ -59,6 +59,20 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 @export_tool_button("Build Ragdoll") var _build_btn: Callable = build_ragdoll
 @export_tool_button("Clear Ragdoll") var _clear_btn: Callable = clear_ragdoll
+
+# Hides PhysicalBone3D children in the editor — both their (already-hidden)
+# capsule colliders and Godot's built-in 6DOF joint gizmo, which clutters the
+# scene at ~80 bones. Default off because the user almost never needs to see
+# the physical bones during authoring; the Marionette gizmos (authoring +
+# joint-limit) live on the Marionette node itself, which stays visible.
+# Setter walks any already-built bones and updates their `visible` live so
+# the toggle works without rebuild.
+@export var show_physics_bones_in_editor: bool = false:
+	set(value):
+		if show_physics_bones_in_editor == value:
+			return
+		show_physics_bones_in_editor = value
+		_apply_physics_bone_visibility()
 # The BoneProfile inspector's "Generate from Skeleton" button uses the
 # *template* reference poses — fine for shipping defaults, but per-rig roll
 # differences (ARP for instance) leave joint frames mis-aligned on the live
@@ -67,11 +81,44 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 # matcher-resolved permutation. Mutates `bone_profile` in place — Ctrl+S
 # to persist.
 @export_tool_button("Calibrate Profile from Skeleton") var _calibrate_btn: Callable = calibrate_bone_profile_from_skeleton
+# Static-analysis diagnostic: per-bone comparison of the BoneEntry-baked
+# anatomical frame against the solver's recomputed target frame, both in
+# world space. Prints OK/FLIPPED/SWAPPED/BAD per bone so I can pinpoint
+# which archetype's solver or matcher is misaligned without test-driving
+# every joint by hand.
+@export_tool_button("Validate Joint Frames") var _validate_btn: Callable = validate_joint_frames
 
 # Bone names handed to physical_bones_start_simulation(). Populated by
 # build_ragdoll() from BoneStateProfile (excludes Kinematic bones + FIXED
 # archetypes). Cleared by clear_ragdoll().
 var _dynamic_bone_names: Array[StringName] = []
+
+# Pending flag for the deferred gizmo refresh — see request_gizmo_refresh().
+var _gizmo_refresh_pending: bool = false
+
+
+# Schedules a single gizmo refresh for end-of-frame, regardless of how many
+# callers requested one. The refresh is a no-op visibility flicker on this
+# Marionette node — the only path that reliably drives the editor viewport
+# repaint in @tool (Node3D.update_gizmos goes through MessageQueue::push_callable,
+# which the editor doesn't flush in time during continuous input — same root
+# cause as godotengine/godot#71979). Living on the Marionette (not on
+# transient slider widgets) means the deferred call survives widgets being
+# freed mid-frame, e.g. when the user deselects the Marionette and the
+# muscle-test dock tears down its bone widgets.
+func request_gizmo_refresh() -> void:
+	if _gizmo_refresh_pending:
+		return
+	_gizmo_refresh_pending = true
+	call_deferred(&"_do_gizmo_refresh")
+
+
+func _do_gizmo_refresh() -> void:
+	_gizmo_refresh_pending = false
+	if not visible:
+		return
+	visible = false
+	visible = true
 
 
 func resolve_skeleton() -> Skeleton3D:
@@ -262,17 +309,95 @@ func calibrate_bone_profile_from_skeleton() -> void:
 	if bone_map == null:
 		push_warning("Marionette.calibrate: bone_map not set — can't translate rig names")
 		return
-	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(bone_profile, skel, bone_map)
+	var path: String = bone_profile.resource_path if bone_profile.resource_path != "" else "<unsaved>"
+	print("[Marionette] calibrating %s against live skeleton — per-bone log:" % path)
+	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(
+			bone_profile, skel, bone_map, true)
 	if report.error != "":
 		push_warning("Marionette.calibrate: %s" % report.error)
 		return
 	bone_profile.emit_changed()
-	var path: String = bone_profile.resource_path if bone_profile.resource_path != "" else "<unsaved>"
-	print("[Marionette] calibrated %s against live skeleton: generated=%d matched=%d unmatched=%d skipped=%d"
-			% [path, report.generated, report.matched, report.unmatched, report.skipped])
+	# Auto-persist the calibrated profile to disk. Without this, a project
+	# reload reverts the bones dict to whatever was last manually Ctrl+S'd —
+	# the preserved 6 template-only bones get dropped on reload because the
+	# saved file still has the pre-calibrate state. Skip when the resource
+	# is built-in (no path) — that's a profile embedded in a scene, which
+	# saves with the scene.
+	if bone_profile.resource_path != "":
+		# Default flags only. FLAG_BUNDLE_RESOURCES bundles the *script* sources
+		# (BoneEntry, BoneProfile) directly into the .tres as GDScript
+		# sub-resources, which then conflict with the registered global
+		# class_names — Godot rejects the loaded .tres as plain Resource and
+		# `var bp: BoneProfile = ...` typed assignments fail.
+		var save_err: int = ResourceSaver.save(
+				bone_profile, bone_profile.resource_path)
+		if save_err != OK:
+			push_warning("Marionette.calibrate: ResourceSaver returned %d for %s" % [save_err, path])
+		else:
+			# Verify by reloading from disk — the previous "wrote OK" message
+			# was misleading because it returned OK while persisting only 78
+			# of 84 entries. Print the on-disk count so regressions surface.
+			var reloaded: Resource = ResourceLoader.load(
+					bone_profile.resource_path, "BoneProfile",
+					ResourceLoader.CACHE_MODE_REPLACE)
+			var on_disk_count: int = -1
+			if reloaded is BoneProfile:
+				on_disk_count = (reloaded as BoneProfile).bones.size()
+			print("[Marionette]   wrote %s (in-memory=%d, on-disk=%d)" %
+					[path, bone_profile.bones.size(), on_disk_count])
+	if report.preserved > 0:
+		print("[Marionette]   preserved (in profile but not in rig): %s" % [report.preserved_bones])
 	if report.unmatched > 0:
-		print("[Marionette]   unmatched (rig roll outside ±31° tolerance — re-roll in Blender or accept skewed frame): %s" % [report.unmatched_bones])
+		print("[Marionette]   fallback bones (rig roll outside ±31° tolerance — calculated frame baked instead): %s" % [report.unmatched_bones])
 	update_gizmos()
+
+
+func validate_joint_frames() -> void:
+	if bone_profile == null:
+		push_warning("Marionette.validate_joint_frames: bone_profile not set")
+		return
+	if bone_profile.skeleton_profile == null:
+		push_warning("Marionette.validate_joint_frames: bone_profile.skeleton_profile not set")
+		return
+	# Live-skeleton path when available; falls through to template otherwise.
+	# Live is what the user actually sees — the diagnostic should match.
+	var skel: Skeleton3D = resolve_skeleton()
+	var bm: BoneMap = bone_map
+	var path: String = bone_profile.resource_path if bone_profile.resource_path != "" else "<unsaved>"
+	var source_label: String = "live skeleton" if (skel != null and bm != null) else "template reference poses"
+	print("[Marionette] validating %s against %s — per-bone log:" % [path, source_label])
+	var report: MarionetteFrameValidator.ValidationReport = MarionetteFrameValidator.validate(bone_profile, skel, bm)
+	if report.error != "":
+		push_warning("Marionette.validate_joint_frames: %s" % report.error)
+		return
+	for d: MarionetteFrameValidator.BoneDiagnosis in report.diagnoses:
+		print(d.format_line())
+	print("[Marionette] frames: ok=%d weak=%d flipped=%d swapped=%d bad=%d skipped=%d (total %d)"
+			% [report.ok_count, report.weak_count, report.flipped_count,
+				report.swapped_count, report.bad_count, report.skipped_count,
+				report.diagnoses.size()])
+	if report.flipped_count > 0:
+		print("[Marionette]   FLIPPED bones: %s" % [report.by_status("FLIPPED")])
+	if report.swapped_count > 0:
+		print("[Marionette]   SWAPPED bones: %s" % [report.by_status("SWAPPED")])
+	if report.bad_count > 0:
+		print("[Marionette]   BAD bones: %s" % [report.by_status("BAD")])
+
+	# Dynamic motion test — independent check against the solver. This is
+	# what catches cases where the static frame matches the solver target but
+	# the solver target itself is wrong (e.g., wrong axis chosen, sign flipped
+	# in the solver). Output is per-bone flex motion direction vs. archetype-
+	# expected anatomical direction.
+	print("[Marionette] motion direction check (flex axis × bone-to-child):")
+	var motion_report: MarionetteFrameValidator.MotionReport = MarionetteFrameValidator.validate_motion(bone_profile, skel, bm)
+	for md: MarionetteFrameValidator.MotionDiagnosis in motion_report.diagnoses:
+		print(md.format_line())
+	print("[Marionette] motion: ok=%d weak=%d wrong=%d skipped=%d (total %d)" % [
+			motion_report.ok_count, motion_report.weak_count,
+			motion_report.wrong_count, motion_report.skipped_count,
+			motion_report.diagnoses.size()])
+	if motion_report.wrong_count > 0:
+		print("[Marionette]   WRONG-motion bones (solver bug suspect): %s" % [motion_report.by_status("WRONG")])
 
 
 func _find_simulator() -> PhysicalBoneSimulator3D:
@@ -302,9 +427,12 @@ func _build_bone(
 	bone.bone_entry = entry
 	bone.joint_type = PhysicalBone3D.JOINT_TYPE_6DOF
 
-	# Bake the anatomical permutation into joint_rotation. Post-bake, the
-	# joint's local +X is literally the flex axis (CLAUDE.md §3).
-	bone.joint_rotation = entry.bone_to_anatomical_basis().get_euler()
+	# Bake the anatomical frame into joint_rotation. Post-bake, the joint's
+	# local +X is literally the flex axis (CLAUDE.md §3). Default path is the
+	# signed-axis permutation; bones that fell back to a calculated frame at
+	# generate-time (use_calculated_frame=true) bake the non-axis-aligned
+	# basis instead, so non-T-pose rigs work without re-export.
+	bone.joint_rotation = entry.anatomical_basis_in_bone_local().get_euler()
 
 	# Capsule sized to bone length, oriented along bone-local +Y (the ARP /
 	# Blender convention; Godot's CapsuleShape3D defaults to local Y).
@@ -326,7 +454,24 @@ func _build_bone(
 	# Mass: per-bone fraction if authored; else the uniform fallback.
 	bone.mass = bone_profile.total_mass * entry.mass_fraction if entry.mass_fraction > 0.0 else fallback_mass
 
+	# Default to invisible in the editor so the 6DOF joint gizmo and capsule
+	# don't clutter the viewport (~80 bones at once is unreadable). The user
+	# can flip Marionette.show_physics_bones_in_editor to inspect.
+	bone.visible = show_physics_bones_in_editor
+
 	return bone
+
+
+# Walks the active simulator's MarionetteBone children and pushes the current
+# `show_physics_bones_in_editor` value into their `visible` flag. Called from
+# the export's setter so the toggle works without a rebuild.
+func _apply_physics_bone_visibility() -> void:
+	var sim: PhysicalBoneSimulator3D = _find_simulator()
+	if sim == null:
+		return
+	for child in sim.get_children():
+		if child is MarionetteBone:
+			(child as MarionetteBone).visible = show_physics_bones_in_editor
 
 
 # Sets dynamic 6DOF joint properties. Splitting this out keeps _build_bone
@@ -342,9 +487,19 @@ static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> 
 	var anatomical_max: Vector3 = entry.rom_max
 	for i: int in range(3):
 		var axis: String = ["x", "y", "z"][i]
+		var lower: float = anatomical_min[i]
+		var upper: float = anatomical_max[i]
+		# Mirror the abduction limits when the basis chirality flipped that
+		# axis (see BoneEntry.mirror_abd). Negate AND swap so the joint
+		# permits the anatomically-positive direction even though the joint-
+		# local +Z rotation produces motion in the anti-anatomical direction.
+		if i == 2 and entry.mirror_abd:
+			var temp: float = lower
+			lower = -upper
+			upper = -temp
 		bone.set("joint_constraints/%s/angular_limit_enabled" % axis, true)
-		bone.set("joint_constraints/%s/angular_limit_lower" % axis, anatomical_min[i])
-		bone.set("joint_constraints/%s/angular_limit_upper" % axis, anatomical_max[i])
+		bone.set("joint_constraints/%s/angular_limit_lower" % axis, lower)
+		bone.set("joint_constraints/%s/angular_limit_upper" % axis, upper)
 		# Lock linear motion across the joint — bones articulate, they don't slide.
 		bone.set("joint_constraints/%s/linear_limit_enabled" % axis, true)
 		bone.set("joint_constraints/%s/linear_limit_lower" % axis, 0.0)

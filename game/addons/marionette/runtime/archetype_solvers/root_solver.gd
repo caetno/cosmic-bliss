@@ -11,5 +11,6 @@ static func solve(
 		_bone_world_rest: Transform3D,
 		_child_world_rest: Transform3D,
 		muscle_frame: MuscleFrame,
-		_is_left_side: bool) -> Basis:
+		_is_left_side: bool,
+		_parent_world_rest: Transform3D = Transform3D()) -> Basis:
 	return MarionetteSolverUtils.make_anatomical_basis(-muscle_frame.right, muscle_frame.up)

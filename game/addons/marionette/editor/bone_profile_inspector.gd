@@ -35,15 +35,14 @@ func _on_pressed(bp: BoneProfile) -> void:
 	if bp.skeleton_profile == null:
 		push_warning("Marionette: assign a SkeletonProfile to bone_profile.skeleton_profile before generating")
 		return
-	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(bp)
+	var path: String = bp.resource_path if bp.resource_path != "" else "<unsaved>"
+	print("[Marionette] generating %s (template path) — per-bone log:" % path)
+	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(bp, null, null, true)
 	if report.error != "":
 		push_warning("Marionette: generate failed — %s" % report.error)
 		return
 	bp.emit_changed()
-	var path: String = bp.resource_path if bp.resource_path != "" else "<unsaved>"
-	print("[Marionette] %s: %d entries (matched=%d unmatched=%d skipped=%d)"
-			% [path, report.generated, report.matched, report.unmatched, report.skipped])
 	if report.unmatched > 0:
-		print("[Marionette]   unmatched bones: %s" % [report.unmatched_bones])
+		print("[Marionette]   fallback bones (calculated frame baked): %s" % [report.unmatched_bones])
 	if report.skipped > 0:
 		print("[Marionette]   skipped (no archetype / not in rest data): %s" % [report.skipped_bones])

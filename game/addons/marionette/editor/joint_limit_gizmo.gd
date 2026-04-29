@@ -2,6 +2,20 @@
 class_name MarionetteJointLimitGizmo
 extends EditorNode3DGizmoPlugin
 
+# Singleton handle for synchronous redraw from editor scripts — see
+# MarionetteAuthoringGizmo for the rationale.
+static var _instance: MarionetteJointLimitGizmo
+
+
+static func redraw_for_node(node: Node3D) -> void:
+	if _instance == null or node == null:
+		return
+	for gizmo: EditorNode3DGizmo in _instance.get_current_gizmos():
+		if not is_instance_valid(gizmo):
+			continue
+		if gizmo.get_node_3d() == node:
+			_instance._redraw(gizmo)
+
 # P3.9 — per-bone ROM arcs at each bone's joint origin. Arcs live in
 # joint-local space; after build_ragdoll bakes joint_rotation that frame
 # equals anatomical (CLAUDE.md §3), so the same arcs match what the user
@@ -38,6 +52,7 @@ const _COL_ABD: Color = Color(0.4, 0.55, 1.0)
 
 
 func _init() -> void:
+	_instance = self
 	create_material(_MAT_FLEX, _COL_FLEX, false, true)
 	create_material(_MAT_ROT, _COL_ROT, false, true)
 	create_material(_MAT_ABD, _COL_ABD, false, true)
@@ -108,8 +123,10 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 
 		var origin: Vector3 = source_to_local * bone_world.origin
 		# Joint frame in source space = bone rest basis composed with the
-		# anatomical permutation. Then bring into Marionette-local for draw.
-		var joint_in_source: Basis = bone_world.basis * entry.bone_to_anatomical_basis()
+		# bone-local anatomical frame (signed permutation OR calculated-frame
+		# fallback, decided by entry.use_calculated_frame). Then bring into
+		# Marionette-local for draw.
+		var joint_in_source: Basis = bone_world.basis * entry.anatomical_basis_in_bone_local()
 		var draw_basis: Basis = source_to_local.basis * joint_in_source
 
 		# Flex: rotate +Y (along-bone) around +X (flex axis).
