@@ -14,7 +14,11 @@ extends Resource
 ## proposal (`docs/proposals/TentacleMesh_proposal.md`) and architecture doc
 ## §5.0 are the canonical references.
 
-@export var enabled: bool = true
+@export var enabled: bool = true :
+	set(v):
+		if enabled == v: return
+		enabled = v
+		emit_changed()
 
 
 # Default no-op. Subclasses override.

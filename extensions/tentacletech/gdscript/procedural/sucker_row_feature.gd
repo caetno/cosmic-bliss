@@ -22,17 +22,61 @@ enum SuckerSide {
 	SPIRAL = 3,     # phyllotactic spiral
 }
 
-@export var count: int = 8
-@export var position_curve: Curve = null   # axial_t for sucker i (defaults to uniform)
-@export var size_curve: Curve = null       # cup_radius scale per axial_t (defaults to constant)
-@export var side: SuckerSide = SuckerSide.ONE_SIDE
-@export_range(0.0, 0.5, 0.001) var rim_height: float = 0.005
-@export_range(0.0, 0.5, 0.001) var cup_depth: float = 0.008
-@export_range(0.0, 0.2, 0.001) var double_row_offset: float = 0.0  # reserved for future row-pair offset
-@export_range(0.001, 0.2, 0.001) var base_size: float = 0.018      # default cup_radius (m)
-@export_range(0.001, 0.5, 0.001) var rim_outer_factor: float = 1.35 # rim ring radius / cup_radius
-@export var disc_segments: int = 10
-@export_range(0.0, 6.283185, 0.001) var spiral_step: float = 1.94   # rad; ~111°, phyllotactic default
+@export var count: int = 8 :
+	set(v):
+		if count == v: return
+		count = v
+		emit_changed()
+@export var position_curve: Curve = null :
+	set(v):
+		if position_curve == v: return
+		position_curve = v
+		emit_changed()
+@export var size_curve: Curve = null :
+	set(v):
+		if size_curve == v: return
+		size_curve = v
+		emit_changed()
+@export var side: SuckerSide = SuckerSide.ONE_SIDE :
+	set(v):
+		if side == v: return
+		side = v
+		emit_changed()
+@export_range(0.0, 0.5, 0.001) var rim_height: float = 0.005 :
+	set(v):
+		if rim_height == v: return
+		rim_height = v
+		emit_changed()
+@export_range(0.0, 0.5, 0.001) var cup_depth: float = 0.008 :
+	set(v):
+		if cup_depth == v: return
+		cup_depth = v
+		emit_changed()
+@export_range(0.0, 0.2, 0.001) var double_row_offset: float = 0.0 :
+	set(v):
+		if double_row_offset == v: return
+		double_row_offset = v
+		emit_changed()
+@export_range(0.001, 0.2, 0.001) var base_size: float = 0.018 :
+	set(v):
+		if base_size == v: return
+		base_size = v
+		emit_changed()
+@export_range(0.001, 0.5, 0.001) var rim_outer_factor: float = 1.35 :
+	set(v):
+		if rim_outer_factor == v: return
+		rim_outer_factor = v
+		emit_changed()
+@export var disc_segments: int = 10 :
+	set(v):
+		if disc_segments == v: return
+		disc_segments = v
+		emit_changed()
+@export_range(0.0, 6.283185, 0.001) var spiral_step: float = 1.94 :
+	set(v):
+		if spiral_step == v: return
+		spiral_step = v
+		emit_changed()
 
 const SEAM_TOLERANCE_RAD := deg_to_rad(5.0)
 

@@ -46,8 +46,10 @@ func test_default_bake_vertex_count() -> bool:
 
 	var arrays: Array = mesh.surface_get_arrays(0)
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	# Expected: (length_segments + 1) rings × radial_segments + 1 apex.
-	var expected: int = (tm.length_segments + 1) * tm.radial_segments + 1
+	# Expected: (length_segments + 1) body rings × radial_segments
+	#         + tip_cap_rings hemisphere rings × radial_segments
+	#         + 1 apex.
+	var expected: int = (tm.length_segments + 1 + tm.tip_cap_rings) * tm.radial_segments + 1
 	if verts.size() != expected:
 		push_error("vertex count %d != expected %d" % [verts.size(), expected])
 		return false

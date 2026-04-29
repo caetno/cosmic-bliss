@@ -63,6 +63,30 @@ enum CrossSection {
 		if length_segments == v: return
 		length_segments = v
 		_invalidate_and_request()
+# Rounded cap closing the tip: this many intermediate rings sit on an
+# ellipsoidal quarter-arc from (z=length, radius=tip_radius) to the apex at
+# (z=length + tip_radius * tip_pointiness, radius=0). 0 reverts to the
+# original single-vertex triangle-fan apex (sharp point — looks pointy, not
+# tentacle-like). The eventual `TipFeature` library (§10.2) supersedes this
+# with a discriminated Pointed/Rounded/Bulb/Mouth/Canal/Flare resource;
+# until that lands, the implicit default tip is a small rounded dome.
+@export_range(0, 16, 1) var tip_cap_rings: int = 3 :
+	set(v):
+		if tip_cap_rings == v: return
+		tip_cap_rings = v
+		_invalidate_and_request()
+# Cap height as a multiplier on `tip_radius`. The cap profile is an
+# ellipsoidal quarter-arc with semi-axes (tip_radius, tip_radius *
+# tip_pointiness). 1.0 = hemisphere (cap height = tip_radius — looks flat
+# when tip_radius is small relative to body); > 1 = elongated, pointier;
+# < 1 = squashed dome. Decoupled from `tip_radius` so a thin-tipped body
+# (small tip_radius) can still terminate in a visibly tapered cap. Has no
+# effect when `tip_cap_rings = 0`.
+@export_range(0.0, 16.0, 0.05, "or_greater") var tip_pointiness: float = 2.0 :
+	set(v):
+		if tip_pointiness == v: return
+		tip_pointiness = v
+		_invalidate_and_request()
 @export var cross_section: CrossSection = CrossSection.CIRCULAR :
 	set(v):
 		if cross_section == v: return
@@ -116,13 +140,98 @@ var _cached_warnings: PackedStringArray = PackedStringArray()
 # (called from inside features) may read. Cheap belt-and-braces.
 var _baking: bool = false
 
+# Resources whose `changed` signal we forward into `_invalidate_and_request`.
+# Walked from `radius_curve`, `twist_curve`, every entry in `features`, and
+# recursively into each feature's Resource sub-properties (mainly nested
+# Curves like `KnotFieldFeature.spacing_curve`). Without this chain, only
+# reassigning a Curve reference triggered a rebake; editing the points
+# inside the curve, or any per-feature property, silently no-op'd until
+# the resource was reloaded.
+var _subscribed_dependencies: Array[Resource] = []
 
-# Setter helper: invalidate cache and ask the engine to redraw. PrimitiveMesh
-# emits `changed` after its deferred update completes, which Tentacle's
-# `_on_tentacle_mesh_changed` listens to for the rest-girth re-pull.
+# Leading-edge debounce for `request_update()`. The first invalidation in
+# a quiet period bakes immediately (single property edits stay snappy);
+# subsequent invalidations during the cooldown are coalesced into one
+# trailing bake when the cooldown expires. A 60 Hz slider scrub becomes
+# ~2 bakes (first frame + post-scrub) instead of 60. `bake()` (the
+# explicit ship path used by tests and savers) bypasses all of this —
+# it calls `_ensure_baked()` directly, so deterministic / headless flows
+# stay synchronous.
+const _COOLDOWN_MSEC: int = 80
+var _cooldown_active: bool = false
+var _cooldown_pending: bool = false
+var _cooldown_start_msec: int = 0
+
+
 func _invalidate_and_request() -> void:
 	_baked = false
+	# Re-walk on every invalidation: the feature graph may have been
+	# restructured (curve swapped in, feature appended) and the cheapest
+	# robust path is to disconnect everything and rebuild the listener set.
+	_refresh_subscriptions()
+	if _cooldown_active:
+		_cooldown_pending = true
+		return
+	_cooldown_active = true
+	_cooldown_pending = false
+	_cooldown_start_msec = Time.get_ticks_msec()
 	request_update()
+	_check_cooldown.call_deferred()
+
+
+func _check_cooldown() -> void:
+	var elapsed: int = Time.get_ticks_msec() - _cooldown_start_msec
+	if elapsed < _COOLDOWN_MSEC:
+		_check_cooldown.call_deferred()
+		return
+	_cooldown_active = false
+	if _cooldown_pending:
+		_cooldown_pending = false
+		_invalidate_and_request()
+
+
+func _refresh_subscriptions() -> void:
+	for r in _subscribed_dependencies:
+		if is_instance_valid(r) and r.changed.is_connected(_on_dependency_changed):
+			r.changed.disconnect(_on_dependency_changed)
+	_subscribed_dependencies.clear()
+	_subscribe_dependency(radius_curve)
+	_subscribe_dependency(twist_curve)
+	for f in features:
+		if f == null:
+			continue
+		_subscribe_dependency(f)
+		_subscribe_feature_subresources(f)
+
+
+func _subscribe_dependency(p_res: Resource) -> void:
+	if p_res == null or _subscribed_dependencies.has(p_res):
+		return
+	_subscribed_dependencies.append(p_res)
+	if not p_res.changed.is_connected(_on_dependency_changed):
+		p_res.changed.connect(_on_dependency_changed)
+
+
+# Walk a feature's storage properties and subscribe to any nested Resources
+# (Curves on KnotField/Ribs/Spines/etc.). Inspector point-drags on a nested
+# curve emit `changed` on the curve, not on the parent feature, so we have
+# to listen on the leaves directly.
+func _subscribe_feature_subresources(p_feature: Resource) -> void:
+	var props: Array = p_feature.get_property_list()
+	for p in props:
+		if (p.usage & PROPERTY_USAGE_STORAGE) == 0:
+			continue
+		match p.name:
+			"resource_local_to_scene", "resource_path", "resource_name", \
+			"resource_scene_unique_id", "script", "metadata/_custom_type_script":
+				continue
+		var v: Variant = p_feature.get(p.name)
+		if v is Resource:
+			_subscribe_dependency(v)
+
+
+func _on_dependency_changed() -> void:
+	_invalidate_and_request()
 
 
 # Idempotent: rebakes if dirty, no-op otherwise. All public accessors funnel
@@ -148,6 +257,13 @@ func _ensure_baked() -> void:
 	})
 	_build_base_shape(ctx)
 	_run_features(ctx)
+	# Vertex-kernel features (KnotField, Ribs, WartCluster, Fin) displace
+	# body vertices but cannot maintain correct normals analytically — the
+	# perturbed surface gradient depends on neighbours. Recompute them once
+	# at the end via face-normal accumulation. Topology-adding features
+	# (sucker rim, spine cone, ribbon strip) author their own normals and
+	# are skipped via the FEATURE_ID_BODY filter.
+	ctx.recompute_body_normals()
 
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -178,7 +294,11 @@ func _ensure_baked() -> void:
 	# drops the whole tentacle whenever the *rest pose* is off-screen even
 	# if the bent silhouette is fully on-screen. Padded by peak_radius for
 	# the §3.1 layered girth deformation envelope.
-	var pad: float = maxf(_cached_peak_radius, maxf(base_radius, tip_radius))
+	var cap_overrun: float = (tip_radius * tip_pointiness
+			if tip_cap_rings > 0
+			else length * 0.5 / float(length_segments))
+	var pad: float = maxf(_cached_peak_radius,
+			maxf(base_radius, maxf(tip_radius, cap_overrun)))
 	var reach: float = length + pad
 	custom_aabb = AABB(Vector3(-reach, -reach, -reach), Vector3(2.0 * reach, 2.0 * reach, 2.0 * reach))
 
@@ -299,12 +419,57 @@ func _build_base_shape(p_ctx: BakeContext) -> void:
 		var b: PackedInt32Array = ring_indices[i + 1]
 		p_ctx.connect_rings(a, b)
 
-	# Pointed tip: apex sits one half-segment past the last ring along the
-	# arc axis. Apex normal points along the arc axis (outward at the tip).
-	var last_ring: PackedInt32Array = ring_indices[ring_count - 1]
-	var apex_z: float = float(intrinsic_axis_sign) * length * (1.0 + 0.5 / float(length_segments))
+	# Rounded cap: insert `tip_cap_rings` intermediate rings on an
+	# ellipsoidal quarter-arc with radial semi-axis `tip_radius` and axial
+	# semi-axis `tip_radius * tip_pointiness`, closing at an apex at
+	# z = length + tip_radius * tip_pointiness. With tip_cap_rings = 0 the
+	# apex sits one half-segment past the last ring (legacy single-fan
+	# behavior). Per-ring axial_t extends past 1.0 in proportion to z-overrun
+	# so spline mapping (§5.3) and tip_blend stay continuous.
+	var sign_f: float = float(intrinsic_axis_sign)
+	var cap_axial: float = tip_radius * tip_pointiness
+	var last_body_ring: PackedInt32Array = ring_indices[ring_count - 1]
+	var prev_ring: PackedInt32Array = last_body_ring
+	for cap_i in range(1, tip_cap_rings + 1):
+		var theta: float = (float(cap_i) / float(tip_cap_rings + 1)) * (PI * 0.5)
+		var ring_radius: float = tip_radius * cos(theta)
+		var z_offset: float = cap_axial * sin(theta)
+		var z: float = sign_f * (length + z_offset)
+		var axial_t: float = 1.0 + (z_offset / length if length > 0.0 else 0.0)
+		var twist: float = (twist_curve.sample(axial_t) * twist_total
+				if twist_curve != null
+				else twist_total * axial_t)
+		# Ellipsoid surface normal: gradient of (r/a)² + (z/b)² = 1, i.e.
+		# (cos θ / a, sin θ / b) before normalization. With a = tip_radius
+		# and b = cap_axial; reduces to (cos θ, sin θ) for a hemisphere.
+		var n_radial: float = cos(theta) / maxf(tip_radius, 1e-6)
+		var n_axial: float = sin(theta) / maxf(cap_axial, 1e-6)
+		var n_len: float = sqrt(n_radial * n_radial + n_axial * n_axial)
+		n_radial /= n_len
+		n_axial /= n_len
+		var cap_ring := PackedInt32Array()
+		cap_ring.resize(radial_segments)
+		for i in radial_segments:
+			var u: float = float(i) / float(radial_segments)
+			var phi: float = TAU * u + seam_offset + twist
+			var radial := Vector3(cos(phi), sin(phi), 0.0)
+			var pos := Vector3(radial.x * ring_radius, radial.y * ring_radius, z)
+			var normal := Vector3(radial.x * n_radial, radial.y * n_radial, sign_f * n_axial)
+			var uv0 := Vector2(u, axial_t)
+			var idx: int = p_ctx.add_vertex(pos, normal, uv0, Vector2.ZERO,
+					Color(0, 0, 0, 1.0),
+					Color(BakeContext.FEATURE_ID_BODY, 0, 0, 0))
+			cap_ring[i] = idx
+		p_ctx.connect_rings(prev_ring, cap_ring)
+		prev_ring = cap_ring
+
+	var apex_z: float
+	if tip_cap_rings > 0:
+		apex_z = sign_f * (length + cap_axial)
+	else:
+		apex_z = sign_f * length * (1.0 + 0.5 / float(length_segments))
 	var apex_pos := Vector3(0, 0, apex_z)
-	var apex_normal := Vector3(0, 0, float(intrinsic_axis_sign))
+	var apex_normal := Vector3(0, 0, sign_f)
 	var apex_idx: int = p_ctx.add_vertex(
 			apex_pos,
 			apex_normal,
@@ -312,7 +477,7 @@ func _build_base_shape(p_ctx: BakeContext) -> void:
 			Vector2.ZERO,
 			Color(0, 0, 0, 1.0),
 			Color(BakeContext.FEATURE_ID_BODY, 0, 0, 0))
-	p_ctx.fan_ring_to_point(last_ring, apex_idx)
+	p_ctx.fan_ring_to_point(prev_ring, apex_idx)
 
 
 func _add_circular_ring(p_ctx: BakeContext, p_center: Vector3, p_radius: float,

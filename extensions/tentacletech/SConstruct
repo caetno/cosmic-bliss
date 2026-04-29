@@ -4,7 +4,7 @@ import os
 env = SConscript("../../godot-cpp/SConstruct")
 
 env.Append(CPPPATH=["src/", "../shared/include/"])
-sources = [Glob("src/*.cpp"), Glob("src/spline/*.cpp"), Glob("src/solver/*.cpp")]
+sources = [Glob("src/*.cpp"), Glob("src/spline/*.cpp"), Glob("src/solver/*.cpp"), Glob("src/procedural/*.cpp")]
 
 addon_bin = "../../game/addons/tentacletech/bin"
 if not os.path.isdir(addon_bin):

@@ -4,6 +4,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "procedural/procedural_kernels.h"
 #include "solver/pbd_solver.h"
 #include "solver/tentacle.h"
 #include "spline/catmull_spline.h"
@@ -20,6 +21,7 @@ void initialize_tentacletech_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(SplineDataPacker);
 	GDREGISTER_CLASS(PBDSolver);
 	GDREGISTER_CLASS(Tentacle);
+	GDREGISTER_CLASS(ProceduralKernels);
 }
 
 void uninitialize_tentacletech_module(ModuleInitializationLevel p_level) {

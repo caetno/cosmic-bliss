@@ -181,6 +181,12 @@ void Tentacle::rebuild_chain() {
 	if (solver.is_null()) {
 		solver.instantiate();
 	}
+	// `initialize_chain` resets `rigid_base_count` to 1 and discards the
+	// captured offsets. Snapshot the authored value before the reset so we
+	// can re-pin the right block after the chain is laid out in the new
+	// anchor frame; otherwise scene-load clobbers the .tscn property and
+	// only runtime edits stick.
+	int desired_rigid = solver->get_rigid_base_count();
 	solver->initialize_chain(particle_count, segment_length);
 	// Lay the freshly-built chain along the node's current world frame so it
 	// emerges from the node's -Z, not at world-origin.
@@ -190,6 +196,9 @@ void Tentacle::rebuild_chain() {
 		solver->set_particle_position(i, xform.xform(local));
 	}
 	solver->set_anchor(0, xform);
+	if (desired_rigid > 1) {
+		solver->set_rigid_base_count(desired_rigid);
+	}
 	anchor_override = false;
 
 	// Particle count may have changed; resize the per-tick buffers and the
@@ -408,15 +417,29 @@ void Tentacle::_apply_mesh_length_to_segment_length() {
 	if (particle_count < 2) {
 		return;
 	}
-	// Stock Mesh primitives don't have a `length` property — get() returns
-	// NIL, so we leave segment_length untouched. TentacleMesh exposes
-	// `length` as an @export float.
-	Variant raw_len = tentacle_mesh->get("length");
-	Variant::Type t = raw_len.get_type();
-	if (t != Variant::FLOAT && t != Variant::INT) {
-		return;
+	// Prefer `get_baked_rest_length()` when the mesh exposes it: the bake's
+	// rest length spans the *full* axial extent (body + tip cap + base
+	// flange, etc.), which is what the shader's spline-arc parameterization
+	// expects. Using only the body `length` here makes the chain shorter
+	// than the mesh, so any vertex past z=length (the cap) clamps to the
+	// spline tip and the dome collapses into a flat disc. Stock primitives
+	// without the bake hook fall back to the `length` property; if neither
+	// is present, leave segment_length untouched.
+	float mesh_len = -1.0f;
+	if (tentacle_mesh->has_method("get_baked_rest_length")) {
+		Variant raw = tentacle_mesh->call("get_baked_rest_length");
+		if (raw.get_type() == Variant::FLOAT || raw.get_type() == Variant::INT) {
+			mesh_len = (float)raw;
+		}
 	}
-	float mesh_len = (float)raw_len;
+	if (mesh_len <= 0.0f) {
+		Variant raw_len = tentacle_mesh->get("length");
+		Variant::Type t = raw_len.get_type();
+		if (t != Variant::FLOAT && t != Variant::INT) {
+			return;
+		}
+		mesh_len = (float)raw_len;
+	}
 	if (mesh_len <= 0.0f) {
 		return;
 	}

@@ -34,6 +34,9 @@ const CH_CUSTOM0_W := "custom0.w"
 const FEATURE_ID_BODY := 0
 const FEATURE_ID_SUCKER_CUP := 1
 const FEATURE_ID_SUCKER_RIM := 2
+const FEATURE_ID_SPINE := 3
+const FEATURE_ID_RIBBON := 4
+const FEATURE_ID_WART := 5
 # Subsequent feature IDs allocated as their subclasses land.
 
 var vertices := PackedVector3Array()
@@ -193,9 +196,93 @@ func flush_to_array_mesh() -> ArrayMesh:
 	return mesh
 
 
+# Recompute per-vertex normals for body vertices (FEATURE_ID_BODY) using
+# face-normal accumulation. Vertex-kernel features (KnotField, Ribs,
+# WartCluster, Fin) displace body vertices radially without updating
+# normals; without this pass the lighting still uses the un-displaced
+# radial outward direction and the bumps look flat-shaded incorrectly.
+#
+# Skips triangles that touch any non-body vertex so existing carefully-
+# blended normals on suckers, spines, ribbons, etc. are not overwritten.
+# Apex / cap-axis vertices with zero accumulated weight keep their
+# existing normal.
+func recompute_body_normals() -> void:
+	var n_verts: int = vertices.size()
+	if n_verts == 0 or indices.size() < 3:
+		return
+	var accum := PackedVector3Array()
+	accum.resize(n_verts)
+	var counts := PackedInt32Array()
+	counts.resize(n_verts)
+
+	for tri in range(0, indices.size(), 3):
+		var i0: int = indices[tri]
+		var i1: int = indices[tri + 1]
+		var i2: int = indices[tri + 2]
+		if (int(custom0[i0 * 4]) != FEATURE_ID_BODY
+				or int(custom0[i1 * 4]) != FEATURE_ID_BODY
+				or int(custom0[i2 * 4]) != FEATURE_ID_BODY):
+			continue
+		var v0: Vector3 = vertices[i0]
+		var v1: Vector3 = vertices[i1]
+		var v2: Vector3 = vertices[i2]
+		var face: Vector3 = (v1 - v0).cross(v2 - v0)
+		# Don't normalize face — area-weighted average gives smoother results
+		# at irregular triangles (e.g. fan-to-apex caps).
+		accum[i0] += face
+		accum[i1] += face
+		accum[i2] += face
+		counts[i0] += 1
+		counts[i1] += 1
+		counts[i2] += 1
+
+	for i in n_verts:
+		if int(custom0[i * 4]) != FEATURE_ID_BODY:
+			continue
+		if counts[i] == 0:
+			continue
+		var n: Vector3 = accum[i]
+		var len: float = n.length()
+		if len > 1e-8:
+			normals[i] = n / len
+
+
 func channels_used_array() -> PackedStringArray:
 	var out := PackedStringArray()
 	for k in channels_written.keys():
 		out.push_back(k)
 	out.sort()
 	return out
+
+
+# Sample the rest-pose body surface at (axial_t, world_xy_angle). Returns a
+# Dictionary with `position`, `normal` (outward radial), `right`
+# (circumferential, +θ), `forward` (along +arc axis), and `radius`. Used by
+# topology-adding features (spines, ribbons, warts) that anchor to the body.
+#
+# `p_radial_angle` is interpreted as the absolute angle in the body's
+# rest-pose XY plane — seam_offset and twist are body-construction details
+# that determine where vertex seams land, not the surface shape (which is
+# rotationally symmetric). Callers that want "opposite the seam" should add
+# `seam_offset` themselves before calling.
+func body_surface_at(p_axial_t: float, p_radial_angle: float) -> Dictionary:
+	var meta: Dictionary = get_meta(&"tentacle_mesh_meta", {}) if has_meta(&"tentacle_mesh_meta") else {}
+	var length: float = meta.get("length", 0.4)
+	var base_radius: float = meta.get("base_radius", 0.04)
+	var tip_radius: float = meta.get("tip_radius", 0.005)
+	var radius_curve: Curve = meta.get("radius_curve", null)
+	var sign_f: float = meta.get("intrinsic_axis_sign", 1.0)
+
+	var t_clamped: float = clampf(p_axial_t, 0.0, 1.0)
+	var radius: float = (radius_curve.sample(t_clamped) if radius_curve != null
+			else lerpf(base_radius, tip_radius, t_clamped))
+	var theta: float = p_radial_angle
+	var radial := Vector3(cos(theta), sin(theta), 0)
+	var z: float = sign_f * length * t_clamped
+	return {
+		"position": Vector3(0, 0, z) + radial * radius,
+		"normal": radial,
+		"right": Vector3(-sin(theta), cos(theta), 0),
+		"forward": Vector3(0, 0, sign_f),
+		"radius": radius,
+	}

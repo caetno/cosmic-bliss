@@ -135,7 +135,7 @@ func test_tentacle_mesh_auto_pulls_girth() -> bool:
 	# PrimitiveMesh subclass per §10.2a; surface_get_arrays is inherited
 	# from Mesh, so no ArrayMesh cast.
 	var verts: PackedVector3Array = got_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
-	var expected: int = (tm.length_segments + 1) * tm.radial_segments + 1
+	var expected: int = (tm.length_segments + 1 + tm.tip_cap_rings) * tm.radial_segments + 1
 	if verts.size() != expected:
 		push_error("baked vertex count %d != expected %d" % [verts.size(), expected])
 		return false
