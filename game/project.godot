@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Cosmic Bliss"
-run/main_scene="uid://b4ujtq64ovvfk"
+run/main_scene="uid://hff1bdxe6arh"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
