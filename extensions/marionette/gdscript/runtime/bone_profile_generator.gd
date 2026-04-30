@@ -26,6 +26,18 @@ extends RefCounted
 const _CHILD_NUDGE: float = 0.02
 
 
+# Authoring method for deriving each bone's anatomical target basis.
+#   ARCHETYPE — original path: per-archetype geometric solvers over rest-pose
+#               bone-to-child world geometry, with permutation matching.
+#   TPOSE     — alternative path: canonical T-pose along-direction lookup +
+#               one cross product. See
+#               `docs/marionette/Marionette_Update_TPose_Calibration.md`.
+# Both paths share every other generator step (data substrate selection, muscle
+# frame, matcher score for diagnostics, calculated_anatomical_basis bake,
+# mirror_abd, ROM defaults) — they only differ in how `target_basis` is built.
+enum Method { ARCHETYPE, TPOSE }
+
+
 # Result of a generate() pass. Reported back so the inspector button can
 # print a one-line summary and the test harness can spot-check counts.
 class GenerateReport extends RefCounted:
@@ -40,11 +52,26 @@ class GenerateReport extends RefCounted:
 	var error: String = ""
 
 
+# Existing entry point — preserved for callers (tests, older scripts) that
+# don't pass a method. Defaults to the archetype path.
 static func generate(
 		bone_profile: BoneProfile,
 		live_skeleton: Skeleton3D = null,
 		bone_map: BoneMap = null,
-		verbose: bool = false) -> GenerateReport:
+		verbose: bool = false,
+		forward_override: Vector3 = Vector3.ZERO) -> GenerateReport:
+	return generate_with_method(
+			bone_profile, Method.ARCHETYPE,
+			live_skeleton, bone_map, verbose, forward_override)
+
+
+static func generate_with_method(
+		bone_profile: BoneProfile,
+		method: Method,
+		live_skeleton: Skeleton3D = null,
+		bone_map: BoneMap = null,
+		verbose: bool = false,
+		forward_override: Vector3 = Vector3.ZERO) -> GenerateReport:
 	var report := GenerateReport.new()
 	if bone_profile == null:
 		report.error = "bone_profile is null"
@@ -62,15 +89,19 @@ static func generate(
 	var muscle_frame: MuscleFrame
 	if use_live:
 		world_rests = MuscleFrameBuilder.compute_skeleton_world_rests(live_skeleton, profile, bone_map)
-		muscle_frame = MuscleFrameBuilder.build_from_skeleton(live_skeleton, profile, bone_map)
+		muscle_frame = MuscleFrameBuilder.build_from_skeleton(live_skeleton, profile, bone_map, forward_override)
 	else:
 		world_rests = MuscleFrameBuilder.compute_world_rests(profile)
-		muscle_frame = MuscleFrameBuilder.build(profile)
+		muscle_frame = MuscleFrameBuilder.build(profile, forward_override)
 
 	if verbose:
-		print("[BoneProfileGenerator] %s pass against %d-bone profile (rig has %d resolvable bones)"
+		var method_label: String = "ARCHETYPE" if method == Method.ARCHETYPE else "TPOSE"
+		print("[BoneProfileGenerator] %s pass against %d-bone profile (rig has %d resolvable bones, method=%s)"
 				% ["live-skeleton" if use_live else "template",
-					profile.bone_size, world_rests.size()])
+					profile.bone_size, world_rests.size(), method_label])
+		print("[BoneProfileGenerator] muscle frame: right=%s up=%s forward=%s%s" % [
+				muscle_frame.right, muscle_frame.up, muscle_frame.forward,
+				" (override applied)" if forward_override != Vector3.ZERO else ""])
 
 	# parent-name -> first-listed-child-name lookup, for the child-hint each
 	# solver needs when SkeletonProfile.get_bone_tail() isn't set.
@@ -137,11 +168,17 @@ static func generate(
 		# (PLUS_X / PLUS_Y / PLUS_Z) — write_into() would only echo that anyway.
 		var outcome_label: String = "GENERATED (no SPD frame)"
 		if archetype != BoneArchetype.Type.ROOT and archetype != BoneArchetype.Type.FIXED:
-			var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
-					bone_name, archetype, muscle_frame)
-			var target_basis: Basis = MarionetteArchetypeSolverDispatch.solve(
-					archetype, bone_world, child_world, muscle_frame, is_left_side,
-					parent_world, motion_target)
+			var target_basis: Basis
+			match method:
+				Method.ARCHETYPE:
+					var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
+							bone_name, archetype, muscle_frame)
+					target_basis = MarionetteArchetypeSolverDispatch.solve(
+							archetype, bone_world, child_world, muscle_frame, is_left_side,
+							parent_world, motion_target)
+				Method.TPOSE:
+					target_basis = MarionetteTPoseBasisSolver.solve(
+							bone_name, archetype, muscle_frame, is_left_side)
 			var match_result: MarionettePermutationMatch = MarionettePermutationMatcher.find_match(
 					bone_world.basis, target_basis)
 			match_result.write_into(entry)

@@ -48,6 +48,23 @@ The naming throughout this doc calls the existing path the **"archetype" method*
 - This matches what Unity Mecanim does: bone mapping → canonical T-pose orientation per role → muscle referential (their `pre-rotation` = our `calculated_anatomical_basis`). Manual nudging in Unity is the exception; the mapping is normally sufficient.
 - We keep the archetype path because it is exercised, has unit tests, and is producing correct ragdolls today. The T-pose method is a candidate replacement; promoting it to default requires evidence (validator agreement on real rigs).
 
+### 3.1 Caveat — behavior on A-pose / non-T-pose rigs
+
+The T-pose method is **strict** in the sense that `target_basis` is body-fixed canonical regardless of the rig's actual rest pose. That has a consequence worth spelling out, since it is initially counterintuitive:
+
+- For an A-pose left upper arm, `along_for(...)` returns canonical body-lateral (`-mf.right`), not the bone's actual `(child - bone)` direction (which points 45° down-out).
+- After the bake `bone_world.basis.inverse() * target_basis`, the joint frame at rest is therefore oriented to T-pose canonical anatomy in world — joint-local +Y points world body-lateral, while the bone itself points world down-out. The two are 45° apart.
+- Visually: the JointLimitGizmo's ROM arcs render in horizontal planes (T-pose orientation), not tilted with the A-pose arm. CLAUDE.md §3 calls this "the joint frame, drawn truthfully." The "tilt" is real — joint-local is not aligned to any bone-local axis at this bone.
+- Behaviorally: SPD targets in anatomical (flex, along, abd) coords drive the bone around canonical-anatomy axes — i.e., the motion plane and rotation axes look "as if the rig were in T-pose," even though the bone is in A-pose at rest.
+
+This is the design of the T-pose method, not a bug. If you want axes that follow the bone's actual rest orientation (so ROM arcs tilt with an A-pose arm and SPD motion pivots around bone-perpendicular axes), use the **archetype method** — `MarionetteArchetypeSolverDispatch.solve` derives `along` from the rest geometry, which gives bone-attached axes on any rest pose.
+
+The user's natural fix ("compute the canonical T-pose basis, then rotate it by the rest-to-T-pose delta") collapses to "use the actual rest direction as `along`" — which is exactly what the archetype method already does. So there is no clean third method to add; the rest-delta correction *is* the archetype path.
+
+Practical guidance:
+- T-pose rig (or canonical-aligned rest): both methods agree to within FP error, T-pose method is faster authoring.
+- A-pose / non-T-pose rig: archetype method matches the "axes follow the bone" intuition; T-pose method gives canonical body-fixed axes regardless. Pick whichever the consumer's animation / pose authoring assumes.
+
 ---
 
 ## 4. Implementation plan

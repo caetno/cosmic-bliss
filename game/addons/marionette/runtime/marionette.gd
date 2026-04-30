@@ -55,6 +55,13 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 # mass_fraction == 0 (the P2.10 default) split the remainder uniformly.
 @export_range(0.5, 200.0, 0.1) var total_mass: float = 70.0
 
+# Authoring-time override for the muscle frame's forward axis. Default
+# Vector3.ZERO autodetects via the foot-bone probe in MuscleFrameBuilder
+# (ankle -> toe is anatomical-forward regardless of which side the bone
+# sits on). Set to e.g. Vector3(0, 0, 1) when the autodetect picks the
+# wrong side — only relevant during Calibrate; ignored at runtime.
+@export var muscle_frame_forward_override: Vector3 = Vector3.ZERO
+
 # --- Tool buttons (editor authoring) ---
 
 @export_tool_button("Build Ragdoll") var _build_btn: Callable = build_ragdoll
@@ -81,6 +88,12 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 # matcher-resolved permutation. Mutates `bone_profile` in place — Ctrl+S
 # to persist.
 @export_tool_button("Calibrate Profile from Skeleton") var _calibrate_btn: Callable = calibrate_bone_profile_from_skeleton
+# Parallel calibrate using the T-pose-direction-table method
+# (see docs/marionette/Marionette_Update_TPose_Calibration.md). Same disk-
+# persist path as the archetype button — only the target_basis derivation
+# differs. Run both on the same rig and compare via "Validate Joint Frames"
+# to decide which method produces fewer flipped/swapped/bad bones.
+@export_tool_button("Calibrate Profile (T-Pose)") var _calibrate_tpose_btn: Callable = calibrate_bone_profile_from_skeleton_tpose
 # Static-analysis diagnostic: per-bone comparison of the BoneEntry-baked
 # anatomical frame against the solver's recomputed target frame, both in
 # world space. Prints OK/FLIPPED/SWAPPED/BAD per bone so I can pinpoint
@@ -296,6 +309,17 @@ func stop_simulation() -> void:
 # your specific character. Calls `bone_profile.emit_changed()` so the editor
 # marks the resource dirty; user must Ctrl+S to persist.
 func calibrate_bone_profile_from_skeleton() -> void:
+	_calibrate_with_method(BoneProfileGenerator.Method.ARCHETYPE)
+
+
+func calibrate_bone_profile_from_skeleton_tpose() -> void:
+	_calibrate_with_method(BoneProfileGenerator.Method.TPOSE)
+
+
+# Shared body of both calibrate buttons. Only the target_basis derivation
+# differs between methods; everything else (validation, save, post-report
+# logging, gizmo refresh) is identical.
+func _calibrate_with_method(method: BoneProfileGenerator.Method) -> void:
 	if bone_profile == null:
 		push_warning("Marionette.calibrate: bone_profile not set")
 		return
@@ -310,9 +334,10 @@ func calibrate_bone_profile_from_skeleton() -> void:
 		push_warning("Marionette.calibrate: bone_map not set — can't translate rig names")
 		return
 	var path: String = bone_profile.resource_path if bone_profile.resource_path != "" else "<unsaved>"
-	print("[Marionette] calibrating %s against live skeleton — per-bone log:" % path)
-	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(
-			bone_profile, skel, bone_map, true)
+	var method_label: String = "archetype" if method == BoneProfileGenerator.Method.ARCHETYPE else "t-pose"
+	print("[Marionette] calibrating %s against live skeleton (method=%s) — per-bone log:" % [path, method_label])
+	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate_with_method(
+			bone_profile, method, skel, bone_map, true, muscle_frame_forward_override)
 	if report.error != "":
 		push_warning("Marionette.calibrate: %s" % report.error)
 		return

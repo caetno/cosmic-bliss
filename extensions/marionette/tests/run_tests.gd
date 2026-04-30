@@ -91,6 +91,12 @@ func _init() -> void:
 		_test_validator_flips_sign_error,
 		_test_validator_swaps_axis_misassignment,
 		_test_motion_validator_template_profile_no_wrongs,
+		_test_canonical_directions_humanoid_coverage,
+		_test_canonical_directions_handedness,
+		_test_t_pose_basis_solver_orthonormal_humanoid,
+		_test_t_pose_basis_solver_along_matches_table,
+		_test_t_pose_basis_solver_motion_alignment,
+		_test_bone_profile_generator_method_parity_template,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -406,10 +412,12 @@ func _test_humanoid_archetype_map_known_assignments() -> bool:
 # ---------- Muscle frame builder (P2.7) ----------
 
 func _test_muscle_frame_humanoid() -> bool:
-	# On MarionetteHumanoidProfile (Y-up, character built facing -Z, LeftUpperLeg at +X):
+	# On MarionetteHumanoidProfile (Y-up, viewer-perspective naming with
+	# LeftUpperLeg at +X, character faces +Z anatomically):
 	#   right   ≈ (-1, 0, 0)
 	#   up      ≈ (0, 1, 0)
-	#   forward ≈ (0, 0, -1)
+	#   forward ≈ (0, 0, +1) — autodetected from foot bones' bone-local +Y
+	#   (ankle->toe in Blender's Y-along-bone convention).
 	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
 	if profile == null:
 		return _fail("muscle_frame_humanoid", "could not load profile")
@@ -421,9 +429,9 @@ func _test_muscle_frame_humanoid() -> bool:
 	if not frame.right.is_equal_approx(Vector3.LEFT):
 		# Vector3.LEFT == (-1,0,0) — character's right side, since LeftUpperLeg is at +X.
 		return _fail("muscle_frame_humanoid", "right=%s, expected (-1,0,0)" % frame.right)
-	if not frame.forward.is_equal_approx(Vector3.FORWARD):
-		# Vector3.FORWARD == (0,0,-1).
-		return _fail("muscle_frame_humanoid", "forward=%s, expected (0,0,-1)" % frame.forward)
+	if not frame.forward.is_equal_approx(Vector3.BACK):
+		# Vector3.BACK == (0,0,+1) — anatomical forward for +Z-facing char.
+		return _fail("muscle_frame_humanoid", "forward=%s, expected (0,0,+1)" % frame.forward)
 	return _ok("muscle_frame_humanoid")
 
 
@@ -444,15 +452,11 @@ func _test_muscle_frame_orthonormal() -> bool:
 	]:
 		if absf(pair[1] as float) > 1.0e-5:
 			return _fail("muscle_frame_orthonormal", "%s = %f, expected 0" % [pair[0], pair[1]])
-	# (right, up, forward) is a right-handed triple: right × up = forward.
-	# Note this is unusual — Godot's Node3D basis stores (right, up, back),
-	# i.e., right × up = back = -forward. Our MuscleFrame names the third axis
-	# anatomically (forward = where the character faces), so the cross product
-	# convention flips sign relative to Godot's basis.
-	var rxu: Vector3 = frame.right.cross(frame.up)
-	if not rxu.is_equal_approx(frame.forward):
-		return _fail("muscle_frame_orthonormal",
-			"right×up=%s, expected forward=%s" % [rxu, frame.forward])
+	# Handedness of the (right, up, forward) triple is NOT guaranteed to be
+	# right-handed: viewer-perspective hip naming gives `left = +X` whose cross
+	# with `up` lands at anatomical-back, and the foot-probe autodetect flips
+	# `forward` to anatomy. The orthonormal-with-correct-anatomical-labels
+	# property is what we want — handedness is incidental.
 	return _ok("muscle_frame_orthonormal")
 
 
@@ -1156,27 +1160,27 @@ func _test_generator_template_upper_arm_joint_frame() -> bool:
 	var bp := _make_humanoid_bone_profile()
 	BoneProfileGenerator.generate(bp)
 
-	# Left shoulder: along = +X (lateral out to left). Flex = along × forward
-	# = +X × -Z = +Y. Motion = flex × along = +Y × +X = -Z (forward), the
-	# anatomical "raise arm forward" direction.
+	# LeftUpperArm bone is at +X (viewer-perspective naming on a +Z-facing
+	# character). along = +X. Flex = along × forward = +X × +Z = -Y. Motion
+	# = flex × along = -Y × +X = +Z (anatomical forward), the "raise arm
+	# forward" direction.
 	var left := _generated_joint_world(bp, &"LeftUpperArm")
 	if not left.y.is_equal_approx(Vector3(1, 0, 0)):
 		return _fail("template_upper_arm",
 			"LeftUpperArm along=%v, expected (1,0,0)" % left.y)
-	if not left.x.is_equal_approx(Vector3(0, 1, 0)):
+	if not left.x.is_equal_approx(Vector3(0, -1, 0)):
 		return _fail("template_upper_arm",
-			"LeftUpperArm flex=%v, expected (0,1,0)" % left.x)
-	# Right shoulder is mirrored: along = -X. The new sign-aware solver gives
-	# flex = along × forward = -X × -Z = -Y, the *opposite* of the left side.
-	# That's the whole point of the fix — same +flex slider on both sides
-	# rotates each arm forward, not in mirror directions.
+			"LeftUpperArm flex=%v, expected (0,-1,0)" % left.x)
+	# RightUpperArm bone is at -X. flex = along × forward = -X × +Z = +Y, the
+	# opposite of the left side. Same +flex slider on both sides rotates each
+	# arm forward.
 	var right := _generated_joint_world(bp, &"RightUpperArm")
 	if not right.y.is_equal_approx(Vector3(-1, 0, 0)):
 		return _fail("template_upper_arm",
 			"RightUpperArm along=%v, expected (-1,0,0)" % right.y)
-	if not right.x.is_equal_approx(Vector3(0, -1, 0)):
+	if not right.x.is_equal_approx(Vector3(0, 1, 0)):
 		return _fail("template_upper_arm",
-			"RightUpperArm flex=%v, expected (0,-1,0)" % right.x)
+			"RightUpperArm flex=%v, expected (0,1,0)" % right.x)
 	return _ok("generator_template_upper_arm_joint_frame")
 
 
@@ -1189,19 +1193,21 @@ func _test_generator_template_upper_leg_joint_frame() -> bool:
 	if not left.y.is_equal_approx(Vector3(0, -1, 0)):
 		return _fail("template_upper_leg",
 			"LeftUpperLeg along=%v, expected (0,-1,0)" % left.y)
-	# Flex axis for hip ball: lateral (limb_flex_axis = -muscle_frame.right
-	# = world +X), perpendicular to vertical along — no orthogonalization
-	# fallback needed.
-	if not left.x.is_equal_approx(Vector3(1, 0, 0)):
+	# Hip flex axis: along × forward = -Y × +Z = -X. Same axis for both sides
+	# (along is the same vertical-down for both hips), so the +flex direction
+	# wraps both legs forward. The lateral fallback (limb_flex_axis sign-by-
+	# side) is no longer used — anatomical_flex_axis derives from along×target
+	# directly.
+	if not left.x.is_equal_approx(Vector3(-1, 0, 0)):
 		return _fail("template_upper_leg",
-			"LeftUpperLeg flex=%v, expected (1,0,0)" % left.x)
+			"LeftUpperLeg flex=%v, expected (-1,0,0)" % left.x)
 	var right := _generated_joint_world(bp, &"RightUpperLeg")
 	if not right.y.is_equal_approx(Vector3(0, -1, 0)):
 		return _fail("template_upper_leg",
 			"RightUpperLeg along=%v, expected (0,-1,0)" % right.y)
-	if not right.x.is_equal_approx(Vector3(1, 0, 0)):
+	if not right.x.is_equal_approx(Vector3(-1, 0, 0)):
 		return _fail("template_upper_leg",
-			"RightUpperLeg flex=%v, expected (1,0,0)" % right.x)
+			"RightUpperLeg flex=%v, expected (-1,0,0)" % right.x)
 	return _ok("generator_template_upper_leg_joint_frame")
 
 
@@ -2192,3 +2198,220 @@ func _test_validator_swaps_axis_misassignment() -> bool:
 	if not found_misclass:
 		return _fail("validator_swap", "LeftUpperArm missing from diagnoses")
 	return _ok("validator_swaps_axis_misassignment")
+
+
+# ---------- T-pose calibration path (Marionette_Update_TPose_Calibration.md) ----------
+
+func _test_canonical_directions_humanoid_coverage() -> bool:
+	# Every bone in MarionetteHumanoidProfile that is not ROOT/FIXED must
+	# return a non-zero canonical along-direction. ROOT/FIXED bones never
+	# run the T-pose solver (the generator short-circuits them), so we only
+	# assert coverage on the bones that actually consume the table.
+	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	if profile == null:
+		return _fail("canonical_directions_coverage", "could not load profile")
+	var frame := MuscleFrameBuilder.build(profile)
+	var missing: Array[StringName] = []
+	for i in range(profile.bone_size):
+		var bone_name := profile.get_bone_name(i)
+		var archetype: int = MarionetteArchetypeDefaults.archetype_for_bone(bone_name)
+		if archetype == BoneArchetype.Type.ROOT or archetype == BoneArchetype.Type.FIXED:
+			continue
+		var is_left_side: bool = String(bone_name).begins_with("Left")
+		var along: Vector3 = MarionetteCanonicalDirections.along_for(bone_name, frame, is_left_side)
+		if along == Vector3.ZERO:
+			missing.append(bone_name)
+	if not missing.is_empty():
+		return _fail("canonical_directions_coverage",
+				"%d non-ROOT/FIXED bones returned ZERO: %s" % [missing.size(), missing])
+	return _ok("canonical_directions_humanoid_coverage")
+
+
+func _test_canonical_directions_handedness() -> bool:
+	# Limb chain bones must mirror by side: left -> -mf.right, right -> +mf.right.
+	# Spine chain (Hips/Spine/Chest/UpperChest/Neck/Head) returns +mf.up.
+	# Leg chain returns -mf.up; Foot returns +mf.forward; Toes return +mf.forward.
+	var frame := MuscleFrame.new()
+	frame.right = Vector3(1, 0, 0)
+	frame.up = Vector3(0, 1, 0)
+	frame.forward = Vector3(0, 0, 1)
+	var checks: Array = [
+		[&"LeftUpperArm", true, Vector3(-1, 0, 0)],
+		[&"RightUpperArm", false, Vector3(1, 0, 0)],
+		[&"LeftHand", true, Vector3(-1, 0, 0)],
+		[&"RightHand", false, Vector3(1, 0, 0)],
+		[&"LeftIndexProximal", true, Vector3(-1, 0, 0)],
+		[&"RightLittleDistal", false, Vector3(1, 0, 0)],
+		[&"Spine", false, Vector3(0, 1, 0)],
+		[&"Chest", false, Vector3(0, 1, 0)],
+		[&"UpperChest", false, Vector3(0, 1, 0)],
+		[&"Neck", false, Vector3(0, 1, 0)],
+		[&"Head", false, Vector3(0, 1, 0)],
+		[&"LeftUpperLeg", true, Vector3(0, -1, 0)],
+		[&"RightLowerLeg", false, Vector3(0, -1, 0)],
+		[&"LeftFoot", true, Vector3(0, 0, 1)],
+		[&"LeftToes", true, Vector3(0, 0, 1)],
+		[&"RightBigToeProximal", false, Vector3(0, 0, 1)],
+	]
+	for c: Array in checks:
+		var bone_name: StringName = c[0]
+		var is_left: bool = c[1]
+		var want: Vector3 = c[2]
+		var got: Vector3 = MarionetteCanonicalDirections.along_for(bone_name, frame, is_left)
+		if not got.is_equal_approx(want):
+			return _fail("canonical_directions_handedness",
+					"%s (left=%s): got %s, expected %s" % [bone_name, is_left, got, want])
+	return _ok("canonical_directions_handedness")
+
+
+func _test_t_pose_basis_solver_orthonormal_humanoid() -> bool:
+	# For every non-ROOT/FIXED humanoid bone, the T-pose solver must produce
+	# an orthonormal basis with determinant ±1.
+	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	if profile == null:
+		return _fail("t_pose_solver_orthonormal", "could not load profile")
+	var frame := MuscleFrameBuilder.build(profile)
+	for i in range(profile.bone_size):
+		var bone_name := profile.get_bone_name(i)
+		var archetype: int = MarionetteArchetypeDefaults.archetype_for_bone(bone_name)
+		if archetype == BoneArchetype.Type.ROOT or archetype == BoneArchetype.Type.FIXED:
+			continue
+		var is_left_side: bool = String(bone_name).begins_with("Left")
+		var basis: Basis = MarionetteTPoseBasisSolver.solve(bone_name, archetype, frame, is_left_side)
+		# Pivot has motion_target == ZERO in anatomical_motion_target, so the
+		# solver returns IDENTITY for it. IDENTITY is orthonormal too — the
+		# loop below still validates it without special-casing.
+		for label_value: Array in [["x", basis.x], ["y", basis.y], ["z", basis.z]]:
+			var v: Vector3 = label_value[1]
+			if not is_equal_approx(v.length(), 1.0):
+				return _fail("t_pose_solver_orthonormal",
+						"%s col-%s len=%f" % [bone_name, label_value[0], v.length()])
+		var dots: Array[float] = [
+			basis.x.dot(basis.y),
+			basis.x.dot(basis.z),
+			basis.y.dot(basis.z),
+		]
+		for d: float in dots:
+			if absf(d) > 1.0e-5:
+				return _fail("t_pose_solver_orthonormal",
+						"%s columns not orthogonal (dot=%f)" % [bone_name, d])
+		var det: float = basis.determinant()
+		if absf(absf(det) - 1.0) > 1.0e-4:
+			return _fail("t_pose_solver_orthonormal",
+					"%s det=%f, expected ±1" % [bone_name, det])
+	return _ok("t_pose_basis_solver_orthonormal_humanoid")
+
+
+func _test_t_pose_basis_solver_along_matches_table() -> bool:
+	# Solver's along (basis.y) must equal the canonical-table direction for
+	# every non-ROOT/FIXED bone — that's the whole contract of the T-pose
+	# method. Catches regressions if make_anatomical_basis ever rotates the
+	# along axis away from the table value.
+	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	if profile == null:
+		return _fail("t_pose_solver_along", "could not load profile")
+	var frame := MuscleFrameBuilder.build(profile)
+	for i in range(profile.bone_size):
+		var bone_name := profile.get_bone_name(i)
+		var archetype: int = MarionetteArchetypeDefaults.archetype_for_bone(bone_name)
+		if archetype == BoneArchetype.Type.ROOT or archetype == BoneArchetype.Type.FIXED:
+			continue
+		var is_left_side: bool = String(bone_name).begins_with("Left")
+		var expected_along: Vector3 = MarionetteCanonicalDirections.along_for(
+				bone_name, frame, is_left_side)
+		if expected_along == Vector3.ZERO:
+			continue
+		var basis: Basis = MarionetteTPoseBasisSolver.solve(bone_name, archetype, frame, is_left_side)
+		if basis.is_equal_approx(Basis.IDENTITY):
+			# motion_target was ZERO (Pivot/Root/Fixed branches) — solver
+			# returns IDENTITY, don't assert against the table.
+			continue
+		var got_along: Vector3 = basis.y.normalized()
+		if not got_along.is_equal_approx(expected_along.normalized()):
+			return _fail("t_pose_solver_along",
+					"%s along=%s, expected %s" % [bone_name, got_along, expected_along])
+	return _ok("t_pose_basis_solver_along_matches_table")
+
+
+func _test_t_pose_basis_solver_motion_alignment() -> bool:
+	# +flex on the resulting basis must produce motion in the
+	# anatomical_motion_target direction. Construction:
+	#   motion = flex × along; flex = along × motion_target
+	# So flex × along should land along motion_target up to sign. We assert
+	# alignment > 0.5 to catch sign errors and gross misalignments.
+	var profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
+	if profile == null:
+		return _fail("t_pose_solver_motion", "could not load profile")
+	var frame := MuscleFrameBuilder.build(profile)
+	for i in range(profile.bone_size):
+		var bone_name := profile.get_bone_name(i)
+		var archetype: int = MarionetteArchetypeDefaults.archetype_for_bone(bone_name)
+		if archetype == BoneArchetype.Type.ROOT or archetype == BoneArchetype.Type.FIXED:
+			continue
+		var is_left_side: bool = String(bone_name).begins_with("Left")
+		var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
+				bone_name, archetype, frame)
+		if motion_target == Vector3.ZERO:
+			continue
+		var basis: Basis = MarionetteTPoseBasisSolver.solve(bone_name, archetype, frame, is_left_side)
+		var motion: Vector3 = basis.x.cross(basis.y)
+		if motion.length_squared() < 1.0e-6:
+			return _fail("t_pose_solver_motion",
+					"%s flex × along is degenerate" % bone_name)
+		var alignment: float = motion.normalized().dot(motion_target.normalized())
+		if alignment < 0.5:
+			return _fail("t_pose_solver_motion",
+					"%s flex×along·motion=%f (motion=%s, target=%s)" %
+					[bone_name, alignment, motion.normalized(), motion_target])
+	return _ok("t_pose_basis_solver_motion_alignment")
+
+
+func _test_bone_profile_generator_method_parity_template() -> bool:
+	# Run the generator twice on the same template profile, once per method,
+	# and compare per-bone agreement angles between the two baked anatomical
+	# bases. Major SPD joints should agree within a tight threshold; spine
+	# segments and clavicles can diverge more because the archetype solvers
+	# do non-trivial geometry there.
+	var bp_arch := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate_with_method(bp_arch, BoneProfileGenerator.Method.ARCHETYPE)
+	var bp_tpose := _make_humanoid_bone_profile()
+	BoneProfileGenerator.generate_with_method(bp_tpose, BoneProfileGenerator.Method.TPOSE)
+
+	if bp_arch.bones.size() != bp_tpose.bones.size():
+		return _fail("method_parity",
+				"size mismatch: archetype=%d tpose=%d" %
+				[bp_arch.bones.size(), bp_tpose.bones.size()])
+
+	# Tight parity expected at major SPD joints.
+	var tight: Array[StringName] = [
+		&"LeftUpperArm", &"RightUpperArm",
+		&"LeftLowerArm", &"RightLowerArm",
+		&"LeftUpperLeg", &"RightUpperLeg",
+		&"LeftLowerLeg", &"RightLowerLeg",
+		&"LeftHand", &"RightHand",
+		&"LeftFoot", &"RightFoot",
+	]
+	var tight_threshold_deg: float = 5.0
+	# Loose ceiling on every other bone: just guard against pathological flips.
+	var loose_threshold_deg: float = 90.0
+	var summary: PackedStringArray = PackedStringArray()
+	for bone_name: StringName in bp_arch.bones.keys():
+		var arch_entry: BoneEntry = bp_arch.bones[bone_name]
+		var tpose_entry: BoneEntry = bp_tpose.bones[bone_name]
+		if arch_entry == null or tpose_entry == null:
+			continue
+		if not arch_entry.use_calculated_frame or not tpose_entry.use_calculated_frame:
+			continue
+		var qa := Quaternion(arch_entry.calculated_anatomical_basis.orthonormalized())
+		var qt := Quaternion(tpose_entry.calculated_anatomical_basis.orthonormalized())
+		var angle_deg: float = rad_to_deg(qa.angle_to(qt))
+		summary.append("  %-28s arch_vs_tpose=%6.2f deg" % [bone_name, angle_deg])
+		var threshold: float = tight_threshold_deg if tight.has(bone_name) else loose_threshold_deg
+		if angle_deg > threshold:
+			print("[method_parity] per-bone agreement (deg):")
+			for line: String in summary:
+				print(line)
+			return _fail("method_parity",
+					"%s diverges by %.2f deg (threshold %.2f deg)" %
+					[bone_name, angle_deg, threshold])
+	return _ok("bone_profile_generator_method_parity_template")

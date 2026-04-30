@@ -21,14 +21,19 @@ func _parse_begin(object: Object) -> void:
 	var bp: BoneProfile = object as BoneProfile
 	if bp == null:
 		return
-	var button := Button.new()
-	button.text = "Generate from Skeleton"
-	button.tooltip_text = "Run muscle frame -> archetype -> solver -> matcher -> ROM defaults for every bone in the referenced SkeletonProfile. Replaces existing entries."
-	button.pressed.connect(_on_pressed.bind(bp))
-	add_custom_control(button)
+	var arch_btn := Button.new()
+	arch_btn.text = "Generate from Skeleton (Archetype)"
+	arch_btn.tooltip_text = "Existing path: muscle frame -> per-archetype solver -> matcher -> ROM defaults. Replaces existing entries."
+	arch_btn.pressed.connect(_on_pressed.bind(bp, BoneProfileGenerator.Method.ARCHETYPE))
+	add_custom_control(arch_btn)
+	var tpose_btn := Button.new()
+	tpose_btn.text = "Generate from Skeleton (T-Pose)"
+	tpose_btn.tooltip_text = "Canonical T-pose along-direction lookup + single cross product. No archetype dispatch. Replaces existing entries."
+	tpose_btn.pressed.connect(_on_pressed.bind(bp, BoneProfileGenerator.Method.TPOSE))
+	add_custom_control(tpose_btn)
 
 
-func _on_pressed(bp: BoneProfile) -> void:
+func _on_pressed(bp: BoneProfile, method: BoneProfileGenerator.Method) -> void:
 	if bp == null:
 		push_warning("Marionette: BoneProfile is null")
 		return
@@ -36,8 +41,10 @@ func _on_pressed(bp: BoneProfile) -> void:
 		push_warning("Marionette: assign a SkeletonProfile to bone_profile.skeleton_profile before generating")
 		return
 	var path: String = bp.resource_path if bp.resource_path != "" else "<unsaved>"
-	print("[Marionette] generating %s (template path) — per-bone log:" % path)
-	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate(bp, null, null, true)
+	var method_label: String = "archetype" if method == BoneProfileGenerator.Method.ARCHETYPE else "t-pose"
+	print("[Marionette] generating %s (template path, method=%s) — per-bone log:" % [path, method_label])
+	var report: BoneProfileGenerator.GenerateReport = BoneProfileGenerator.generate_with_method(
+			bp, method, null, null, true)
 	if report.error != "":
 		push_warning("Marionette: generate failed — %s" % report.error)
 		return
