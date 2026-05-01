@@ -45,6 +45,54 @@ uniform float mesh_arc_sign = 1.0;
 // long-axis extent so the base maps to arc=0.
 uniform float mesh_arc_offset = 0.0;
 
+// Surface uniforms (§10.2 mask-driven shading).
+//
+// Feature ID dispatch — values must match BakeContext.FEATURE_ID_*:
+//   0 = BODY, 1 = SUCKER_CUP, 2 = SUCKER_RIM, 3 = SPINE, 4 = RIBBON, 5 = WART.
+// Vertex-kernel features (knot, ribs, wart) keep BODY tagging — they're
+// displaced body, not separate topology. Topology-adding features carry
+// their own ID so the fragment can pick distinct surface params.
+group_uniforms surface_body;
+uniform vec3 body_albedo : source_color = vec3(0.72, 0.45, 0.55);
+uniform float body_roughness : hint_range(0.0, 1.0) = 0.55;
+// Tip darkening — multiplied by COLOR.a (tip blend, 0=mid-body → 1=apex).
+// Authoring features that want a darker glans-like tip can write COLOR.a.
+uniform float tip_darken : hint_range(0.0, 1.0) = 0.0;
+
+group_uniforms surface_sucker;
+// Cup interior: the floor fan inside each sucker fades from cup_floor_albedo
+// at the pit (UV2 disc-radius=0) to cup_albedo at the cup-ring edge.
+uniform vec3 cup_albedo : source_color = vec3(0.20, 0.06, 0.08);
+uniform vec3 cup_floor_albedo : source_color = vec3(0.05, 0.02, 0.02);
+uniform float cup_roughness : hint_range(0.0, 1.0) = 0.7;
+uniform vec3 rim_albedo : source_color = vec3(0.85, 0.55, 0.60);
+uniform float rim_roughness : hint_range(0.0, 1.0) = 0.25;
+
+group_uniforms surface_appendages;
+// Spines / ribbons share the body palette by default but can be retinted.
+uniform vec3 spine_albedo : source_color = vec3(0.55, 0.40, 0.45);
+uniform float spine_roughness : hint_range(0.0, 1.0) = 0.45;
+uniform vec3 ribbon_albedo : source_color = vec3(0.78, 0.50, 0.58);
+uniform float ribbon_roughness : hint_range(0.0, 1.0) = 0.40;
+
+group_uniforms surface_masks;
+// Photophore mask (COLOR.b) — emissive intensity scaled by the mask. The
+// mask-only Photophore feature (§10.2, deferred) will write COLOR.b on body
+// verts; until then this branch is dormant on a default mesh.
+uniform vec3 photophore_emission : source_color = vec3(0.45, 0.75, 1.00);
+uniform float photophore_strength : hint_range(0.0, 8.0) = 0.0;
+// Papillae density (COLOR.g) — a roughness perturbation hook for the
+// mask-only Papillae feature. Adds COLOR.g * papillae_roughness to body
+// roughness; unaffected when the mask is unwritten.
+uniform float papillae_roughness : hint_range(-0.5, 0.5) = 0.15;
+
+// Per-vertex feature ID, dispatched in vertex(), branched in fragment().
+// `flat` because all three vertices of any given triangle share the same
+// feature ID (suckers/spines/ribbons are emitted as standalone topology;
+// they don't share triangles with body verts), so interpolation is wasted
+// and would produce stripes at the unwritten ≈0.5 boundary.
+varying flat float v_feature_id;
+
 // Decompose the mesh vertex into (arc, lateral_a, lateral_b) according to
 // mesh_arc_axis + mesh_arc_sign. lateral_a maps onto spline normal,
 // lateral_b onto binormal.
@@ -133,13 +181,60 @@ void vertex() {
 			normal_axis * n_lateral.x
 			+ binormal_axis * n_lateral.y
 			+ tangent * n_along_arc);
+
+	// Pass per-vertex feature ID to fragment for surface dispatch.
+	v_feature_id = CUSTOM0.x;
 }
 
 void fragment() {
-	// Phase 3a placeholder: solid albedo with simple wrap shading. The hero
-	// skin shader (Phase 7) replaces this for cavity walls; tentacles will
-	// get their own surface material later.
-	ALBEDO = vec3(0.7, 0.45, 0.55);
-	ROUGHNESS = 0.55;
+	// Feature-ID dispatch (§10.2). Values must match BakeContext.FEATURE_ID_*.
+	// The `flat` varying carries the per-triangle integer cleanly; rounding
+	// guards against any GPU rasterizer rounding the float edge case.
+	int feature = int(v_feature_id + 0.5);
+
+	vec3 albedo = body_albedo;
+	float rough = body_roughness;
+	vec3 emission = vec3(0.0);
+
+	if (feature == 1) {
+		// SUCKER_CUP. The cup is built as: center vertex (at UV2=(0.5,0.5),
+		// disc-radius 0) → floor ring (UV2 on disc edge, disc-radius 1) →
+		// cup ring (also disc-radius 1). Inside the floor fan UV2's radial
+		// coord lerps 0→1 across the pit; outside the floor it pins at 1.
+		// Use that to darken the pit center. The cup_ring section reads as
+		// the plain cup_albedo because UV2 stays at radius 1 there.
+		float disc_r = clamp(length(UV2 - vec2(0.5)) * 2.0, 0.0, 1.0);
+		albedo = mix(cup_floor_albedo, cup_albedo, disc_r);
+		rough = cup_roughness;
+	} else if (feature == 2) {
+		// SUCKER_RIM. Wet, low-roughness raised lip.
+		albedo = rim_albedo;
+		rough = rim_roughness;
+	} else if (feature == 3) {
+		// SPINE.
+		albedo = spine_albedo;
+		rough = spine_roughness;
+	} else if (feature == 4) {
+		// RIBBON / fin. COLOR.b carries the fin mask (= 1 on ribbon strips);
+		// mask is informational here — the ID already selected this branch.
+		albedo = ribbon_albedo;
+		rough = ribbon_roughness;
+	} else {
+		// BODY (and vertex-kernel features WART/KNOT/RIBS, which retain
+		// FEATURE_ID_BODY because they only displace existing body verts).
+		// Mask channels apply here — they're the body-surface modulators.
+		albedo = body_albedo;
+		rough = body_roughness;
+		// Papillae (COLOR.g) — roughness perturbation; default mesh has 0.
+		rough = clamp(rough + COLOR.g * papillae_roughness, 0.0, 1.0);
+		// Photophore (COLOR.b) — emissive; default mesh has 0.
+		emission = photophore_emission * photophore_strength * COLOR.b;
+		// Tip blend (COLOR.a) — multiplicative darken toward the apex.
+		albedo *= mix(1.0, 1.0 - tip_darken, COLOR.a);
+	}
+
+	ALBEDO = albedo;
+	ROUGHNESS = rough;
 	METALLIC = 0.0;
+	EMISSION = emission;
 }
