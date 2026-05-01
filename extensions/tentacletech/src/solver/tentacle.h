@@ -16,6 +16,7 @@
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include "../collision/environment_probe.h"
 #include "../spline/catmull_spline.h"
 #include "pbd_solver.h"
 
@@ -103,6 +104,29 @@ public:
 	godot::Dictionary get_target_pull_state() const;
 	godot::Dictionary get_anchor_state() const;
 
+	// Phase-4 slice 4A — type-4 environment probe -------------------------
+	//
+	// Each tick (before the solver step) the Tentacle issues 3 raycasts in
+	// the gravity direction from base / mid / tip particle positions and
+	// hands the half-space contacts to the solver. These exports tune the
+	// probe behavior; the snapshot accessor below feeds the gizmo overlay.
+
+	void set_environment_probe_enabled(bool p_enabled);
+	bool get_environment_probe_enabled() const;
+	void set_environment_probe_distance(float p_distance);
+	float get_environment_probe_distance() const;
+	void set_environment_collision_layer_mask(int p_mask);
+	int get_environment_collision_layer_mask() const;
+	void set_particle_collision_radius(float p_radius);
+	float get_particle_collision_radius() const;
+
+	// Snapshot accessor (§15.2): returns one Dictionary per ray with keys
+	// ray_origin, ray_direction, hit (bool), hit_point, hit_normal,
+	// hit_object_id (int). Stale rays from the last tick are returned as
+	// hit=false with whatever origin/direction they were last cast in. The
+	// gizmo overlay reads this every frame.
+	godot::Array get_environment_contacts_snapshot() const;
+
 	// Phase 3 — render plumbing -------------------------------------------
 	//
 	// Tentacle owns one MeshInstance3D child (created internally) and one
@@ -186,6 +210,12 @@ public:
 	// rebuild. Alloc-free after the first call (per CLAUDE.md non-negotiables).
 	void update_render_data();
 
+	// Public per-tick driver — runs the full pipeline: anchor refresh (unless
+	// override), environment probe, solver tick, render data update. The
+	// engine calls this from `_physics_process`; headless tests call it
+	// directly to exercise the same path with a deterministic step.
+	void tick(float p_delta);
+
 protected:
 	static void _bind_methods();
 
@@ -235,6 +265,21 @@ private:
 	// out of the .tscn file.
 	bool draw_gizmo = false;
 	godot::Node3D *debug_overlay = nullptr;
+
+	// Type-4 environment probe state. The probe owns its reusable
+	// PhysicsRayQueryParameters3D and a small fixed-size contact buffer; the
+	// PackedVector3Array members below are scratch buffers handed to the
+	// solver each tick to avoid allocating during _physics_process.
+	tentacletech::EnvironmentProbe environment_probe;
+	bool environment_probe_enabled = true;
+	float environment_probe_distance = 1.0f;
+	int environment_collision_layer_mask = 0xFFFFFFFF;
+	float particle_collision_radius = 0.05f;
+	godot::PackedVector3Array env_position_scratch;
+	godot::PackedVector3Array env_contact_points_scratch;
+	godot::PackedVector3Array env_contact_normals_scratch;
+
+	void _run_environment_probe();
 
 	void _allocate_render_resources();
 	void _ensure_mesh_instance();

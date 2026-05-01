@@ -27,6 +27,14 @@ const TBN_TANGENT := Color(0.85, 0.4, 1.0)      # purple
 const TBN_NORMAL := Color(1.0, 0.75, 0.3)       # orange-yellow
 const TBN_BINORMAL := Color(0.4, 0.95, 1.0)     # cyan
 
+# Phase-4 type-4 environment probe gizmos (§4.2). Magenta is unused elsewhere
+# in the runtime palette so collision contacts read distinctly from particles
+# (red/white) and constraints (blue/cyan/green).
+const ENV_RAY_NO_HIT := Color(0.55, 0.55, 0.6, 0.35)
+const ENV_RAY_HIT := Color(1.0, 0.35, 0.85, 0.85)
+const ENV_HIT_POINT := Color(1.0, 0.35, 0.85)
+const ENV_HIT_NORMAL := Color(0.55, 1.0, 0.8)
+
 const COMPRESSED_RATIO := 0.95
 const STRETCHED_RATIO := 1.05
 

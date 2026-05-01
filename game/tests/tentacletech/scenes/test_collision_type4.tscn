@@ -1,0 +1,68 @@
+[gd_scene format=3 uid="uid://btt4c08collsn"]
+
+[ext_resource type="Script" uid="uid://r3rjoofvjsjr" path="res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd" id="1_overlay"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_floor"]
+size = Vector3(8, 0.2, 8)
+
+[sub_resource type="BoxMesh" id="BoxMesh_floor"]
+size = Vector3(8, 0.2, 8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
+albedo_color = Color(0.32, 0.34, 0.36, 1)
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_obstacle"]
+radius = 0.45
+
+[sub_resource type="SphereMesh" id="SphereMesh_obstacle"]
+radius = 0.45
+height = 0.9
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_obstacle"]
+albedo_color = Color(0.55, 0.4, 0.3, 1)
+
+[node name="TestCollisionType4" type="Node3D"]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(0.866025, -0.25, 0.433013, 0, 0.866025, 0.5, -0.5, -0.433013, 0.75, 1.6, 1.4, 2.0)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.25, 0.433013, 0, 0.866025, 0.5, -0.5, -0.433013, 0.75, 0, 4, 0)
+light_energy = 0.85
+
+[node name="Floor" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Floor"]
+shape = SubResource("BoxShape3D_floor")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Floor"]
+mesh = SubResource("BoxMesh_floor")
+surface_material_override/0 = SubResource("StandardMaterial3D_floor")
+
+[node name="Sphere" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, -0.05, 0.2)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Sphere"]
+shape = SubResource("SphereShape3D_obstacle")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Sphere"]
+mesh = SubResource("SphereMesh_obstacle")
+surface_material_override/0 = SubResource("StandardMaterial3D_obstacle")
+
+[node name="Tentacle" type="Tentacle" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+particle_count = 20
+segment_length = 0.075
+gravity = Vector3(0, -9.8, 0)
+damping = 0.9
+distance_stiffness = 1.0
+bending_stiffness = 0.18
+environment_probe_enabled = true
+environment_probe_distance = 3.0
+particle_collision_radius = 0.05
+
+[node name="DebugOverlay" type="Node3D" parent="." node_paths=PackedStringArray("tentacle")]
+script = ExtResource("1_overlay")
+tentacle = NodePath("../Tentacle")
+particle_gizmo_size = 0.025

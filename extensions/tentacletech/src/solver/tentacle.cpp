@@ -30,6 +30,7 @@ const char *UNIFORM_MESH_ARC_OFFSET = "mesh_arc_offset";
 Tentacle::Tentacle() {
 	solver.instantiate();
 	solver->initialize_chain(particle_count, segment_length);
+	solver->set_collision_radius(particle_collision_radius);
 	render_spline.instantiate();
 }
 
@@ -61,14 +62,79 @@ void Tentacle::_physics_process(double p_delta) {
 	if (Engine::get_singleton()->is_editor_hint()) {
 		return;
 	}
+	tick((float)p_delta);
+}
+
+void Tentacle::tick(float p_delta) {
 	if (solver.is_null()) {
 		return;
 	}
 	if (!anchor_override) {
 		solver->set_anchor(0, get_global_transform());
 	}
-	solver->tick((float)p_delta);
+	_run_environment_probe();
+	solver->tick(p_delta);
 	_update_spline_data_texture();
+}
+
+void Tentacle::_run_environment_probe() {
+	if (solver.is_null()) {
+		return;
+	}
+	if (!environment_probe_enabled) {
+		environment_probe.clear();
+		solver->clear_environment_contacts();
+		return;
+	}
+	int n = solver->get_particle_count();
+	if (n < 2) {
+		environment_probe.clear();
+		solver->clear_environment_contacts();
+		return;
+	}
+	if (env_position_scratch.size() != n) {
+		env_position_scratch.resize(n);
+	}
+	{
+		Vector3 *dst = env_position_scratch.ptrw();
+		for (int i = 0; i < n; i++) {
+			dst[i] = solver->get_particle_position(i);
+		}
+	}
+
+	Vector3 grav = solver->get_gravity();
+	if (grav.length_squared() < 1e-8f) {
+		grav = Vector3(0.0f, -1.0f, 0.0f);
+	}
+
+	environment_probe.probe(this, env_position_scratch, grav,
+			environment_probe_distance,
+			(uint32_t)environment_collision_layer_mask);
+
+	const auto &contacts = environment_probe.get_contacts();
+	int hit_count = 0;
+	for (uint32_t i = 0; i < contacts.size(); i++) {
+		if (contacts[i].hit) hit_count++;
+	}
+	if (env_contact_points_scratch.size() != hit_count) {
+		env_contact_points_scratch.resize(hit_count);
+	}
+	if (env_contact_normals_scratch.size() != hit_count) {
+		env_contact_normals_scratch.resize(hit_count);
+	}
+	if (hit_count > 0) {
+		Vector3 *cp = env_contact_points_scratch.ptrw();
+		Vector3 *cn = env_contact_normals_scratch.ptrw();
+		int k = 0;
+		for (uint32_t i = 0; i < contacts.size(); i++) {
+			if (!contacts[i].hit) continue;
+			cp[k] = contacts[i].hit_point;
+			cn[k] = contacts[i].hit_normal;
+			k++;
+		}
+	}
+	solver->set_environment_contacts(env_contact_points_scratch,
+			env_contact_normals_scratch);
 }
 
 void Tentacle::_notification(int p_what) {
@@ -324,6 +390,55 @@ Dictionary Tentacle::get_target_pull_state() const {
 	d["particle_index"] = idx;
 	d["force_dir"] = dir;
 	return d;
+}
+
+// -- Environment probe ------------------------------------------------------
+
+void Tentacle::set_environment_probe_enabled(bool p_enabled) {
+	environment_probe_enabled = p_enabled;
+	if (!p_enabled && solver.is_valid()) {
+		solver->clear_environment_contacts();
+	}
+}
+bool Tentacle::get_environment_probe_enabled() const { return environment_probe_enabled; }
+
+void Tentacle::set_environment_probe_distance(float p_d) {
+	if (p_d < 1e-4f) p_d = 1e-4f;
+	environment_probe_distance = p_d;
+}
+float Tentacle::get_environment_probe_distance() const { return environment_probe_distance; }
+
+void Tentacle::set_environment_collision_layer_mask(int p_mask) {
+	environment_collision_layer_mask = p_mask;
+}
+int Tentacle::get_environment_collision_layer_mask() const { return environment_collision_layer_mask; }
+
+void Tentacle::set_particle_collision_radius(float p_r) {
+	if (p_r < 0.0f) p_r = 0.0f;
+	particle_collision_radius = p_r;
+	if (solver.is_valid()) {
+		solver->set_collision_radius(p_r);
+	}
+}
+float Tentacle::get_particle_collision_radius() const { return particle_collision_radius; }
+
+Array Tentacle::get_environment_contacts_snapshot() const {
+	Array out;
+	const auto &contacts = environment_probe.get_contacts();
+	int n = (int)contacts.size();
+	out.resize(n);
+	for (int i = 0; i < n; i++) {
+		const tentacletech::EnvironmentContact &c = contacts[i];
+		Dictionary d;
+		d["ray_origin"] = c.ray_origin;
+		d["ray_direction"] = c.ray_direction;
+		d["hit"] = c.hit;
+		d["hit_point"] = c.hit_point;
+		d["hit_normal"] = c.hit_normal;
+		d["hit_object_id"] = (int64_t)c.hit_object_id;
+		out[i] = d;
+	}
+	return out;
 }
 
 Dictionary Tentacle::get_anchor_state() const {
@@ -821,6 +936,26 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_target_pull_state"), &Tentacle::get_target_pull_state);
 	ClassDB::bind_method(D_METHOD("get_anchor_state"), &Tentacle::get_anchor_state);
 
+	ClassDB::bind_method(D_METHOD("set_environment_probe_enabled", "enabled"),
+			&Tentacle::set_environment_probe_enabled);
+	ClassDB::bind_method(D_METHOD("get_environment_probe_enabled"),
+			&Tentacle::get_environment_probe_enabled);
+	ClassDB::bind_method(D_METHOD("set_environment_probe_distance", "distance"),
+			&Tentacle::set_environment_probe_distance);
+	ClassDB::bind_method(D_METHOD("get_environment_probe_distance"),
+			&Tentacle::get_environment_probe_distance);
+	ClassDB::bind_method(D_METHOD("set_environment_collision_layer_mask", "mask"),
+			&Tentacle::set_environment_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_environment_collision_layer_mask"),
+			&Tentacle::get_environment_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_particle_collision_radius", "radius"),
+			&Tentacle::set_particle_collision_radius);
+	ClassDB::bind_method(D_METHOD("get_particle_collision_radius"),
+			&Tentacle::get_particle_collision_radius);
+	ClassDB::bind_method(D_METHOD("get_environment_contacts_snapshot"),
+			&Tentacle::get_environment_contacts_snapshot);
+	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
+
 	ClassDB::bind_method(D_METHOD("set_tentacle_mesh", "mesh"), &Tentacle::set_tentacle_mesh);
 	ClassDB::bind_method(D_METHOD("get_tentacle_mesh"), &Tentacle::get_tentacle_mesh);
 	ClassDB::bind_method(D_METHOD("_on_tentacle_mesh_changed"), &Tentacle::_on_tentacle_mesh_changed);
@@ -877,6 +1012,19 @@ void Tentacle::_bind_methods() {
 			"set_base_angular_velocity_limit", "get_base_angular_velocity_limit");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "rigid_base_count", PROPERTY_HINT_RANGE, "1,8,1,or_greater"),
 			"set_rigid_base_count", "get_rigid_base_count");
+
+	ADD_GROUP("Collision", "");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "environment_probe_enabled"),
+			"set_environment_probe_enabled", "get_environment_probe_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "environment_probe_distance",
+					 PROPERTY_HINT_RANGE, "0.01,20.0,0.01,or_greater"),
+			"set_environment_probe_distance", "get_environment_probe_distance");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "environment_collision_layer_mask",
+					 PROPERTY_HINT_LAYERS_3D_PHYSICS),
+			"set_environment_collision_layer_mask", "get_environment_collision_layer_mask");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "particle_collision_radius",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001,or_greater"),
+			"set_particle_collision_radius", "get_particle_collision_radius");
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),

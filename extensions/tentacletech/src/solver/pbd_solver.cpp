@@ -45,6 +45,9 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 
 	rigid_base_count = 1;
 	rigid_base_local_offsets.assign(1, Vector3());
+
+	env_contact_points.clear();
+	env_contact_normals.clear();
 }
 
 int PBDSolver::get_particle_count() const {
@@ -127,8 +130,28 @@ void PBDSolver::iterate() {
 					particles[i], particles[i + 1],
 					rest_lengths[i], distance_stiffness);
 		}
-		// 4. Collision normals — Phase 4.
-		// 5. Friction tangential — Phase 4.
+		// 4. Type-4 environment collision: half-space projection per §4.2.
+		// Slice 4A: normal-only correction. Friction (§4.3) is slice 4B.
+		{
+			int contact_n = env_contact_points.size();
+			if (contact_n > 0 && contact_n == env_contact_normals.size()) {
+				const Vector3 *cp = env_contact_points.ptr();
+				const Vector3 *cn = env_contact_normals.ptr();
+				for (int i = 0; i < n; i++) {
+					TentacleParticle &p = particles[i];
+					if (p.inv_mass <= 0.0f) continue;
+					float radius = collision_radius * p.girth_scale;
+					if (radius < 1e-5f) continue;
+					for (int c = 0; c < contact_n; c++) {
+						float depth = radius - (p.position - cp[c]).dot(cn[c]);
+						if (depth > 0.0f) {
+							p.position += cn[c] * depth;
+						}
+					}
+				}
+			}
+		}
+		// 5. Friction tangential — Phase 4 slice 4B.
 		// 6. Anchor last so it overrides any earlier violation.
 		if (anchor_active && anchor_particle_index >= 0 && anchor_particle_index < n) {
 			tentacletech::constraints::project_anchor(
@@ -569,6 +592,55 @@ void PBDSolver::set_uniform_rest_length(float p_length) {
 	}
 }
 
+// -- Environment collision --------------------------------------------------
+
+void PBDSolver::set_environment_contacts(const PackedVector3Array &p_points,
+		const PackedVector3Array &p_normals) {
+	int np = p_points.size();
+	int nn = p_normals.size();
+	int n = np < nn ? np : nn;
+	env_contact_points.resize(n);
+	env_contact_normals.resize(n);
+	if (n == 0) {
+		return;
+	}
+	const Vector3 *src_p = p_points.ptr();
+	const Vector3 *src_n = p_normals.ptr();
+	Vector3 *dst_p = env_contact_points.ptrw();
+	Vector3 *dst_n = env_contact_normals.ptrw();
+	for (int i = 0; i < n; i++) {
+		dst_p[i] = src_p[i];
+		// Defensive normalization — a degenerate (zero) normal would otherwise
+		// turn `(p - cp) · n` into 0 and the projection would push every
+		// particle out by `radius` along the zero vector (no-op) every iter.
+		// Cheap to fix at write time, keeps the iteration loop branch-free.
+		Vector3 nrm = src_n[i];
+		float l2 = nrm.length_squared();
+		if (l2 > 1e-10f) {
+			nrm = nrm / Math::sqrt(l2);
+		} else {
+			nrm = Vector3();
+		}
+		dst_n[i] = nrm;
+	}
+}
+
+void PBDSolver::clear_environment_contacts() {
+	env_contact_points.clear();
+	env_contact_normals.clear();
+}
+
+int PBDSolver::get_environment_contact_count() const {
+	return env_contact_points.size();
+}
+
+void PBDSolver::set_collision_radius(float p_radius) {
+	if (p_radius < 0.0f) p_radius = 0.0f;
+	collision_radius = p_radius;
+}
+
+float PBDSolver::get_collision_radius() const { return collision_radius; }
+
 // -- Binding ----------------------------------------------------------------
 
 void PBDSolver::_bind_methods() {
@@ -631,6 +703,13 @@ void PBDSolver::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_rest_length", "segment_index"), &PBDSolver::get_rest_length);
 	ClassDB::bind_method(D_METHOD("set_uniform_rest_length", "length"), &PBDSolver::set_uniform_rest_length);
+
+	ClassDB::bind_method(D_METHOD("set_environment_contacts", "points", "normals"),
+			&PBDSolver::set_environment_contacts);
+	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
+	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
+	ClassDB::bind_method(D_METHOD("set_collision_radius", "radius"), &PBDSolver::set_collision_radius);
+	ClassDB::bind_method(D_METHOD("get_collision_radius"), &PBDSolver::get_collision_radius);
 
 	BIND_CONSTANT(DEFAULT_ITERATION_COUNT);
 	BIND_CONSTANT(MAX_ITERATION_COUNT);

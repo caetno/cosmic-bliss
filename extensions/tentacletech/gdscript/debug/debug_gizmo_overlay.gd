@@ -19,14 +19,17 @@ extends Node3D
 @export var show_particles: bool = true
 @export var show_constraints: bool = true
 @export var show_bending: bool = true
+@export var show_environment: bool = true
 @export_range(0.0, 0.2, 0.001) var particle_gizmo_size: float = 0.02
 @export var toggle_action: StringName = &"tentacletech_debug_toggle"
 
 const _ParticlesLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/particles_layer.gd")
 const _ConstraintsLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/constraints_layer.gd")
+const _EnvironmentLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/environment_layer.gd")
 
 var _particles_layer: Node3D
 var _constraints_layer: Node3D
+var _environment_layer: Node3D
 
 
 func _ready() -> void:
@@ -40,6 +43,10 @@ func _ready() -> void:
 	_constraints_layer = _ConstraintsLayer.new()
 	_constraints_layer.name = "ConstraintsLayer"
 	add_child(_constraints_layer, false, Node.INTERNAL_MODE_FRONT)
+
+	_environment_layer = _EnvironmentLayer.new()
+	_environment_layer.name = "EnvironmentLayer"
+	add_child(_environment_layer, false, Node.INTERNAL_MODE_FRONT)
 
 
 func _process(_delta: float) -> void:
@@ -56,8 +63,11 @@ func _process(_delta: float) -> void:
 
 	_particles_layer.visible = show_particles
 	_constraints_layer.visible = show_constraints
+	_environment_layer.visible = show_environment
 
 	if show_particles:
 		_particles_layer.update_from(tentacle, particle_gizmo_size)
 	if show_constraints:
 		_constraints_layer.update_from(tentacle, show_bending)
+	if show_environment:
+		_environment_layer.update_from(tentacle)

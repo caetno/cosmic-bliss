@@ -147,6 +147,27 @@ public:
 	// full rebuild_chain would cause.
 	void set_uniform_rest_length(float p_length);
 
+	// Type-4 collision (§4.2). The Tentacle issues raycasts before tick() and
+	// hands the hits in as half-space planes; the solver projects particles
+	// out of any plane they're within `collision_radius * girth_scale` of,
+	// after distance constraints, every iteration. Slice 4A: normal-only
+	// projection. Friction (§4.3) lands in slice 4B.
+	//
+	// `p_points` and `p_normals` must be the same length; one entry per
+	// active contact. Setting empty arrays disables environment collision
+	// for the next tick. Buffers are copied; the solver does not retain
+	// references to caller-owned storage.
+	void set_environment_contacts(const godot::PackedVector3Array &p_points,
+			const godot::PackedVector3Array &p_normals);
+	void clear_environment_contacts();
+	int get_environment_contact_count() const;
+
+	// Per-tentacle base collision radius. Each particle's effective collision
+	// radius for slice 4A is `collision_radius * particle.girth_scale`.
+	// Asymmetry ellipse (§4.1) is deferred to a later slice.
+	void set_collision_radius(float p_radius);
+	float get_collision_radius() const;
+
 protected:
 	static void _bind_methods();
 
@@ -180,6 +201,13 @@ private:
 	int target_particle_index = -1;
 	godot::Vector3 target_position;
 	float target_stiffness = DEFAULT_TARGET_STIFFNESS;
+
+	// Type-4 environment contacts as half-space planes. Same lifetime model
+	// as pose_targets: Tentacle rebuilds them each tick, solver reads from
+	// the flat list during iteration. Slice 4A: normal projection only.
+	godot::PackedVector3Array env_contact_points;
+	godot::PackedVector3Array env_contact_normals;
+	float collision_radius = 0.05f;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior
