@@ -85,13 +85,16 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 	var bone_map: BoneMap = node.bone_map
 	var use_live: bool = live_skeleton != null and bone_map != null
 
-	# Live path uses current bone poses (get_bone_global_pose) so the arcs
-	# follow the armature as sliders move it. Template path stays on rest
-	# since there's no live skeleton to follow.
+	# Live path uses "rest in current parent's frame" — the wedge tracks the
+	# parent (so an elbow's ROM wedge follows the upper arm when the shoulder
+	# rotates) but stays still when the bone itself rotates (so the forearm
+	# sweeps *through* a stationary elbow wedge between rom_min and rom_max
+	# instead of dragging the wedge along with it). Template path stays on
+	# rest since there's no live skeleton to follow.
 	var world_rests: Dictionary[StringName, Transform3D]
 	var source_to_local: Transform3D = Transform3D.IDENTITY
 	if use_live:
-		world_rests = MuscleFrameBuilder.compute_skeleton_global_poses(live_skeleton, profile, bone_map)
+		world_rests = MuscleFrameBuilder.compute_skeleton_rest_in_live_parent(live_skeleton, profile, bone_map)
 		source_to_local = node.global_transform.affine_inverse() * live_skeleton.global_transform
 	else:
 		world_rests = MuscleFrameBuilder.compute_world_rests(profile)
@@ -129,16 +132,46 @@ func _redraw(gizmo: EditorNode3DGizmo) -> void:
 		var joint_in_source: Basis = bone_world.basis * entry.anatomical_basis_in_bone_local()
 		var draw_basis: Basis = source_to_local.basis * joint_in_source
 
+		# Arcs are drawn in joint-local space (joint identity = rest pose), so
+		# canonical-anatomy bounds (rom_min/rom_max) shift by `-rest_offset`
+		# — the same shift `_apply_joint_constraints` applies to Jolt limits.
+		# On T-pose rigs rest_offset = 0 so the arc renders unchanged.
+		var rest_offset: Vector3 = entry.rest_anatomical_offset
 		# Flex: rotate +Y (along-bone) around +X (flex axis).
 		_draw_arc(gizmo, origin, draw_basis, Vector3.RIGHT, Vector3.UP,
-				entry.rom_min.x, entry.rom_max.x, radius, _MAT_FLEX)
+				entry.rom_min.x - rest_offset.x, entry.rom_max.x - rest_offset.x,
+				radius, _MAT_FLEX)
 		# Rotation: rotate +X (flex axis) around +Y (along-bone). Doesn't move
 		# the bone tip but visualizes the twist range as a fan in joint-XZ.
+		# Right-side BALL / CLAVICLE bones have their +med-rot input negated
+		# at apply time (`AnatomicalPose.bone_local_rotation`), so the wedge
+		# has to sweep the opposite direction to match the bone's actual
+		# travel — otherwise the bone moves *out* of the displayed wedge as
+		# the slider runs from rom_min to rom_max.
+		var rot_min: float = entry.rom_min.y - rest_offset.y
+		var rot_max: float = entry.rom_max.y - rest_offset.y
+		var is_right_sided_med: bool = (
+				not entry.is_left_side
+				and (entry.archetype == BoneArchetype.Type.BALL
+					or entry.archetype == BoneArchetype.Type.CLAVICLE))
+		if is_right_sided_med:
+			var t: float = rot_min
+			rot_min = -rot_max
+			rot_max = -t
 		_draw_arc(gizmo, origin, draw_basis, Vector3.UP, Vector3.RIGHT,
-				entry.rom_min.y, entry.rom_max.y, radius, _MAT_ROT)
-		# Abduction: rotate +Y around +Z.
+				rot_min, rot_max, radius, _MAT_ROT)
+		# Abduction: rotate +Y around +Z. mirror_abd flips the runtime sign
+		# of +abd input (so anatomical abduction lands consistently across
+		# left/right side chirality) — sweep the wedge the opposite way for
+		# those bones for the same reason as the rotation arc above.
+		var abd_min: float = entry.rom_min.z - rest_offset.z
+		var abd_max: float = entry.rom_max.z - rest_offset.z
+		if entry.mirror_abd:
+			var t: float = abd_min
+			abd_min = -abd_max
+			abd_max = -t
 		_draw_arc(gizmo, origin, draw_basis, Vector3.BACK, Vector3.UP,
-				entry.rom_min.z, entry.rom_max.z, radius, _MAT_ABD)
+				abd_min, abd_max, radius, _MAT_ABD)
 
 
 # Draws an arc in the plane perpendicular to `rot_axis_local`, sweeping

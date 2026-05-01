@@ -35,6 +35,22 @@ extends Resource
 
 @export var is_left_side: bool = false
 
+# Anatomical configuration of the rest pose, expressed in canonical-anatomy
+# (flex, medial_rot, abduction) radians. Lets ROM bounds and slider/SPD inputs
+# live in canonical anatomy regardless of how the rig was modeled — at ragdoll
+# build time we shift Jolt limits by `-rest_anatomical_offset`, and at apply
+# time `AnatomicalPose.bone_local_rotation` subtracts the same offset before
+# rotating around the joint-local axes. So:
+#   slider value = canonical anatomical angle (e.g., 0° elbow flex = straight)
+#   joint angle  = slider value − rest_offset
+#   rest pose    = slider value of rest_offset
+#
+# Computed at "Generate from Skeleton" time. Currently populated for HINGE
+# bones (rest_offset.x = limb-plane bend angle, signed by motion target).
+# Other archetypes leave it at Vector3.ZERO until the follow-up slice — for
+# T-pose rigs that's already correct because rest = canonical T-pose.
+@export var rest_anatomical_offset: Vector3 = Vector3.ZERO
+
 # Calculated-frame fallback: when the bone's rest basis is too far from the
 # solver's target anatomical basis for any signed permutation to track it
 # (matcher score < threshold), we abandon the permutation path and bake the

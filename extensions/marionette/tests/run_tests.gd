@@ -97,6 +97,12 @@ func _init() -> void:
 		_test_t_pose_basis_solver_along_matches_table,
 		_test_t_pose_basis_solver_motion_alignment,
 		_test_bone_profile_generator_method_parity_template,
+		_test_rest_offset_hinge_collinear_is_zero,
+		_test_rest_offset_hinge_a_pose_elbow_bend,
+		_test_rest_offset_non_hinge_returns_zero,
+		_test_anatomical_pose_subtracts_rest_offset,
+		_test_anatomical_pose_canonical_zero_at_offset,
+		_test_build_ragdoll_rom_shifted_by_rest_offset,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -575,10 +581,12 @@ func _test_ball_solver_t_pose_left_arm() -> bool:
 
 
 func _test_hinge_solver_bent_knee() -> bool:
-	# Bent-knee fixture: upper leg goes from hip (0.1, 1.0, 0) downward to knee
-	# (0.1, 0.5, 0). Lower leg is bent forward by 30°. Ankle sits forward-and-
-	# below the knee. The hinge axis = parent_along × along, both in the YZ
-	# plane, so the result lies along world ±X (body lateral).
+	# Flexed-knee fixture: upper leg goes from hip (0.1, 1.0, 0) downward to
+	# knee (0.1, 0.5, 0). Lower leg is folded posteriorly by 30° (anatomical
+	# knee flexion — ankle sits backward-and-below the knee in muscle-frame
+	# coords; muscle frame's forward is -Z, so the ankle ends up at +Z).
+	# The hinge axis = parent_along × along, both in the YZ plane, so the
+	# result lies along world ±X (body lateral).
 	var frame := _make_muscle_frame_fixture()
 	var hip := Transform3D(Basis.IDENTITY, Vector3(0.1, 1.0, 0))
 	var bend := Basis.from_euler(Vector3(deg_to_rad(-30.0), 0, 0))
@@ -586,7 +594,13 @@ func _test_hinge_solver_bent_knee() -> bool:
 	var ankle_offset := bend * Vector3(0, -0.5, 0)
 	var ankle := Transform3D(Basis.IDENTITY, lower_leg.origin + ankle_offset)
 
-	var basis := MarionetteHingeSolver.solve(lower_leg, ankle, frame, true, hip)
+	# Pull the knee's motion target through the same dispatch the generator /
+	# validator use so the test tracks the convention defined in
+	# `solver_utils.anatomical_motion_target` (knee folds backward, opposite of
+	# elbow / hip / shoulder).
+	var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
+			&"LeftLowerLeg", BoneArchetype.Type.HINGE, frame)
+	var basis := MarionetteHingeSolver.solve(lower_leg, ankle, frame, true, hip, motion_target)
 	if not _basis_is_orthonormal(basis):
 		return _fail("hinge_solver_bent_knee", "non-orthonormal basis")
 	# Hinge axis (basis.x = flex) should align with the body lateral axis. In
@@ -596,10 +610,14 @@ func _test_hinge_solver_bent_knee() -> bool:
 	if dot_with_lateral < 0.99:
 		return _fail("hinge_solver_bent_knee",
 			"flex=%s, expected to align with world ±X (|dot|=%f)" % [basis.x, dot_with_lateral])
-	# Sign: the solver flips so flex.dot(limb_flex_axis) >= 0. limb_flex_axis
-	# for a left-side bone = -muscle_frame.right = +X. So basis.x ≈ +X.
-	if basis.x.dot(Vector3.RIGHT) < 0.0:
-		return _fail("hinge_solver_bent_knee", "flex points opposite to lateral_outward")
+	# Sign: anatomical knee flexion is posterior, so motion_target = -forward =
+	# +Z. flex = along × motion_target picks the side such that +flex rotates
+	# the calf backward. For along ≈ (0,-0.87,0.5), along × +Z ≈ (-0.87,0,0),
+	# i.e. basis.x points world -X for a left-side knee.
+	if basis.x.dot(Vector3.RIGHT) > 0.0:
+		return _fail("hinge_solver_bent_knee",
+			("flex=%s points anteriorly; knee flexion folds posteriorly so flex axis "
+			+ "should be world -X for a left-side bone") % basis.x)
 	return _ok("hinge_solver_bent_knee")
 
 
@@ -936,12 +954,23 @@ func _test_rom_defaults_phalanx_fallback() -> bool:
 		return _fail("rom_phalanx", "proximal abd_max=%f, expected 20°" % rad_to_deg(proximal.rom_max.z))
 
 	# The single "LeftToes" hinge bone (no per-toe phalanges in ARP-light rigs)
-	# shares the phalanx ROM by archetype fallback.
+	# shares the finger-phalanx ROM by archetype fallback.
 	var toes := BoneEntry.new()
 	toes.archetype = BoneArchetype.Type.HINGE
 	MarionetteRomDefaults.apply(toes, &"LeftToes")
 	if not is_equal_approx(toes.rom_max.x, deg_to_rad(80.0)):
 		return _fail("rom_phalanx", "Toes block flex_max=%f, expected 80°" % rad_to_deg(toes.rom_max.x))
+
+	# Toe IP joints (distal/intermediate phalanges of toes) get the broader
+	# range — dorsiflex matters for toe lift during gait.
+	for tn: StringName in [&"LeftBigToeDistal", &"LeftToe2Distal", &"LeftToe2Intermediate", &"RightToe5Distal"]:
+		var t := BoneEntry.new()
+		t.archetype = BoneArchetype.Type.HINGE
+		MarionetteRomDefaults.apply(t, tn)
+		if not is_equal_approx(t.rom_min.x, deg_to_rad(-30.0)):
+			return _fail("rom_phalanx", "%s flex_min=%f, expected -30°" % [tn, rad_to_deg(t.rom_min.x)])
+		if not is_equal_approx(t.rom_max.x, deg_to_rad(80.0)):
+			return _fail("rom_phalanx", "%s flex_max=%f, expected 80°" % [tn, rad_to_deg(t.rom_max.x)])
 	return _ok("rom_defaults_phalanx_fallback")
 
 
@@ -2034,16 +2063,35 @@ func _test_macro_legs_med_lat_axis_only() -> bool:
 
 
 func _test_macro_all_covers_every_mapped_bone() -> bool:
-	# all_abd_add should include EVERY region-mapped bone.
-	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_ALL_ABD_ADD)
+	# all_flex_ext is the unfiltered axis macro — should cover EVERY region-
+	# mapped bone (we use FLEX rather than ABD_ADD because ABD_ADD now
+	# excludes the SPINE region; spine bones don't have clinical
+	# medial/lateral or abduction/adduction in the limb sense).
+	var inf: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_ALL_FLEX_EXT)
 	var mapped: Array[StringName] = MarionetteBoneRegion.all_mapped_bones()
 	if inf.size() != mapped.size():
 		return _fail("macro_all", "inf size %d, mapped %d" % [inf.size(), mapped.size()])
 	for bn: StringName in mapped:
 		if not inf.has(bn):
 			return _fail("macro_all", "missing %s" % bn)
-		if not (inf[bn] as Vector3).is_equal_approx(Vector3(0, 0, 1)):
-			return _fail("macro_all", "%s coeff=%s expected (0,0,1)" % [bn, inf[bn]])
+		if not (inf[bn] as Vector3).is_equal_approx(Vector3(1, 0, 0)):
+			return _fail("macro_all", "%s coeff=%s expected (1,0,0)" % [bn, inf[bn]])
+	# Counterpart: ABD_ADD should match every mapped bone EXCEPT the SPINE +
+	# HEAD_NECK chain (Spine, Chest, UpperChest, Neck, Head). Catches
+	# regression if either exclusion is silently dropped. Middle finger /
+	# middle toe stay in the dict (they're region-mapped) but with Z=0 from
+	# `_apply_finger_toe_abd_overrides` — that's checked separately in
+	# `_test_macro_finger_toe_abd_excludes_middle`.
+	var inf_abd: Dictionary = MarionetteMacroPresets.influences_for(MarionetteMacroPresets.KEY_ALL_ABD_ADD)
+	for bn: StringName in mapped:
+		var region: int = MarionetteBoneRegion.region_for(bn)
+		var should_be_present: bool = (
+				region != MarionetteBoneRegion.Region.SPINE
+				and region != MarionetteBoneRegion.Region.HEAD_NECK)
+		if inf_abd.has(bn) != should_be_present:
+			return _fail("macro_all",
+					"%s in ABD_ADD: got %s, expected %s (region %d)" %
+					[bn, inf_abd.has(bn), should_be_present, region])
 	return _ok("macro_all_covers_every_mapped_bone")
 
 
@@ -2415,3 +2463,170 @@ func _test_bone_profile_generator_method_parity_template() -> bool:
 					"%s diverges by %.2f deg (threshold %.2f deg)" %
 					[bone_name, angle_deg, threshold])
 	return _ok("bone_profile_generator_method_parity_template")
+
+
+# ---------- BoneEntry.rest_anatomical_offset (canonical-anatomy ROM) ----------
+
+# Helper: build a synthetic HINGE entry with a calculated_anatomical_basis whose
+# +X column points along `flex_axis_world` once composed with `bone_world.basis`.
+# Used by the rest-offset tests below — they hand-pick parent/bone/child world
+# transforms and then set up an entry whose joint flex axis matches the
+# limb-plane normal, so _compute_rest_offset's sign extraction is deterministic.
+func _make_hinge_entry_with_world_flex(
+		bone_world: Transform3D,
+		flex_axis_world: Vector3) -> BoneEntry:
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.HINGE
+	# entry.calculated_anatomical_basis is in bone-local space; transform the
+	# requested world flex axis into bone-local. Bone rest basis is identity in
+	# our test fixtures, so this is the identity case but stays correct if a
+	# future fixture rolls the bone basis.
+	var local_x: Vector3 = bone_world.basis.inverse() * flex_axis_world
+	# Build a basis whose +X is local_x; +Y and +Z are arbitrary perpendiculars.
+	var ortho_y: Vector3 = MarionetteSolverUtils.perpendicular_to_axis_near(
+			local_x.normalized(), Vector3.UP)
+	var ortho_z: Vector3 = local_x.normalized().cross(ortho_y).normalized()
+	entry.calculated_anatomical_basis = Basis(local_x.normalized(), ortho_y, ortho_z)
+	entry.use_calculated_frame = true
+	return entry
+
+
+func _test_rest_offset_hinge_collinear_is_zero() -> bool:
+	# Parent at +Y, bone at origin, child along -Y. parent_along ≡ child_along
+	# (both point -Y from the bone). Bend axis is the zero vector → offset = 0.
+	var parent := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
+	var bone := Transform3D(Basis.IDENTITY, Vector3.ZERO)
+	var child := Transform3D(Basis.IDENTITY, Vector3(0.0, -1.0, 0.0))
+	var entry := _make_hinge_entry_with_world_flex(bone, Vector3.RIGHT)
+	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+			BoneArchetype.Type.HINGE, bone, child, parent, entry)
+	if not offset.is_equal_approx(Vector3.ZERO):
+		return _fail("rest_offset_hinge_collinear",
+				"collinear limb should yield zero offset, got %s" % offset)
+	return _ok("rest_offset_hinge_collinear_is_zero")
+
+
+func _test_rest_offset_hinge_a_pose_elbow_bend() -> bool:
+	# A-pose-style left elbow in the XY plane. parent_along (shoulder→elbow) =
+	# (1, -1, 0)/√2; child_along (elbow→wrist) = (1, -1.5, 0).normalized() —
+	# the forearm is folded ~14° anteriorly (toward muscle-frame +Z is N/A here
+	# since fixture is in XY only; the bend is purely in the limb plane). The
+	# joint flex axis we hand the entry is +Z (out of the plane), so a positive
+	# flex rotation moves the bone tip in the +X direction. The bend axis here
+	# (parent_along × child_along) lands along ±Z and we sign rest_offset.x
+	# accordingly. Magnitude must match the analytic angle within FP noise.
+	var shoulder := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.5, 0.0))
+	var elbow := Transform3D(Basis.IDENTITY, Vector3(0.5, 1.0, 0.0))
+	var wrist := Transform3D(Basis.IDENTITY, Vector3(0.9, 0.4, 0.0))
+	var parent_along: Vector3 = (elbow.origin - shoulder.origin).normalized()
+	var child_along: Vector3 = (wrist.origin - elbow.origin).normalized()
+	var expected_mag: float = acos(clampf(parent_along.dot(child_along), -1.0, 1.0))
+
+	var entry := _make_hinge_entry_with_world_flex(elbow, Vector3.BACK)
+	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+			BoneArchetype.Type.HINGE, elbow, wrist, shoulder, entry)
+	if absf(absf(offset.x) - expected_mag) > 1e-4:
+		return _fail("rest_offset_a_pose_elbow",
+				"|offset.x|=%f, expected %f" % [absf(offset.x), expected_mag])
+	if not is_equal_approx(offset.y, 0.0) or not is_equal_approx(offset.z, 0.0):
+		return _fail("rest_offset_a_pose_elbow",
+				"non-flex components should be zero, got (%f, %f)" %
+				[offset.y, offset.z])
+	return _ok("rest_offset_hinge_a_pose_elbow_bend")
+
+
+func _test_rest_offset_non_hinge_returns_zero() -> bool:
+	# BALL/SADDLE/SPINE/CLAVICLE bones leave rest_anatomical_offset at zero
+	# until the follow-up slice. Verify the generator helper returns zero for
+	# every non-HINGE archetype regardless of input geometry.
+	var parent := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
+	var bone := Transform3D(Basis.IDENTITY, Vector3(0.5, 0.5, 0.0))
+	var child := Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0))
+	var entry := _make_hinge_entry_with_world_flex(bone, Vector3.BACK)
+	var non_hinge: Array[int] = [
+		BoneArchetype.Type.BALL,
+		BoneArchetype.Type.SADDLE,
+		BoneArchetype.Type.SPINE_SEGMENT,
+		BoneArchetype.Type.CLAVICLE,
+		BoneArchetype.Type.PIVOT,
+		BoneArchetype.Type.ROOT,
+		BoneArchetype.Type.FIXED,
+	]
+	for arch: int in non_hinge:
+		var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+				arch, bone, child, parent, entry)
+		if not offset.is_equal_approx(Vector3.ZERO):
+			return _fail("rest_offset_non_hinge",
+					"archetype %s should return zero, got %s" %
+					[BoneArchetype.to_name(arch), offset])
+	return _ok("rest_offset_non_hinge_returns_zero")
+
+
+func _test_anatomical_pose_subtracts_rest_offset() -> bool:
+	# Slider value of `rest_offset` should land the bone exactly on rest pose
+	# (Quaternion.IDENTITY) regardless of which axis the offset is on.
+	var entry := BoneEntry.new()
+	entry.rest_anatomical_offset = Vector3(deg_to_rad(15.0), 0.0, 0.0)
+	var q := AnatomicalPose.bone_local_rotation(
+			entry, deg_to_rad(15.0), 0.0, 0.0)
+	if not q.is_equal_approx(Quaternion.IDENTITY):
+		return _fail("anatomical_pose_subtracts_offset",
+				"flex=15° with rest_offset.x=15° should give IDENTITY, got %s" % q)
+	# Mid-range slider: input flex = 90° canonical → joint angle = 75°.
+	var q_mid := AnatomicalPose.bone_local_rotation(
+			entry, deg_to_rad(90.0), 0.0, 0.0)
+	var expected_mid := Quaternion(Vector3(1.0, 0.0, 0.0), deg_to_rad(75.0))
+	if not q_mid.is_equal_approx(expected_mid):
+		return _fail("anatomical_pose_subtracts_offset",
+				"flex=90°−15° offset should be 75° around +X, got %s" % q_mid)
+	return _ok("anatomical_pose_subtracts_rest_offset")
+
+
+func _test_anatomical_pose_canonical_zero_at_offset() -> bool:
+	# Slider at canonical zero (flex=0) on a 15°-offset bone should rotate the
+	# bone *back* from rest by -15° around the joint's +X — that's the joint
+	# angle that takes the bone from rest to the canonical anatomical zero
+	# pose (e.g., a fully-straightened A-pose elbow).
+	var entry := BoneEntry.new()
+	entry.rest_anatomical_offset = Vector3(deg_to_rad(15.0), 0.0, 0.0)
+	var q := AnatomicalPose.bone_local_rotation(entry, 0.0, 0.0, 0.0)
+	var expected := Quaternion(Vector3(1.0, 0.0, 0.0), deg_to_rad(-15.0))
+	if not q.is_equal_approx(expected):
+		return _fail("anatomical_pose_canonical_zero",
+				"flex=0 with rest_offset.x=15° should be -15° around +X, got %s" % q)
+	return _ok("anatomical_pose_canonical_zero_at_offset")
+
+
+func _test_build_ragdoll_rom_shifted_by_rest_offset() -> bool:
+	# Build the synthetic ragdoll, manually set rest_offset on LeftUpperLeg's
+	# entry, rebuild, and confirm the joint constraint bounds shift by the
+	# negation of the offset on every axis. Catches regressions in the
+	# `_apply_joint_constraints` shift independently of the generator wiring.
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var leg := _find_bone(sim, "LeftUpperLeg")
+	var entry := leg.bone_entry
+	# Synthetic baseline already has all-zero offsets — set non-zero values on
+	# every axis so a missed shift on any axis fails the test.
+	var offset := Vector3(deg_to_rad(7.0), deg_to_rad(-3.0), deg_to_rad(11.0))
+	entry.rest_anatomical_offset = offset
+	# Re-bake constraints using the same code path as build_ragdoll.
+	Marionette._apply_joint_constraints(leg, entry)
+
+	var checks := {
+		"joint_constraints/x/angular_limit_lower": entry.rom_min.x - offset.x,
+		"joint_constraints/x/angular_limit_upper": entry.rom_max.x - offset.x,
+		"joint_constraints/y/angular_limit_lower": entry.rom_min.y - offset.y,
+		"joint_constraints/y/angular_limit_upper": entry.rom_max.y - offset.y,
+		"joint_constraints/z/angular_limit_lower": entry.rom_min.z - offset.z,
+		"joint_constraints/z/angular_limit_upper": entry.rom_max.z - offset.z,
+	}
+	for path: String in checks:
+		var got: float = leg.get(path)
+		var want: float = checks[path]
+		if not is_equal_approx(got, want):
+			m.free()
+			return _fail("rom_shifted_by_offset",
+					"%s = %f, expected %f (rest_offset shift)" % [path, got, want])
+	m.free()
+	return _ok("build_ragdoll_rom_shifted_by_rest_offset")

@@ -6,13 +6,18 @@ extends RefCounted
 #
 # A pure 1-DOF joint. When the limb has a meaningful bend at this joint the
 # rotation axis is the limb-plane normal: `parent_along × along`. Sign is
-# aligned so the bone tip moves anteriorly forward on +flex (anatomical
-# flexion takes wrist toward shoulder for elbow, calf toward thigh for knee
-# — both motions have a forward component starting from any non-overhead
-# pose).
+# aligned so the bone tip moves in the bone's anatomical motion-target
+# direction on +flex. Caller passes that direction in via `motion_target`,
+# which `solver_utils.anatomical_motion_target` resolves per bone:
+#   elbow / finger phalanges      — anteriorly forward (wrist toward shoulder)
+#   knee                          — anteriorly BACKWARD (foot toward butt;
+#                                   anatomical knee flexion folds posteriorly)
+#   toe phalanges                 — downward (curl)
+# So +flex is "the natural anatomical fold" for each of these, even though
+# the world direction differs — the knee is the carve-out.
 #
 # When the limb is straight at this joint (T-pose elbow, straight knee), the
-# cross degenerates and we fall back to `along × forward`. That formula
+# cross degenerates and we fall back to `along × motion_target`. That formula
 # gives sign-correct flex on both sides — same fix as Ball / Saddle.
 
 const _EPSILON: float = 1.0e-6

@@ -88,12 +88,6 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 # matcher-resolved permutation. Mutates `bone_profile` in place — Ctrl+S
 # to persist.
 @export_tool_button("Calibrate Profile from Skeleton") var _calibrate_btn: Callable = calibrate_bone_profile_from_skeleton
-# Parallel calibrate using the T-pose-direction-table method
-# (see docs/marionette/Marionette_Update_TPose_Calibration.md). Same disk-
-# persist path as the archetype button — only the target_basis derivation
-# differs. Run both on the same rig and compare via "Validate Joint Frames"
-# to decide which method produces fewer flipped/swapped/bad bones.
-@export_tool_button("Calibrate Profile (T-Pose)") var _calibrate_tpose_btn: Callable = calibrate_bone_profile_from_skeleton_tpose
 # Static-analysis diagnostic: per-bone comparison of the BoneEntry-baked
 # anatomical frame against the solver's recomputed target frame, both in
 # world space. Prints OK/FLIPPED/SWAPPED/BAD per bone so I can pinpoint
@@ -374,7 +368,41 @@ func _calibrate_with_method(method: BoneProfileGenerator.Method) -> void:
 		print("[Marionette]   preserved (in profile but not in rig): %s" % [report.preserved_bones])
 	if report.unmatched > 0:
 		print("[Marionette]   fallback bones (rig roll outside ±31° tolerance — calculated frame baked instead): %s" % [report.unmatched_bones])
+	# `BoneProfileGenerator.generate_with_method` deep-duplicates each
+	# preserved BoneEntry into a fresh dict (so ResourceSaver doesn't drop
+	# them on save), which orphans every reference any already-built
+	# MarionetteBone is holding via `bone.bone_entry`. The muscle-test
+	# slider widgets read `_bone.bone_entry` per pose-apply, so without
+	# this refresh they'd keep rotating around the pre-calibrate axes
+	# while the gizmos (which read `bone_profile.bones[name]` afresh
+	# each redraw) jump to the new ones — the exact split caused by
+	# Calibrate-after-Build-Ragdoll. Re-bake joint_rotation/limits too
+	# in case physics is exercised before a rebuild.
+	_refresh_marionette_bones_after_calibrate()
 	update_gizmos()
+
+
+# Walks every MarionetteBone under the simulator and re-points its
+# `bone_entry` at the freshly-calibrated entry in `bone_profile.bones`.
+# Also re-bakes `joint_rotation` and joint limits from the new entry so a
+# rebuilt ragdoll isn't required for physics correctness either.
+func _refresh_marionette_bones_after_calibrate() -> void:
+	var sim: PhysicalBoneSimulator3D = _find_simulator()
+	if sim == null:
+		return
+	for child: Node in sim.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var mb: MarionetteBone = child as MarionetteBone
+		var bone_name := StringName(mb.bone_name)
+		if not bone_profile.bones.has(bone_name):
+			continue
+		var fresh: BoneEntry = bone_profile.bones[bone_name]
+		if fresh == null:
+			continue
+		mb.bone_entry = fresh
+		mb.joint_rotation = fresh.anatomical_basis_in_bone_local().get_euler()
+		_apply_joint_constraints(mb, fresh)
 
 
 func validate_joint_frames() -> void:
@@ -506,10 +534,14 @@ func _apply_physics_bone_visibility() -> void:
 # `joint_constraints/<axis>/<limit_kind>_<bound>` — verified empirically via
 # get_property_list().
 static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> void:
-	# Anatomical ROM. Joint-axis map (post joint_rotation bake): x=flex,
-	# y=medial rotation, z=abduction.
-	var anatomical_min: Vector3 = entry.rom_min
-	var anatomical_max: Vector3 = entry.rom_max
+	# Anatomical ROM, shifted by `-rest_anatomical_offset` so canonical-anatomy
+	# bounds (rom_min/rom_max) map to joint-local Jolt limits. Joint identity
+	# is the rest pose orientation; canonical zero sits at joint angle
+	# `-rest_offset`, which is allowed only if `rom_min - rest_offset` reaches
+	# that low. Joint-axis map (post joint_rotation bake): x=flex, y=medial
+	# rotation, z=abduction.
+	var anatomical_min: Vector3 = entry.rom_min - entry.rest_anatomical_offset
+	var anatomical_max: Vector3 = entry.rom_max - entry.rest_anatomical_offset
 	for i: int in range(3):
 		var axis: String = ["x", "y", "z"][i]
 		var lower: float = anatomical_min[i]

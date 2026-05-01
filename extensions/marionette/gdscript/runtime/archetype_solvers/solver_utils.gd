@@ -95,8 +95,12 @@ static func limb_flex_axis(muscle_frame: MuscleFrame, _is_left_side: bool) -> Ve
 # downstream emotional-body composition reach intuitive poses with positive
 # flex coefficients:
 #
-#   Arms / legs / spine       — forward (shoulder flex, hip flex, trunk
-#                                forward bend, elbow / knee fold).
+#   Arms / spine / hip / elbow — forward (shoulder flex, hip flex, trunk
+#                                forward bend, elbow fold).
+#   Knee (LowerLeg)            — backward (anatomical knee flexion folds the
+#                                calf posteriorly toward the butt; the only
+#                                limb-hinge whose +flex direction is the
+#                                opposite of the limb's parent ball joint).
 #   Hand (wrist Saddle)       — down (palmar flex; from T-pose with palms
 #                                down, wrist drops). This also makes the
 #                                X / Z gizmo axes land in the body's
@@ -123,6 +127,13 @@ static func anatomical_motion_target(
 	# Ankle Saddle ("Foot" / "LeftFoot" / "RightFoot"): dorsiflex = toes-up.
 	if s.ends_with("Foot"):
 		return muscle_frame.up
+	# Knee Hinge ("LowerLeg"): anatomical flexion bends the calf POSTERIORLY
+	# (foot toward butt), opposite of the elbow / hip / shoulder flex-forward
+	# convention. The knee is the only mainstream limb hinge that bends the
+	# distal segment backward — every other limb-flex direction has a forward
+	# component from a standing pose, but knee flex is the carve-out.
+	if s.ends_with("LowerLeg"):
+		return -muscle_frame.forward
 	# Wrist Saddle: palmar flex direction = down.
 	if s.ends_with("Hand"):
 		return -muscle_frame.up

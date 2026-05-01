@@ -107,6 +107,38 @@ func _ready() -> void:
 	# the bone to its canonical T-pose immediately.
 	_restore_rest()
 	_build_ui()
+	_log_axis_diagnostic()
+
+
+# Prints, once per widget mount, what world-space axes each slider will
+# rotate the bone around. Use this when the gizmo and the visible motion
+# disagree: the printed axes are exactly what `set_bone_pose_rotation`
+# produces, so they're ground truth for "what the slider does." Compare
+# them against what the joint-limit gizmo's red/green/blue arrows point at
+# in the viewport — if they don't match, the bug is in the gizmo's basis
+# composition; if they do match, the rotation is doing exactly what the
+# gizmo claims and the disagreement is in your reading of the gizmo.
+#
+# `bone_global_pose_at_rest` = parent's *live* global * bone's REST local.
+# That's the frame the bone would have if the slider were back at zero —
+# the same frame `set_bone_pose_rotation(idx, _rest_rotation)` lands on,
+# and the same frame the slider's rotation axis is anchored in.
+func _log_axis_diagnostic() -> void:
+	if _bone == null or _bone.bone_entry == null:
+		return
+	var bone_rest_local: Transform3D = _skeleton.get_bone_rest(_bone_idx)
+	var parent_idx: int = _skeleton.get_bone_parent(_bone_idx)
+	var parent_global: Transform3D = Transform3D.IDENTITY
+	if parent_idx >= 0:
+		parent_global = _skeleton.get_bone_global_pose(parent_idx)
+	var bone_world_at_rest: Transform3D = parent_global * bone_rest_local
+	var ab: Basis = _bone.bone_entry.anatomical_basis_in_bone_local()
+	var flex_world: Vector3 = (bone_world_at_rest.basis * ab.x).normalized()
+	var rot_world: Vector3 = (bone_world_at_rest.basis * ab.y).normalized()
+	var abd_world: Vector3 = (bone_world_at_rest.basis * ab.z).normalized()
+	print("[Marionette/sliders] %s: flex(red)=%s  rot(green)=%s  abd(blue)=%s  use_calc=%s" %
+			[_bone.bone_name, flex_world, rot_world, abd_world,
+			_bone.bone_entry.use_calculated_frame])
 
 
 func _exit_tree() -> void:
@@ -171,10 +203,20 @@ func _add_axis_row(axis_idx: int, lo: float, hi: float, color: Color) -> HSlider
 	slider.min_value = lo
 	slider.max_value = hi
 	slider.step = _SLIDER_STEP_RAD
-	slider.value = 0.0
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.custom_minimum_size = Vector2(_SLIDER_MIN_WIDTH, 0)
 	slider.modulate = color
+	# Slider value is in canonical anatomy. The rest pose corresponds to
+	# `rest_anatomical_offset` (zero on T-pose rigs; non-zero on A-pose for
+	# bones whose rest deviates from canonical) — set the initial value with
+	# no_signal so the value_changed connect below doesn't fire `_apply_pose`
+	# while `_flex_slider`/`_rot_slider`/`_abd_slider` members are still
+	# unassigned (they're bound in `_build_ui` *after* `_add_axis_row` returns).
+	# That mid-init pose application would briefly drive the bone to canonical
+	# zero before the user touched anything.
+	var initial: float = _bone.bone_entry.rest_anatomical_offset[axis_idx]
+	slider.set_value_no_signal(initial)
+	value_label.text = "%.0f°" % rad_to_deg(initial)
 	slider.value_changed.connect(_on_slider_changed)
 	row.add_child(slider)
 
@@ -193,14 +235,20 @@ func _on_slider_changed(_v: float) -> void:
 # so this is idempotent — repeat calls always return to T-pose, regardless
 # of intervening pose modifications.
 func reset_to_rest() -> void:
+	# Slider value is in canonical anatomy; rest pose corresponds to
+	# `rest_anatomical_offset` (often zero, but not on A-pose rigs). Reset to
+	# the per-axis offset so the slider readout matches the bone's actual
+	# at-rest configuration, not canonical zero.
+	var rest_offset: Vector3 = _bone.bone_entry.rest_anatomical_offset
 	if _flex_slider != null:
-		_flex_slider.set_value_no_signal(0.0)
+		_flex_slider.set_value_no_signal(rest_offset.x)
+		_value_labels[_flex_slider].text = "%.0f°" % rad_to_deg(rest_offset.x)
 	if _rot_slider != null:
-		_rot_slider.set_value_no_signal(0.0)
+		_rot_slider.set_value_no_signal(rest_offset.y)
+		_value_labels[_rot_slider].text = "%.0f°" % rad_to_deg(rest_offset.y)
 	if _abd_slider != null:
-		_abd_slider.set_value_no_signal(0.0)
-	for slider: Object in _value_labels.keys():
-		_value_labels[slider].text = "0°"
+		_abd_slider.set_value_no_signal(rest_offset.z)
+		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(rest_offset.z)
 	_macro_offset = Vector3.ZERO
 	_restore_rest()
 

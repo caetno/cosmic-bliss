@@ -53,9 +53,14 @@ const _VERTEBRA_FLEX: Vector2 = Vector2(-10.0, 10.0)
 const _VERTEBRA_ROT: Vector2 = Vector2(-10.0, 10.0)
 const _VERTEBRA_ABD: Vector2 = Vector2(-10.0, 10.0)
 
-# Phalanx hinges: distal/intermediate finger and toe phalanges, plus the
-# single "Toes" hinge bone in profiles without per-toe phalanges.
+# Finger phalanx hinges (distal/intermediate). DIP/PIP have negligible
+# hyperextension — flex range is curl-only.
 const _PHALANX_HINGE_FLEX: Vector2 = Vector2(0.0, 80.0)
+
+# Toe IP joints (distal/intermediate phalanges). Negative side = dorsiflex
+# (toe lift, e.g., off the ground during gait); positive = plantarflex (curl).
+# Toes routinely lift, so unlike finger DIP/PIP they need real extension ROM.
+const _TOE_PHALANX_HINGE_FLEX: Vector2 = Vector2(-30.0, 80.0)
 
 # Proximal phalanx saddles: thumb metacarpal, finger MCP, toe MTP.
 const _PROXIMAL_PHALANX_FLEX: Vector2 = Vector2(0.0, 90.0)
@@ -104,8 +109,13 @@ static func _lookup(bone_name: StringName, archetype: BoneArchetype.Type) -> Arr
 				return [_ELBOW_FLEX, _ZERO, _ZERO]
 			if name.ends_with("LowerLeg"):
 				return [_KNEE_FLEX, _ZERO, _ZERO]
-			# All remaining humanoid hinges are phalanges (finger/toe distal
-			# and intermediate, plus the single "Toes" block bone).
+			# Toe IP joints (distal/intermediate phalanges) get a broader
+			# range than finger phalanges — dorsiflex matters for toes.
+			if (name.contains("Toe") or name.contains("Hallux")) \
+					and (name.ends_with("Distal") or name.ends_with("Intermediate")):
+				return [_TOE_PHALANX_HINGE_FLEX, _ZERO, _ZERO]
+			# Remaining hinges are finger phalanges and the "Toes" block bone
+			# (compound MTP in profiles without per-toe phalanges).
 			return [_PHALANX_HINGE_FLEX, _ZERO, _ZERO]
 		BoneArchetype.Type.SADDLE:
 			if name.ends_with("Hand"):

@@ -22,15 +22,10 @@ func _parse_begin(object: Object) -> void:
 	if bp == null:
 		return
 	var arch_btn := Button.new()
-	arch_btn.text = "Generate from Skeleton (Archetype)"
-	arch_btn.tooltip_text = "Existing path: muscle frame -> per-archetype solver -> matcher -> ROM defaults. Replaces existing entries."
+	arch_btn.text = "Generate from Skeleton"
+	arch_btn.tooltip_text = "Muscle frame -> per-archetype solver -> matcher -> ROM defaults. Replaces existing entries."
 	arch_btn.pressed.connect(_on_pressed.bind(bp, BoneProfileGenerator.Method.ARCHETYPE))
 	add_custom_control(arch_btn)
-	var tpose_btn := Button.new()
-	tpose_btn.text = "Generate from Skeleton (T-Pose)"
-	tpose_btn.tooltip_text = "Canonical T-pose along-direction lookup + single cross product. No archetype dispatch. Replaces existing entries."
-	tpose_btn.pressed.connect(_on_pressed.bind(bp, BoneProfileGenerator.Method.TPOSE))
-	add_custom_control(tpose_btn)
 
 
 func _on_pressed(bp: BoneProfile, method: BoneProfileGenerator.Method) -> void:

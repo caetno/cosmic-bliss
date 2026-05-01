@@ -139,25 +139,33 @@ const LABELS: Dictionary[StringName, String] = {
 	KEY_FINGER_OPEN_CLOSE: "Finger Open ↔ Close",
 	KEY_FINGER_IN_OUT: "Finger In ↔ Out",
 	# Within each group's section the section header gives region context, so
-	# the per-slider label is just the anatomical axis pair.
-	KEY_ALL_FLEX_EXT: "Flex ↔ Ext",
-	KEY_ALL_MED_LAT: "Med ↔ Lat",
-	KEY_ALL_ABD_ADD: "Abd ↔ Add",
-	KEY_ARMS_FLEX_EXT: "Flex ↔ Ext",
-	KEY_ARMS_MED_LAT: "Med ↔ Lat",
-	KEY_ARMS_ABD_ADD: "Abd ↔ Add",
-	KEY_LEGS_FLEX_EXT: "Flex ↔ Ext",
-	KEY_LEGS_MED_LAT: "Med ↔ Lat",
-	KEY_LEGS_ABD_ADD: "Abd ↔ Add",
-	KEY_HANDS_FLEX_EXT: "Flex ↔ Ext",
-	KEY_HANDS_MED_LAT: "Med ↔ Lat",
-	KEY_HANDS_ABD_ADD: "Abd ↔ Add",
-	KEY_FEET_FLEX_EXT: "Flex ↔ Ext",
-	KEY_FEET_MED_LAT: "Med ↔ Lat",
-	KEY_FEET_ABD_ADD: "Abd ↔ Add",
-	KEY_BODY_FLEX_EXT: "Flex ↔ Ext",
-	KEY_BODY_MED_LAT: "Med ↔ Lat",
-	KEY_BODY_ABD_ADD: "Abd ↔ Add",
+	# the per-slider label is just the anatomical axis pair. Order matches the
+	# per-bone slider widget (`marionette_bone_sliders.gd:50`): negative end
+	# (slider left) is the first word, positive end (slider right) is the
+	# second word. Anatomical convention has +X=flex, +Y=medial, +Z=abd, so
+	# right-of-zero is Flex / Med / Abd, left-of-zero is Ext / Lat / Add.
+	# Earlier labels read "Flex ↔ Ext" etc., which inverted that mapping
+	# against the per-bone widget — when the user dragged the macro to -1
+	# expecting "max Flex" they instead got "max Ext", because the sign
+	# convention always maps -1 to the negative-anatomical direction.
+	KEY_ALL_FLEX_EXT: "Ext ↔ Flex",
+	KEY_ALL_MED_LAT: "Lat ↔ Med",
+	KEY_ALL_ABD_ADD: "Add ↔ Abd",
+	KEY_ARMS_FLEX_EXT: "Ext ↔ Flex",
+	KEY_ARMS_MED_LAT: "Lat ↔ Med",
+	KEY_ARMS_ABD_ADD: "Add ↔ Abd",
+	KEY_LEGS_FLEX_EXT: "Ext ↔ Flex",
+	KEY_LEGS_MED_LAT: "Lat ↔ Med",
+	KEY_LEGS_ABD_ADD: "Add ↔ Abd",
+	KEY_HANDS_FLEX_EXT: "Ext ↔ Flex",
+	KEY_HANDS_MED_LAT: "Lat ↔ Med",
+	KEY_HANDS_ABD_ADD: "Add ↔ Abd",
+	KEY_FEET_FLEX_EXT: "Ext ↔ Flex",
+	KEY_FEET_MED_LAT: "Lat ↔ Med",
+	KEY_FEET_ABD_ADD: "Add ↔ Abd",
+	KEY_BODY_FLEX_EXT: "Ext ↔ Flex",
+	KEY_BODY_MED_LAT: "Lat ↔ Med",
+	KEY_BODY_ABD_ADD: "Add ↔ Abd",
 }
 
 # Anatomical axis index (matches Vector3 component / BoneEntry.rom_min layout):
@@ -172,6 +180,19 @@ const _REGIONS_LEGS: Array[int] = [MarionetteBoneRegion.Region.LEFT_LEG, Marione
 const _REGIONS_HANDS: Array[int] = [MarionetteBoneRegion.Region.LEFT_HAND, MarionetteBoneRegion.Region.RIGHT_HAND]
 const _REGIONS_FEET: Array[int] = [MarionetteBoneRegion.Region.LEFT_FOOT, MarionetteBoneRegion.Region.RIGHT_FOOT]
 const _REGIONS_BODY: Array[int] = [MarionetteBoneRegion.Region.SPINE, MarionetteBoneRegion.Region.HEAD_NECK]
+
+# Exclusion set for the Med/Lat and Abd/Add macros. Spinal segments
+# (Spine / Chest / UpperChest) and the head/neck chain (Neck / Head) don't
+# carry "medial/lateral rotation" or "abduction/adduction" in the clinical
+# limb sense — their Y-axis motion is axial twist (covered by Roll Left ↔
+# Right) and Z-axis motion is lateral flexion (covered by Left ↔ Right). A
+# macro that drove +Y or +Z on the spine + neck chain along with the limbs
+# bent the trunk and head in a way the user wasn't asking for, so those
+# bones are filtered out of the Med/Lat and Abd/Add tables.
+const _MED_LAT_ABD_ADD_EXCLUDE_REGIONS: Array[int] = [
+	MarionetteBoneRegion.Region.SPINE,
+	MarionetteBoneRegion.Region.HEAD_NECK,
+]
 
 
 # Returns coefficient table for the given macro key. Bone names absent from
@@ -210,12 +231,19 @@ static func _build_influences(key: StringName) -> Dictionary[StringName, Vector3
 		KEY_FINGER_IN_OUT:
 			return _finger_in_out()
 		# All-muscle axis macros: every region-mapped bone gets the axis coeff.
+		# Med/Lat and Abd/Add filter out spine segments — see
+		# `_MED_LAT_ABD_ADD_EXCLUDE_REGIONS` for the rationale. Add/Abd also
+		# applies the finger/toe fan-out post-process so the middle finger /
+		# middle toe sit out and lateral toes spread outward.
 		KEY_ALL_FLEX_EXT:
 			return _axis_for_regions([], _AXIS_FLEX)
 		KEY_ALL_MED_LAT:
-			return _axis_for_regions([], _AXIS_MED)
+			return _axis_for_regions([], _AXIS_MED, _MED_LAT_ABD_ADD_EXCLUDE_REGIONS)
 		KEY_ALL_ABD_ADD:
-			return _axis_for_regions([], _AXIS_ABD)
+			var d_all: Dictionary[StringName, Vector3] = _axis_for_regions(
+					[], _AXIS_ABD, _MED_LAT_ABD_ADD_EXCLUDE_REGIONS)
+			_apply_finger_toe_abd_overrides(d_all)
+			return d_all
 		KEY_ARMS_FLEX_EXT:
 			return _axis_for_regions(_REGIONS_ARMS, _AXIS_FLEX)
 		KEY_ARMS_MED_LAT:
@@ -233,19 +261,25 @@ static func _build_influences(key: StringName) -> Dictionary[StringName, Vector3
 		KEY_HANDS_MED_LAT:
 			return _axis_for_regions(_REGIONS_HANDS, _AXIS_MED)
 		KEY_HANDS_ABD_ADD:
-			return _axis_for_regions(_REGIONS_HANDS, _AXIS_ABD)
+			var d_hands: Dictionary[StringName, Vector3] = _axis_for_regions(
+					_REGIONS_HANDS, _AXIS_ABD)
+			_apply_finger_toe_abd_overrides(d_hands)
+			return d_hands
 		KEY_FEET_FLEX_EXT:
 			return _axis_for_regions(_REGIONS_FEET, _AXIS_FLEX)
 		KEY_FEET_MED_LAT:
 			return _axis_for_regions(_REGIONS_FEET, _AXIS_MED)
 		KEY_FEET_ABD_ADD:
-			return _axis_for_regions(_REGIONS_FEET, _AXIS_ABD)
+			var d_feet: Dictionary[StringName, Vector3] = _axis_for_regions(
+					_REGIONS_FEET, _AXIS_ABD)
+			_apply_finger_toe_abd_overrides(d_feet)
+			return d_feet
 		KEY_BODY_FLEX_EXT:
 			return _axis_for_regions(_REGIONS_BODY, _AXIS_FLEX)
 		KEY_BODY_MED_LAT:
-			return _axis_for_regions(_REGIONS_BODY, _AXIS_MED)
+			return _axis_for_regions(_REGIONS_BODY, _AXIS_MED, _MED_LAT_ABD_ADD_EXCLUDE_REGIONS)
 		KEY_BODY_ABD_ADD:
-			return _axis_for_regions(_REGIONS_BODY, _AXIS_ABD)
+			return _axis_for_regions(_REGIONS_BODY, _AXIS_ABD, _MED_LAT_ABD_ADD_EXCLUDE_REGIONS)
 	var empty: Dictionary[StringName, Vector3] = {}
 	return empty
 
@@ -271,15 +305,58 @@ static func keys_for_group(group: StringName) -> Array:
 # their scope automatically — including bones we add to the profile later.
 # Bones with zero ROM contribute nothing at compose time (apply_coefficient
 # bottoms out at 0), so locked / FIXED bones don't pollute the result.
-static func _axis_for_regions(region_filter: Array[int], axis: int) -> Dictionary[StringName, Vector3]:
+#
+# `exclude_regions` is an optional second filter applied AFTER `region_filter`:
+# bones whose region is in `exclude_regions` are dropped. Used by the Med/Lat
+# and Abd/Add macros to skip spinal segments, whose Y/Z axes are axial twist
+# and lateral flexion (semantically distinct from limb medial-rotation /
+# abduction).
+static func _axis_for_regions(
+		region_filter: Array[int],
+		axis: int,
+		exclude_regions: Array[int] = []) -> Dictionary[StringName, Vector3]:
 	var coeff := Vector3.ZERO
 	if axis >= 0 and axis < 3:
 		coeff[axis] = 1.0
 	var d: Dictionary[StringName, Vector3] = {}
 	for bone_name: StringName in MarionetteBoneRegion.all_mapped_bones():
-		if region_filter.is_empty() or region_filter.has(MarionetteBoneRegion.region_for(bone_name)):
-			d[bone_name] = coeff
+		var region: int = MarionetteBoneRegion.region_for(bone_name)
+		if not region_filter.is_empty() and not region_filter.has(region):
+			continue
+		if exclude_regions.has(region):
+			continue
+		d[bone_name] = coeff
 	return d
+
+
+# Post-processor for the abd/add region macros. Drops the middle finger
+# and middle toe (anatomical reference — they don't abduct), and flips the
+# Z coefficient sign on the lateral-side toes (Toe4 / Toe5) so they fan
+# OUT from the middle toe rather than all rotating in lockstep with the
+# medial-side toes (Hallux / Toe2). Hands keep their per-finger sign at
+# +1 across Index / Ring / Little / Thumb because the rig's per-bone
+# `mirror_abd` flags already make them fan apart correctly; explicit
+# signing here would over-correct.
+static func _apply_finger_toe_abd_overrides(d: Dictionary[StringName, Vector3]) -> void:
+	for side: String in ["Left", "Right"]:
+		# Anatomical reference bones — zero out the abd contribution.
+		var middle_keys: Array[StringName] = [
+			StringName("%sMiddleProximal" % side),
+			StringName("%sToe3Proximal" % side),
+		]
+		for bn: StringName in middle_keys:
+			if d.has(bn):
+				var v: Vector3 = d[bn]
+				d[bn] = Vector3(v.x, v.y, 0.0)
+		# Lateral-side toes — flip sign so they spread away from the middle.
+		var lateral_toe_keys: Array[StringName] = [
+			StringName("%sToe4Proximal" % side),
+			StringName("%sToe5Proximal" % side),
+		]
+		for bn: StringName in lateral_toe_keys:
+			if d.has(bn):
+				var v: Vector3 = d[bn]
+				d[bn] = Vector3(v.x, v.y, -v.z)
 
 
 # Maps a normalized signed value (slider × coeff) to an anatomical-axis
@@ -413,12 +490,14 @@ static func _finger_open_close() -> Dictionary[StringName, Vector3]:
 
 
 static func _finger_in_out() -> Dictionary[StringName, Vector3]:
-	# +1 = fingers spread apart (abduction at MCP / thumb metacarpal).
-	# Saddle joints carry the abduction DOF; intermediate / distal phalanges
-	# are pure hinges and don't participate.
+	# +1 = fingers spread apart (abduction at MCP / thumb metacarpal). Each
+	# finger fans out from the middle finger as the anatomical reference, so
+	# Middle is excluded — its abd contribution would compete with the
+	# others' fan-out direction. Index, Ring, Little, Thumb participate;
+	# intermediate / distal phalanges are pure HINGE and don't have abd ROM.
 	var d: Dictionary[StringName, Vector3] = {}
 	for side: String in ["Left", "Right"]:
 		d[StringName("%sThumbMetacarpal" % side)] = Vector3(0.0, 0.0, 1.0)
-		for finger: String in ["Index", "Middle", "Ring", "Little"]:
+		for finger: String in ["Index", "Ring", "Little"]:
 			d[StringName("%s%sProximal" % [side, finger])] = Vector3(0.0, 0.0, 1.0)
 	return d

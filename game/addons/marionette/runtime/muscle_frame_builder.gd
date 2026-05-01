@@ -24,6 +24,8 @@ extends RefCounted
 
 const _LEFT_HIP_BONE := &"LeftUpperLeg"
 const _RIGHT_HIP_BONE := &"RightUpperLeg"
+const _LEFT_FOOT_BONE := &"LeftFoot"
+const _RIGHT_FOOT_BONE := &"RightFoot"
 const _HEAD_BONE := &"Head"
 const _HIPS_BONE := &"Hips"
 
@@ -60,11 +62,11 @@ static func hip_midpoint(profile: SkeletonProfile, world_rests: Dictionary[Strin
 	return Vector3.ZERO
 
 
-static func build(profile: SkeletonProfile) -> MuscleFrame:
+static func build(profile: SkeletonProfile, forward_override: Vector3 = Vector3.ZERO) -> MuscleFrame:
 	if profile == null or profile.bone_size == 0:
 		return MuscleFrame.new()
 	var world_rests: Dictionary[StringName, Transform3D] = compute_world_rests(profile)
-	return _build_from_rests(world_rests)
+	return _build_from_rests(world_rests, forward_override)
 
 
 # Live-skeleton variant: walks the live Skeleton3D using the BoneMap to
@@ -78,16 +80,19 @@ static func build(profile: SkeletonProfile) -> MuscleFrame:
 static func build_from_skeleton(
 		skeleton: Skeleton3D,
 		profile: SkeletonProfile,
-		bone_map: BoneMap) -> MuscleFrame:
+		bone_map: BoneMap,
+		forward_override: Vector3 = Vector3.ZERO) -> MuscleFrame:
 	if skeleton == null or profile == null or bone_map == null:
 		return MuscleFrame.new()
 	var world_rests: Dictionary[StringName, Transform3D] = compute_skeleton_world_rests(skeleton, profile, bone_map)
-	return _build_from_rests(world_rests)
+	return _build_from_rests(world_rests, forward_override)
 
 
 # Internal: shared muscle-frame computation given a dictionary of accumulated
 # rest transforms keyed by canonical SkeletonProfile bone name.
-static func _build_from_rests(world_rests: Dictionary[StringName, Transform3D]) -> MuscleFrame:
+static func _build_from_rests(
+		world_rests: Dictionary[StringName, Transform3D],
+		forward_override: Vector3 = Vector3.ZERO) -> MuscleFrame:
 	var frame := MuscleFrame.new()
 	if not world_rests.has(_LEFT_HIP_BONE) or not world_rests.has(_RIGHT_HIP_BONE):
 		return frame
@@ -110,19 +115,55 @@ static func _build_from_rests(world_rests: Dictionary[StringName, Transform3D]) 
 		left = Vector3.RIGHT - up * Vector3.RIGHT.dot(up)
 	left = left.normalized()
 
-	# Right-hand rule: UP × LEFT yields a vector perpendicular to both.
-	# Whether the result points toward the character's anatomical front or
-	# back depends on the rig's orientation: the convention only fixes that
-	# (right, up, forward) is a consistent right-handed triple. The gizmo
-	# drawing code labels this vector "forward"; if your character ends up
-	# facing the opposite direction it's because their rig has a different
-	# facing convention than the SkeletonProfileHumanoid template.
+	# UP × LEFT yields a vector perpendicular to both. Sign depends on whether
+	# the rig labels its left/right hip bones from anatomy ("Left" = body-left)
+	# or from viewer perspective ("Left" = +X-on-screen, which is body-right
+	# when the character faces the camera). Without correction this lands at
+	# anatomical-back for half of common humanoid rigs.
 	var forward: Vector3 = up.cross(left).normalized()
+	if forward_override != Vector3.ZERO:
+		# User-supplied override takes precedence over autodetect.
+		var ovr: Vector3 = forward_override - up * forward_override.dot(up)
+		if ovr.length_squared() >= 1e-8:
+			forward = ovr.normalized()
+	else:
+		# Autodetect: probe the foot bones' bone-local +Y axis (Blender's
+		# along-bone direction in world space, i.e. ankle->toe). Foot Y points
+		# anatomical-forward regardless of which side they sit on, so it
+		# disambiguates the up×left sign without depending on hip-bone naming.
+		var probed: Vector3 = _probe_forward_from_feet(world_rests, up)
+		if probed != Vector3.ZERO and forward.dot(probed) < 0.0:
+			forward = -forward
 
 	frame.up = up
 	frame.right = -left
 	frame.forward = forward
 	return frame
+
+
+# Probe the foot bones' bone-local +Y axis (ankle -> toe under Blender's Y-
+# along-bone convention) and return the average, projected perpendicular to
+# `up`. Returns Vector3.ZERO when neither foot bone is in `world_rests`.
+static func _probe_forward_from_feet(
+		world_rests: Dictionary[StringName, Transform3D],
+		up: Vector3) -> Vector3:
+	var sum: Vector3 = Vector3.ZERO
+	var count: int = 0
+	for foot_name: StringName in [_LEFT_FOOT_BONE, _RIGHT_FOOT_BONE]:
+		if not world_rests.has(foot_name):
+			continue
+		var foot_y: Vector3 = world_rests[foot_name].basis.y
+		if foot_y.length_squared() < 1e-8:
+			continue
+		sum += foot_y.normalized()
+		count += 1
+	if count == 0:
+		return Vector3.ZERO
+	var avg: Vector3 = sum / float(count)
+	avg = avg - up * avg.dot(up)
+	if avg.length_squared() < 1e-8:
+		return Vector3.ZERO
+	return avg.normalized()
 
 
 # Returns accumulated rest transforms for every SkeletonProfile bone that has
@@ -198,4 +239,54 @@ static func compute_skeleton_global_poses(
 			else:
 				continue
 		result[profile_name] = skeleton.get_bone_global_pose(i)
+	return result
+
+
+# "Rest in current parent's frame" — for each bone, returns
+# `parent_global_pose_LIVE * bone_rest_LOCAL`, i.e. where the bone would sit
+# if it were at rest given the parent's *current* pose.
+#
+# Use this for gizmos that should follow the parent when the parent moves
+# (so an elbow's ROM wedge tracks the upper arm) but stay still when the
+# bone itself rotates (so the calf rotates *through* a stationary knee
+# wedge). Authoring tripods (which show "where the bone is right now")
+# stick with `compute_skeleton_global_poses` instead.
+#
+# Walks bones in skeleton index order — Skeleton3D guarantees parent-first,
+# so a single forward pass accumulates parent globals as we go. Same
+# BoneMap name-resolution as the other compute_* helpers.
+static func compute_skeleton_rest_in_live_parent(
+		skeleton: Skeleton3D,
+		profile: SkeletonProfile,
+		bone_map: BoneMap) -> Dictionary[StringName, Transform3D]:
+	var result: Dictionary[StringName, Transform3D] = {}
+	if skeleton == null or profile == null or bone_map == null:
+		return result
+	var profile_names: Dictionary[StringName, bool] = {}
+	for i in range(profile.bone_size):
+		profile_names[profile.get_bone_name(i)] = true
+	var bone_count: int = skeleton.get_bone_count()
+	# Per-skeleton-index "rest in live parent" cache. We need it for every
+	# bone (not just profile-mapped ones) so a non-mapped intermediate bone
+	# still propagates the live transform downstream.
+	var skel_rest_in_live_parent: Array[Transform3D] = []
+	skel_rest_in_live_parent.resize(bone_count)
+	for i in range(bone_count):
+		var rest_local: Transform3D = skeleton.get_bone_rest(i)
+		var parent: int = skeleton.get_bone_parent(i)
+		if parent < 0:
+			skel_rest_in_live_parent[i] = rest_local
+		else:
+			# parent's *live* global, not rest-in-live-parent — once we hit a
+			# moved ancestor, every descendant inherits that motion.
+			skel_rest_in_live_parent[i] = skeleton.get_bone_global_pose(parent) * rest_local
+	for i in range(bone_count):
+		var skel_name: StringName = skeleton.get_bone_name(i)
+		var profile_name: StringName = bone_map.find_profile_bone_name(skel_name)
+		if profile_name == &"":
+			if profile_names.has(skel_name):
+				profile_name = skel_name
+			else:
+				continue
+		result[profile_name] = skel_rest_in_live_parent[i]
 	return result

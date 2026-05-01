@@ -219,6 +219,8 @@ static func generate_with_method(
 				outcome_label = "FALLBACK score=%.2f (calculated frame baked into joint_rotation)" % match_result.score
 
 		MarionetteRomDefaults.apply(entry, bone_name)
+		entry.rest_anatomical_offset = _compute_rest_offset(
+				archetype, bone_world, child_world, parent_world, entry)
 
 		entries[bone_name] = entry
 		report.generated += 1
@@ -234,6 +236,47 @@ static func generate_with_method(
 					report.preserved, report.skipped, bone_profile.bones.size()])
 
 	return report
+
+
+# How far the rest pose deviates from canonical anatomical zero, expressed
+# in joint-frame (flex, medial_rot, abduction) radians. See
+# `BoneEntry.rest_anatomical_offset` for the runtime contract.
+#
+# HINGE: canonical zero = parent collinear with child (straight limb).
+#   Rest deviates by the limb-plane bend angle, signed by the joint frame's
+#   +flex axis. Other archetypes return Vector3.ZERO for now — for T-pose rigs
+#   that's already the right answer; the BALL/SADDLE generalization is a
+#   follow-up slice.
+static func _compute_rest_offset(
+		archetype: int,
+		bone_world: Transform3D,
+		child_world: Transform3D,
+		parent_world: Transform3D,
+		entry: BoneEntry) -> Vector3:
+	if archetype != BoneArchetype.Type.HINGE:
+		return Vector3.ZERO
+	var parent_along_v: Vector3 = bone_world.origin - parent_world.origin
+	if parent_along_v.length_squared() < 1e-9:
+		return Vector3.ZERO
+	var parent_along: Vector3 = parent_along_v.normalized()
+	var child_along: Vector3 = MarionetteSolverUtils.along_bone_direction(bone_world, child_world)
+	if child_along == Vector3.ZERO:
+		return Vector3.ZERO
+	var bend_axis: Vector3 = parent_along.cross(child_along)
+	var bend_mag_sq: float = bend_axis.length_squared()
+	if bend_mag_sq < 1e-12:
+		return Vector3.ZERO  # collinear — already canonical
+	var alpha_mag: float = acos(clampf(parent_along.dot(child_along), -1.0, 1.0))
+	# Joint frame's +flex axis (in world coords at rest) is the basis.x of the
+	# entry's anatomical basis composed with the bone's rest world basis.
+	# entry.calculated_anatomical_basis is the bone-local form; world-space
+	# flex axis = bone_world.basis * entry.calculated_anatomical_basis.x.
+	var flex_axis_world: Vector3 = (
+			bone_world.basis * entry.calculated_anatomical_basis.x).normalized()
+	var alpha_sign: float = signf(bend_axis.dot(flex_axis_world))
+	if alpha_sign == 0.0:
+		alpha_sign = 1.0
+	return Vector3(alpha_sign * alpha_mag, 0.0, 0.0)
 
 
 # Resolve the bone's child world-rest transform: explicit tail bone first,
