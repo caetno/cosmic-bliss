@@ -224,6 +224,15 @@ func build_ragdoll() -> void:
 		var bone := _build_bone(skel, i, skel_bone_name, entry, fallback_mass)
 		sim.add_child(bone)
 		_set_owner_for_editor(bone)
+		# Capsule collider as a separate child so its owner can be set after the
+		# bone is parented — without this, scene-save strips the collider (the
+		# original P3 path created the collider inside _build_bone, before the
+		# bone was in-tree, so owner assignment was a no-op and the .tscn went
+		# out without colliders). Bones with no collider don't collide at all
+		# at runtime, regardless of layer/mask.
+		var collider: CollisionShape3D = _make_capsule_collider(_bone_length(skel, i))
+		bone.add_child(collider)
+		_set_owner_for_editor(collider)
 		_apply_joint_constraints(bone, entry)
 		bones_by_skel_index[i] = bone
 		if state != BoneStateProfile.State.KINEMATIC:
@@ -231,14 +240,11 @@ func build_ragdoll() -> void:
 
 	_dynamic_bone_names = dynamic_bone_names
 
-	# Pair-wise collision exclusions via PhysicsBody3D.add_collision_exception_with.
-	# (PhysicalBoneSimulator3D's older API was a global exception list; pair-wise
-	# fits better here.)
-	for pair: Vector2i in exclusions.excluded_pairs:
-		var a: MarionetteBone = bones_by_skel_index.get(pair.x)
-		var b: MarionetteBone = bones_by_skel_index.get(pair.y)
-		if a != null and b != null:
-			a.add_collision_exception_with(b)
+	# Collision exclusions are intentionally NOT applied here. add_collision_exception_with
+	# writes runtime-only state on PhysicsBody3D (no serializable property exposes it),
+	# so any call here would be lost on scene save. start_simulation() re-applies the
+	# full exclusion set every time it's called, which covers both editor preview and
+	# play-mode runs without scene-save coupling.
 
 	# Drive editor gizmos from the live skeleton: pose changes (slider drags,
 	# animation, IK) emit pose_updated, which queues a gizmo redraw so the ROM
@@ -280,12 +286,114 @@ func start_simulation() -> void:
 	if sim == null:
 		push_error("Marionette.start_simulation: no ragdoll built")
 		return
-	if _dynamic_bone_names.is_empty():
-		# Falling back to the no-arg form starts every bone — the user likely
-		# wants that if they didn't customize state at build time.
+	var skel: Skeleton3D = resolve_skeleton()
+	if skel == null:
+		push_error("Marionette.start_simulation: skeleton not resolvable from %s" % skeleton)
+		return
+	# Self-heal runtime-only state on every start. Capsule colliders and
+	# pair-wise collision exclusions are both unserializable — the colliders
+	# can be persisted now (post owner-bug fix) but old scenes built before
+	# the fix have none, and exclusions never persist. Both passes are
+	# idempotent: existing colliders are skipped, exceptions are no-ops on
+	# repeat calls.
+	_ensure_runtime_colliders(sim, skel)
+	_apply_collision_exclusions(sim, skel)
+
+	# Pick which bones go dynamic. `_dynamic_bone_names` is populated by
+	# build_ragdoll but lives in @tool memory only — it's empty after a
+	# scene reload, even though the simulator hierarchy is intact. In that
+	# case, derive the list from each bone's BoneEntry archetype + the active
+	# BoneStateProfile so FIXED (jaw/eyes) and KINEMATIC bones stay still
+	# instead of becoming dynamic when the user hits play.
+	var dynamic: Array[StringName] = _dynamic_bone_names
+	if dynamic.is_empty():
+		dynamic = _derive_dynamic_bone_names(sim)
+	if dynamic.is_empty():
 		sim.physical_bones_start_simulation()
 	else:
-		sim.physical_bones_start_simulation(_dynamic_bone_names)
+		sim.physical_bones_start_simulation(dynamic)
+
+
+# Walks `sim` for MarionetteBones missing a CollisionShape3D child and
+# attaches a capsule sized to the bone length. Cheap (~80 bones) and
+# idempotent; covers scenes saved before the owner-bug fix.
+func _ensure_runtime_colliders(sim: PhysicalBoneSimulator3D, skel: Skeleton3D) -> void:
+	for child: Node in sim.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var bone: MarionetteBone = child
+		if _has_collision_shape_child(bone):
+			continue
+		var skel_index: int = skel.find_bone(bone.bone_name)
+		if skel_index < 0:
+			continue
+		bone.add_child(_make_capsule_collider(_bone_length(skel, skel_index)))
+
+
+static func _has_collision_shape_child(node: Node) -> bool:
+	for child: Node in node.get_children():
+		if child is CollisionShape3D:
+			return true
+	return false
+
+
+# Re-applies the configured CollisionExclusionProfile (or parent-child
+# defaults if none is set) at runtime. add_collision_exception_with is
+# runtime-only state on PhysicsBody3D, so this must run every time
+# simulation starts. Idempotent — repeat calls add the same exception
+# pairs without effect.
+func _apply_collision_exclusions(sim: PhysicalBoneSimulator3D, skel: Skeleton3D) -> void:
+	var exclusions: CollisionExclusionProfile = collision_exclusion_profile
+	if exclusions == null:
+		exclusions = CollisionExclusionProfile.parent_child_defaults(skel)
+	# Index MarionetteBones by skeleton bone index so we can resolve the
+	# profile's Vector2i pairs in one pass.
+	var by_skel_index: Dictionary[int, MarionetteBone] = {}
+	for child: Node in sim.get_children():
+		if child is MarionetteBone:
+			var idx: int = skel.find_bone((child as MarionetteBone).bone_name)
+			if idx >= 0:
+				by_skel_index[idx] = child
+	# Profile-driven pairs first.
+	for pair: Vector2i in exclusions.excluded_pairs:
+		var a: MarionetteBone = by_skel_index.get(pair.x)
+		var b: MarionetteBone = by_skel_index.get(pair.y)
+		if a != null and b != null:
+			a.add_collision_exception_with(b)
+	# Always-applied digit-sibling pairs. Adjacent fingers / toes touch
+	# when the hand or foot closes, and without these pairs the per-phalanx
+	# capsules push apart and freeze the digit chain. Cheap (~100 pairs
+	# total) and never wrong for a humanoid rig — there is no use case for
+	# leaving them out, so this isn't a profile flag.
+	for pair: Vector2i in CollisionExclusionProfile.digit_sibling_exclusions(skel):
+		var a: MarionetteBone = by_skel_index.get(pair.x)
+		var b: MarionetteBone = by_skel_index.get(pair.y)
+		if a != null and b != null:
+			a.add_collision_exception_with(b)
+
+
+# Mirrors the dynamic/kinematic split logic from `build_ragdoll` so a
+# freshly-loaded scene gets the same simulation membership without needing
+# the cached list.
+func _derive_dynamic_bone_names(sim: PhysicalBoneSimulator3D) -> Array[StringName]:
+	var states: BoneStateProfile = bone_state_profile
+	if states == null and bone_profile != null:
+		states = BoneStateProfile.default_for_skeleton_profile(bone_profile.skeleton_profile)
+	var dynamic: Array[StringName] = []
+	for child: Node in sim.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var bone: MarionetteBone = child
+		if bone.bone_entry == null:
+			continue
+		if bone.bone_entry.archetype == BoneArchetype.Type.FIXED:
+			continue
+		if states != null:
+			var profile_name: StringName = _resolve_profile_name(StringName(bone.bone_name))
+			if profile_name != &"" and states.get_state(profile_name) == BoneStateProfile.State.KINEMATIC:
+				continue
+		dynamic.append(StringName(bone.bone_name))
+	return dynamic
 
 
 # Stops simulation; bones revert to kinematic-follows-skeleton.
@@ -487,23 +595,6 @@ func _build_bone(
 	# basis instead, so non-T-pose rigs work without re-export.
 	bone.joint_rotation = entry.anatomical_basis_in_bone_local().get_euler()
 
-	# Capsule sized to bone length, oriented along bone-local +Y (the ARP /
-	# Blender convention; Godot's CapsuleShape3D defaults to local Y).
-	var bone_length: float = _bone_length(skel, skel_index)
-	var capsule := CapsuleShape3D.new()
-	capsule.radius = max(bone_length * 0.18, 0.02)
-	# Capsule height = full extent including hemispherical caps; subtract a
-	# bit so adjacent bones' capsules don't perma-overlap at joint origins.
-	capsule.height = max(bone_length * 0.9, 2.0 * capsule.radius + 0.01)
-	var collider := CollisionShape3D.new()
-	collider.shape = capsule
-	collider.position = Vector3(0.0, bone_length * 0.5, 0.0)
-	# Hide the editor wireframe by default — at ~80 capsules the stack is
-	# unreadable. Visibility is purely cosmetic; physics uses the shape RID.
-	# Toggle on per-bone in the inspector to inspect individual colliders.
-	collider.visible = false
-	bone.add_child(collider)
-
 	# Mass: per-bone fraction if authored; else the uniform fallback.
 	bone.mass = bone_profile.total_mass * entry.mass_fraction if entry.mass_fraction > 0.0 else fallback_mass
 
@@ -561,6 +652,36 @@ static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> 
 		bone.set("joint_constraints/%s/linear_limit_enabled" % axis, true)
 		bone.set("joint_constraints/%s/linear_limit_lower" % axis, 0.0)
 		bone.set("joint_constraints/%s/linear_limit_upper" % axis, 0.0)
+
+
+# Capsule sized to bone length, oriented along bone-local +Y (the ARP /
+# Blender convention; Godot's CapsuleShape3D defaults to local Y). Pulled
+# out of `_build_bone` so the same shape is constructed identically by
+# build-time persistence and runtime self-heal (`_ensure_runtime_colliders`).
+#
+# Sizing rationale:
+#   radius coefficient 0.12 — makes upper-arm/leg capsules ~3.5 cm radius
+#       (7 cm diameter), which is roughly anatomical without being so fat
+#       that grandparent↔grandchild pairs overlap at joint corners.
+#   minimum radius 0.005 (5 mm) — the previous 2 cm floor pinned every
+#       short bone (finger distal, toe distal, all phalanges) to a 4 cm
+#       diameter capsule, which is wider than the actual digit. Adjacent
+#       digits then collided regardless of digit-sibling exclusions and
+#       blew the hand/foot apart. 5 mm is thin but doesn't explode.
+static func _make_capsule_collider(bone_length: float) -> CollisionShape3D:
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = max(bone_length * 0.12, 0.005)
+	# Capsule height = full extent including hemispherical caps; subtract a
+	# bit so adjacent bones' capsules don't perma-overlap at joint origins.
+	capsule.height = max(bone_length * 0.9, 2.0 * capsule.radius + 0.01)
+	var collider := CollisionShape3D.new()
+	collider.shape = capsule
+	collider.position = Vector3(0.0, bone_length * 0.5, 0.0)
+	# Hide the editor wireframe by default — at ~80 capsules the stack is
+	# unreadable. Visibility is purely cosmetic; physics uses the shape RID.
+	# Toggle on per-bone in the inspector to inspect individual colliders.
+	collider.visible = false
+	return collider
 
 
 # Bone length = distance to first listed child bone in the skeleton, else a

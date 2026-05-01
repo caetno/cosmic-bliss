@@ -43,3 +43,70 @@ static func parent_child_defaults(skel: Skeleton3D, include_siblings: bool = fal
 # True if the named bone is on the disabled list (compared by canonical name).
 func is_disabled(bone_name: StringName) -> bool:
 	return disabled_bones.has(String(bone_name))
+
+
+# Returns within-appendage collision exclusion pairs for the rig's hands
+# and feet. Each hand and foot is treated as one closed group: the Hand
+# bone plus all 15 finger phalanges, and the Foot bone plus all 14 toe
+# phalanges. Every pair within a group is excluded.
+#
+# This is broader than just cross-digit (Index ↔ Middle) — it also covers:
+#   * grandparent ↔ grandchild        (Hand ↔ ProximalIntermediate)
+#   * great-grandparent ↔ great-grandchild (Hand ↔ ProximalDistal)
+#   * within-finger non-parent-child (Index_Proximal ↔ Index_Distal)
+# All of which can overlap as soon as a hand closes or a foot curls.
+# Without these, the per-phalanx capsules shove each other apart and the
+# digit chain explodes.
+#
+# Cost: 16² / 2 = 120 pairs per hand × 2 = 240, plus 15² / 2 = 105 per
+# foot × 2 = 210. ~450 pairs total — negligible against the 80-bone rig.
+# Bones missing from the rig (e.g. a profile without Toe5) are silently
+# skipped via find_bone returning -1.
+static func digit_sibling_exclusions(skel: Skeleton3D) -> Array[Vector2i]:
+	var pairs: Array[Vector2i] = []
+	if skel == null:
+		return pairs
+	var groups: Array[PackedStringArray] = [
+		PackedStringArray([
+			"LeftHand",
+			"LeftThumbMetacarpal", "LeftThumbProximal", "LeftThumbDistal",
+			"LeftIndexProximal", "LeftIndexIntermediate", "LeftIndexDistal",
+			"LeftMiddleProximal", "LeftMiddleIntermediate", "LeftMiddleDistal",
+			"LeftRingProximal", "LeftRingIntermediate", "LeftRingDistal",
+			"LeftLittleProximal", "LeftLittleIntermediate", "LeftLittleDistal",
+		]),
+		PackedStringArray([
+			"RightHand",
+			"RightThumbMetacarpal", "RightThumbProximal", "RightThumbDistal",
+			"RightIndexProximal", "RightIndexIntermediate", "RightIndexDistal",
+			"RightMiddleProximal", "RightMiddleIntermediate", "RightMiddleDistal",
+			"RightRingProximal", "RightRingIntermediate", "RightRingDistal",
+			"RightLittleProximal", "RightLittleIntermediate", "RightLittleDistal",
+		]),
+		PackedStringArray([
+			"LeftFoot",
+			"LeftBigToeProximal", "LeftBigToeDistal",
+			"LeftToe2Proximal", "LeftToe2Intermediate", "LeftToe2Distal",
+			"LeftToe3Proximal", "LeftToe3Intermediate", "LeftToe3Distal",
+			"LeftToe4Proximal", "LeftToe4Intermediate", "LeftToe4Distal",
+			"LeftToe5Proximal", "LeftToe5Intermediate", "LeftToe5Distal",
+		]),
+		PackedStringArray([
+			"RightFoot",
+			"RightBigToeProximal", "RightBigToeDistal",
+			"RightToe2Proximal", "RightToe2Intermediate", "RightToe2Distal",
+			"RightToe3Proximal", "RightToe3Intermediate", "RightToe3Distal",
+			"RightToe4Proximal", "RightToe4Intermediate", "RightToe4Distal",
+			"RightToe5Proximal", "RightToe5Intermediate", "RightToe5Distal",
+		]),
+	]
+	for group: PackedStringArray in groups:
+		var indices: Array[int] = []
+		for n: String in group:
+			var idx: int = skel.find_bone(n)
+			if idx >= 0:
+				indices.append(idx)
+		for i in range(indices.size()):
+			for j in range(i + 1, indices.size()):
+				pairs.append(Vector2i(indices[i], indices[j]))
+	return pairs

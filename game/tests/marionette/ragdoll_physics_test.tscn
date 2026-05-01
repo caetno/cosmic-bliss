@@ -1,0 +1,53 @@
+[gd_scene format=3 uid="uid://lqma64455ql7"]
+
+[ext_resource type="PackedScene" uid="uid://ciceqo5588ffo" path="res://tests/marionette/kasumi/kasumi.tscn" id="1_kasumi"]
+[ext_resource type="Script" uid="uid://b8xfihw5b5ip5" path="res://tests/marionette/ragdoll_physics_test.gd" id="2_test"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_horizon_color = Color(0.65, 0.7, 0.78, 1)
+ground_bottom_color = Color(0.2, 0.18, 0.16, 1)
+ground_horizon_color = Color(0.45, 0.42, 0.4, 1)
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 2
+sky = SubResource("Sky_env")
+ambient_light_source = 3
+tonemap_mode = 2
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_floor"]
+size = Vector3(20, 0.4, 20)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
+albedo_color = Color(0.55, 0.55, 0.58, 1)
+roughness = 0.85
+
+[sub_resource type="BoxMesh" id="BoxMesh_floor"]
+size = Vector3(20, 0.4, 20)
+
+[node name="RagdollPhysicsTest" type="Node3D" unique_id=835304051]
+script = ExtResource("2_test")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=364847666]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1148715345]
+transform = Transform3D(0.5, -0.7071, 0.5, 0, 0.7071, 0.7071, -0.866, -0.3535, 0.3535, 0, 6, 0)
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="." unique_id=642546906]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Floor" unique_id=794175312]
+shape = SubResource("BoxShape3D_floor")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Floor" unique_id=1293021073]
+material_override = SubResource("StandardMaterial3D_floor")
+mesh = SubResource("BoxMesh_floor")
+
+[node name="Kasumi" parent="." unique_id=1935670755 instance=ExtResource("1_kasumi")]
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=981554518]
+transform = Transform3D(1, 0, 0, 0, 0.97, 0.247, 0, -0.247, 0.97, 0, 1.7, 3)
