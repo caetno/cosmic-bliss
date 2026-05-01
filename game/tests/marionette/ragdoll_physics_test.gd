@@ -79,10 +79,17 @@ const _FALLBACK_TARGET: Vector3 = Vector3(0.0, 1.0, 0.0)
 const _TETHER_OMEGA: float = 8.0
 const _TETHER_DAMPING_RATIO: float = 1.0
 
-# Drag-manipulator spring (LMB held). Higher ω than tethers so the bone
-# tracks the cursor responsively; same critical-damping convention.
-const _DRAG_OMEGA: float = 14.0
+# Drag-manipulator spring (LMB held). ω chosen low (6) so per-tick spring
+# impulses on a 50 g finger stay in a stable range; ω=14 with tiny mass
+# created spring forces the integrator couldn't follow on fast cursor flicks.
+const _DRAG_OMEGA: float = 6.0
 const _DRAG_DAMPING_RATIO: float = 1.0
+# Hard cap on per-tick drag impulse magnitude. A fast cursor flick produces
+# `displacement * k` that can hit hundreds of N on small bones; clamping
+# here trades responsiveness on extreme drags for guaranteed integrator
+# stability. Tune up if drag feels mushy, down if a flick still launches
+# fingers across the room.
+const _DRAG_MAX_IMPULSE_PER_TICK: float = 1.0
 
 # Drop-test parameters. Character lifts to 5 m with a uniform-random
 # orientation; gravity is forced to 1.0 so the fall reads naturally.
@@ -94,7 +101,10 @@ const _DROP_GRAVITY_SCALE: float = 1.0
 # wobble); lower values give more lively response. Damp mode is forced to
 # REPLACE so the slider value is authoritative — without that, the project
 # default (or Area3D damp) compounds on top.
-const _DEFAULT_BONE_DAMP: float = 0.5
+# 5.0 chosen from ragdoll_tuner findings: with anatomical mass + no joint
+# spring, body damp 5–15 keeps the rig stable under random per-bone
+# impulses up to ~1 N·s. See extensions/marionette/tests/ragdoll_tuner.gd.
+const _DEFAULT_BONE_DAMP: float = 5.0
 
 # Slider groups for live-tuning angular+linear damp on whole regions.
 # Each group lights up a slider in the right-hand tuning panel; moving
@@ -200,6 +210,48 @@ var _capsule_radius_mul: float = 1.0
 # Reset / Drop Test so the state survives sim restarts.
 var _bone_collisions_enabled: bool = false
 
+# Joint angular spring state — applied to all 3 axes of every dynamic
+# bone's 6DOF joint. Defaults to OFF based on ragdoll_tuner findings:
+# under Jolt, even modest spring stiffness amplifies through the chain
+# and explodes within ~10s. Spring-on behaves like a rigid statue (the
+# chain barely moves) which isn't useful ragdoll behavior either.
+# Toggle on via the Joint section to experiment, but don't expect it to
+# stabilize anything in this physics backend.
+var _joint_spring_enabled: bool = false
+var _joint_spring_stiffness: float = 5.0
+var _joint_spring_damping: float = 0.5
+# Limit softness/damping: how the 6DOF angular limits behave at the
+# boundary. Softness < 1.0 makes the limit spongy instead of perfectly
+# rigid; damping > 0 bleeds approach velocity into the limit.
+var _joint_limit_softness: float = 0.5
+var _joint_limit_damping: float = 1.0
+const _JOINT_AXES: Array[String] = ["x", "y", "z"]
+
+# Mass distribution. Per-bone CoM-style values in kg; bones not in the
+# table fall back to `_ANATOMICAL_DEFAULT_MASS` (covers all the small
+# finger/toe phalanges). Sums to ~74 kg before the scale slider.
+const _ANATOMICAL_MASS_BY_NAME: Dictionary[StringName, float] = {
+	&"Root": 0.5,
+	&"Hips": 12.0,
+	&"Spine": 6.0,
+	&"Chest": 8.0,
+	&"UpperChest": 6.0,
+	&"Neck": 1.0,
+	&"Head": 4.5,
+	&"LeftShoulder": 0.7,  &"RightShoulder": 0.7,
+	&"LeftUpperArm": 2.0,  &"RightUpperArm": 2.0,
+	&"LeftLowerArm": 1.2,  &"RightLowerArm": 1.2,
+	&"LeftHand": 0.4,      &"RightHand": 0.4,
+	&"LeftUpperLeg": 9.0,  &"RightUpperLeg": 9.0,
+	&"LeftLowerLeg": 4.0,  &"RightLowerLeg": 4.0,
+	&"LeftFoot": 0.8,      &"RightFoot": 0.8,
+}
+const _ANATOMICAL_DEFAULT_MASS: float = 0.05  # 50 g for unlisted (fingers/toes)
+var _mass_scale: float = 1.0
+# Captured baseline mass per bone — set by _capture_baseline_masses or
+# by the Anatomical button. Mass scale slider multiplies these.
+var _baseline_masses: Dictionary[StringName, float] = {}
+
 # Runtime capsule visualization. CollisionShape3D.visible is editor-only
 # (it draws no mesh at runtime), so the toggle below spawns transparent
 # MeshInstance3D children with each shape's geometry. Tracked by a
@@ -262,11 +314,96 @@ func _ready() -> void:
 	_marionette.start_simulation()
 	_initialize_bone_damping()
 	_apply_bone_collisions_state()
+	# Anatomical mass distribution applied at start so per-bone masses are
+	# physically reasonable from frame 1 (ragdoll_tuner showed uniform 0.9 kg
+	# is one of the main destabilizers — fingers as heavy as the chest is
+	# what made contact impulses pump through the chain).
+	_apply_anatomical_masses()
+	_capture_baseline_masses()
+	_apply_joint_constraint_params()
 	_apply_preset_by_index(_DEFAULT_PRESET_INDEX, false)
 	_set_speed(_SPEEDS[_DEFAULT_SPEED_INDEX])
 	_build_ui()
 	_sync_ui_state()
 	_update_camera_transform()
+	_print_runtime_state_diagnostic()
+
+
+# One-shot print: how many bones, how many have collision shapes, how many
+# of those shapes are currently `disabled`, and a sample of the collision
+# exception lists for representative finger / toe / hand bones. If the
+# numbers don't match what the toggles claim, the runtime state and the
+# UI have desynced and the explosion needs a different diagnosis.
+func _print_runtime_state_diagnostic() -> void:
+	if _simulator == null:
+		return
+	var bones: int = 0
+	var with_shape: int = 0
+	var disabled_shapes: int = 0
+	var samples: Array[StringName] = [
+		&"LeftIndexProximal", &"LeftIndexIntermediate", &"LeftIndexDistal",
+		&"LeftMiddleProximal", &"LeftHand",
+		&"LeftBigToeProximal", &"LeftToe2Proximal",
+	]
+	var sample_bones: Dictionary[StringName, MarionetteBone] = {}
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		bones += 1
+		var b: MarionetteBone = child
+		for c: Node in b.get_children():
+			if c is CollisionShape3D:
+				with_shape += 1
+				if (c as CollisionShape3D).disabled:
+					disabled_shapes += 1
+		var bn: StringName = StringName(b.bone_name)
+		if samples.has(bn):
+			sample_bones[bn] = b
+	print("[ragdoll_test] bones=%d  with_shape=%d  disabled=%d  collisions_enabled_flag=%s"
+			% [bones, with_shape, disabled_shapes, _bone_collisions_enabled])
+	for bn: StringName in samples:
+		var b: MarionetteBone = sample_bones.get(bn)
+		if b == null:
+			continue
+		var ex: Array[PhysicsBody3D] = b.get_collision_exceptions()
+		var names: PackedStringArray = []
+		for e: PhysicsBody3D in ex:
+			names.append(e.name)
+		print("[ragdoll_test] %s exceptions (%d): %s" % [bn, ex.size(), ", ".join(names)])
+	# Mass write/read probe — fires automatically so you don't need to
+	# click anything. Sets Hips mass to 99.0 via the property setter and
+	# 42.0 via PhysicsServer3D.body_set_param, then reads each one back
+	# from both the GDScript property and the physics server. Diverging
+	# numbers tell us *which* path Jolt is honoring (or that neither is).
+	var hips: MarionetteBone = sample_bones.get(&"LeftIndexProximal")
+	if hips == null:
+		hips = sample_bones.get(&"LeftHand")
+	if hips == null:
+		return
+	var before_prop: float = hips.mass
+	var before_srv: float = PhysicsServer3D.body_get_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS)
+	# Path 1: GDScript property.
+	hips.mass = 99.0
+	var after1_prop: float = hips.mass
+	var after1_srv: float = PhysicsServer3D.body_get_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS)
+	# Path 2: PhysicsServer3D direct.
+	PhysicsServer3D.body_set_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS, 42.0)
+	var after2_prop: float = hips.mass
+	var after2_srv: float = PhysicsServer3D.body_get_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS)
+	# Restore.
+	hips.mass = before_prop
+	PhysicsServer3D.body_set_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS, before_srv)
+	print("[mass probe] %s  initial: prop=%.3f  srv=%.3f" %
+			[hips.bone_name, before_prop, before_srv])
+	print("[mass probe]   after `hips.mass = 99`:           prop=%.3f  srv=%.3f" %
+			[after1_prop, after1_srv])
+	print("[mass probe]   after PhysicsServer3D set 42:     prop=%.3f  srv=%.3f" %
+			[after2_prop, after2_srv])
 
 
 func _init_damp_groups() -> void:
@@ -312,15 +449,24 @@ func _initialize_bone_damping() -> void:
 		_apply_group_damp(group, _group_damp.get(group, _DEFAULT_BONE_DAMP))
 
 
-# Sets `disabled` on every bone CollisionShape3D from `_bone_collisions_enabled`.
+# Sets `disabled` on every bone CollisionShape3D from `_bone_collisions_enabled`,
+# AND zeroes the body's collision_layer/mask when disabled — belt and
+# suspenders so the body is fully off the broadphase even if some Jolt
+# build still treats `disabled` shapes as broadphase candidates. Layer/mask
+# restored to 1/1 (defaults) when re-enabled.
 # Idempotent. Called from _ready, _reset, _drop_test, and the toggle.
 func _apply_bone_collisions_state() -> void:
 	if _simulator == null:
 		return
+	var layer_value: int = 1 if _bone_collisions_enabled else 0
+	var mask_value: int = 1 if _bone_collisions_enabled else 0
 	for child: Node in _simulator.get_children():
 		if not (child is MarionetteBone):
 			continue
-		for c: Node in (child as MarionetteBone).get_children():
+		var b: MarionetteBone = child
+		b.collision_layer = layer_value
+		b.collision_mask = mask_value
+		for c: Node in b.get_children():
 			if c is CollisionShape3D:
 				(c as CollisionShape3D).disabled = not _bone_collisions_enabled
 
@@ -328,6 +474,128 @@ func _apply_bone_collisions_state() -> void:
 func _on_bone_collisions_toggled(on: bool) -> void:
 	_bone_collisions_enabled = on
 	_apply_bone_collisions_state()
+
+
+# Captures whatever mass each bone is currently carrying. Called once on
+# _ready so the Mass-scale slider has a stable baseline; "Apply anatomical"
+# overwrites it with the table values. The slider then multiplies baseline.
+func _capture_baseline_masses() -> void:
+	if _simulator == null:
+		return
+	_baseline_masses.clear()
+	for child: Node in _simulator.get_children():
+		if child is MarionetteBone:
+			var b: MarionetteBone = child
+			_baseline_masses[StringName(b.bone_name)] = b.mass
+
+
+# Writes the anatomical-distribution table into baseline + applies current
+# scale. The button in the Mass section calls this; subsequent scale moves
+# multiply on top of the anatomical values.
+func _apply_anatomical_masses() -> void:
+	if _simulator == null:
+		return
+	var count: int = 0
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var b: MarionetteBone = child
+		var bn: StringName = StringName(b.bone_name)
+		var m: float = _ANATOMICAL_MASS_BY_NAME.get(bn, _ANATOMICAL_DEFAULT_MASS)
+		_baseline_masses[bn] = m
+		_set_bone_mass(b, m * _mass_scale)
+		count += 1
+	_print_mass_state("anatomical", count)
+
+
+func _apply_mass_scale(scale: float) -> void:
+	_mass_scale = scale
+	if _simulator == null:
+		return
+	var count: int = 0
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var b: MarionetteBone = child
+		var bn: StringName = StringName(b.bone_name)
+		var orig: float = _baseline_masses.get(bn, b.mass)
+		_set_bone_mass(b, max(orig * scale, 0.001))
+		count += 1
+	_print_mass_state("scale", count)
+
+
+# Belt-and-suspenders mass write — sets the GDScript property AND pushes
+# directly to the physics server. PhysicalBone3D.mass is the documented
+# path, but some physics backends (Jolt has had this in the past) only
+# pick up mass at body creation; the PhysicsServer3D call forces a live
+# update even when the property setter is silently ignored.
+static func _set_bone_mass(b: MarionetteBone, m: float) -> void:
+	var clamped: float = max(m, 0.001)
+	b.mass = clamped
+	PhysicsServer3D.body_set_param(b.get_rid(), PhysicsServer3D.BODY_PARAM_MASS, clamped)
+
+
+# Console-visible verification so you don't need the Remote inspector to
+# confirm the mass change landed. Reads back live values for two sample
+# bones (Hips = heavy spine bone, LeftIndexProximal = small phalanx).
+func _print_mass_state(reason: String, count: int) -> void:
+	var hips: MarionetteBone = _find_bone_by_name(&"Hips")
+	var idx: MarionetteBone = _find_bone_by_name(&"LeftIndexProximal")
+	var hips_m: float = hips.mass if hips != null else 0.0
+	var idx_m: float = idx.mass if idx != null else 0.0
+	# Also query the physics server's view in case the GDScript property
+	# and the live body diverged.
+	var hips_srv: float = PhysicsServer3D.body_get_param(hips.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS) if hips != null else 0.0
+	var idx_srv: float = PhysicsServer3D.body_get_param(idx.get_rid(),
+			PhysicsServer3D.BODY_PARAM_MASS) if idx != null else 0.0
+	print("[mass:%s] %d bones  Hips=%.3f (srv %.3f)  LeftIndexProximal=%.4f (srv %.4f)  scale=%.2f" %
+			[reason, count, hips_m, hips_srv, idx_m, idx_srv, _mass_scale])
+
+
+# Pushes joint-spring + limit-softness state into every dynamic bone's
+# 6DOF joint. Called on every relevant slider/checkbox change and on
+# _ready so the initial state matches the UI. Properties are dynamic
+# (set via path strings) — Jolt may not honor every one of them; if a
+# slider has no visible effect that's the engine, not the wiring.
+func _apply_joint_constraint_params() -> void:
+	if _simulator == null:
+		return
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		var b: MarionetteBone = child
+		for axis: String in _JOINT_AXES:
+			b.set("joint_constraints/%s/angular_limit_softness" % axis, _joint_limit_softness)
+			b.set("joint_constraints/%s/angular_limit_damping" % axis, _joint_limit_damping)
+			b.set("joint_constraints/%s/angular_spring_enabled" % axis, _joint_spring_enabled)
+			b.set("joint_constraints/%s/angular_spring_stiffness" % axis, _joint_spring_stiffness)
+			b.set("joint_constraints/%s/angular_spring_damping" % axis, _joint_spring_damping)
+
+
+func _on_joint_limit_softness_changed(v: float) -> void:
+	_joint_limit_softness = v
+	_apply_joint_constraint_params()
+
+
+func _on_joint_limit_damping_changed(v: float) -> void:
+	_joint_limit_damping = v
+	_apply_joint_constraint_params()
+
+
+func _on_joint_spring_enabled_toggled(on: bool) -> void:
+	_joint_spring_enabled = on
+	_apply_joint_constraint_params()
+
+
+func _on_joint_spring_stiffness_changed(v: float) -> void:
+	_joint_spring_stiffness = v
+	_apply_joint_constraint_params()
+
+
+func _on_joint_spring_damping_changed(v: float) -> void:
+	_joint_spring_damping = v
+	_apply_joint_constraint_params()
 
 
 # Removes any existing debug meshes, then (if `_show_capsules`) spawns a
@@ -464,7 +732,15 @@ func _apply_drag_force(delta: float) -> void:
 	var grab_velocity: Vector3 = bone.linear_velocity + bone.angular_velocity.cross(offset_from_com)
 	var displacement: Vector3 = target_world - grab_world
 	var force: Vector3 = displacement * k - grab_velocity * c
-	bone.apply_impulse(force * delta, offset_from_com)
+	# Per-tick impulse clamp. A fast cursor flick can produce displacement
+	# of several meters, which on a 50 g finger gives a spring force in the
+	# hundreds of N — beyond what a 60 Hz integrator can integrate without
+	# overshoot. Clamp to a hard cap so the worst case is always survivable.
+	var impulse: Vector3 = force * delta
+	var impulse_mag: float = impulse.length()
+	if impulse_mag > _DRAG_MAX_IMPULSE_PER_TICK:
+		impulse = impulse * (_DRAG_MAX_IMPULSE_PER_TICK / impulse_mag)
+	bone.apply_impulse(impulse, offset_from_com)
 
 
 func _process(_delta: float) -> void:
@@ -578,6 +854,11 @@ func _reset() -> void:
 	_marionette.start_simulation()
 	_initialize_bone_damping()
 	_apply_bone_collisions_state()
+	# Don't re-capture baselines — that would clobber an anatomical pass
+	# the user already applied. Mass scale slider is the live knob if they
+	# want it different post-reset.
+	_apply_mass_scale(_mass_scale)
+	_apply_joint_constraint_params()
 	_apply_preset_by_index(_DEFAULT_PRESET_INDEX)
 
 
@@ -612,6 +893,8 @@ func _drop_test() -> void:
 	_marionette.start_simulation()
 	_initialize_bone_damping()
 	_apply_bone_collisions_state()
+	_apply_mass_scale(_mass_scale)
+	_apply_joint_constraint_params()
 	_apply_gravity_scale()
 	_refresh_tethers()
 	_sync_ui_state()
@@ -1058,7 +1341,7 @@ func _build_tuning_panel() -> void:
 	anchor.offset_left = -WIDTH - 12.0
 	anchor.offset_top = 12.0
 	anchor.offset_right = -12.0
-	anchor.offset_bottom = 12.0 + 580.0  # height; sized to the section count
+	anchor.offset_bottom = 12.0 + 760.0  # height; sized to the section count
 	layer.add_child(anchor)
 
 	var col := VBoxContainer.new()
@@ -1101,6 +1384,37 @@ func _build_tuning_panel() -> void:
 	show_cb.toggled.connect(_on_show_capsules_toggled)
 	geo_row.add_child(show_cb)
 	col.add_child(geo_row)
+
+	col.add_child(_make_spacer(8))
+	col.add_child(_make_section_header("Mass distribution"))
+	col.add_child(_make_slider_row("Scale", 0.1, 3.0, 0.05, 1.0, _apply_mass_scale))
+	var anat_btn := Button.new()
+	anat_btn.text = "Apply anatomical"
+	anat_btn.tooltip_text = "Hips/Spine/Legs heavy, fingers/toes ~50 g — closer to real mass distribution than the uniform fallback. Multiplied by Scale slider afterwards."
+	anat_btn.pressed.connect(_apply_anatomical_masses)
+	col.add_child(anat_btn)
+
+	col.add_child(_make_spacer(8))
+	col.add_child(_make_section_header("Joint angular spring"))
+	var spring_row := HBoxContainer.new()
+	var spring_cb := CheckBox.new()
+	spring_cb.text = "Enabled"
+	spring_cb.button_pressed = _joint_spring_enabled
+	spring_cb.tooltip_text = "Adds a torsional spring at each 6DOF axis pulling the joint toward equilibrium. Replaces SPD muscle stiffness as the thing keeping the chain coherent under contact."
+	spring_cb.toggled.connect(_on_joint_spring_enabled_toggled)
+	spring_row.add_child(spring_cb)
+	col.add_child(spring_row)
+	col.add_child(_make_slider_row("Stiffness", 0.0, 50.0, 0.5, _joint_spring_stiffness,
+			_on_joint_spring_stiffness_changed))
+	col.add_child(_make_slider_row("Damping", 0.0, 5.0, 0.05, _joint_spring_damping,
+			_on_joint_spring_damping_changed))
+
+	col.add_child(_make_spacer(8))
+	col.add_child(_make_section_header("Joint limit"))
+	col.add_child(_make_slider_row("Softness", 0.0, 1.0, 0.02, _joint_limit_softness,
+			_on_joint_limit_softness_changed))
+	col.add_child(_make_slider_row("Damping", 0.0, 1.0, 0.02, _joint_limit_damping,
+			_on_joint_limit_damping_changed))
 
 
 static func _make_section_header(text: String) -> Label:
