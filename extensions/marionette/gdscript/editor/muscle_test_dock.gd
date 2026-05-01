@@ -285,9 +285,12 @@ func _on_macro_changed(v: float, key: StringName, value_label: Label) -> void:
 	_apply_macros_to_bones()
 
 
-# Recomputes the per-bone macro offset from the current macro slider state
-# and pushes it into every mounted bone widget. Cheap: ~80 bones × 7 macros
-# of dictionary lookups per slider step, well under a frame.
+# Recomputes the per-bone anatomical target from the current macro slider
+# state and writes it into every mounted bone widget's per-axis sliders.
+# Macros remote-control the per-bone sliders (no separate macro layer); the
+# slider knobs visibly move, then the existing slider→pose path applies.
+# Cheap: ~80 bones × 7 macros of dictionary lookups per slider step, well
+# under a frame.
 func _apply_macros_to_bones() -> void:
 	for bone_name: StringName in _bone_widgets.keys():
 		var widget: MarionetteBoneSliders = _bone_widgets[bone_name]
@@ -298,7 +301,7 @@ func _apply_macros_to_bones() -> void:
 			continue
 		var offset: Vector3 = MarionetteMacroPresets.compose_offset(
 				bone_name, entry.rom_min, entry.rom_max, _macro_values)
-		widget.set_macro_offset(offset)
+		widget.set_anatomical_target(entry.rest_anatomical_offset + offset)
 
 
 func _add_region_section(region: int, bones: Array) -> void:

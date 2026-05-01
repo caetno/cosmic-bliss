@@ -13,11 +13,14 @@ extends VBoxContainer
 # No per-bone reset button: dock supplies "Reset All to Rest"; callers
 # (dock, tests) invoke `reset_to_rest()` directly.
 #
-# Macro offset: the muscle-test dock's macro section pushes a per-bone
-# Vector3 anatomical offset via `set_macro_offset()`. The offset composes
-# additively with the per-axis sliders before the rotation is applied.
-# This lets one Unity-style "Open ↔ Close" slider drive every bone while
-# the per-bone sliders still adjust on top.
+# Macro drive: the muscle-test dock's macro section drives every per-bone
+# slider via `set_anatomical_target()`. Each macro slider change recomputes
+# the per-bone target as `rest_offset + composed_macro_offset` and writes
+# it into the per-axis sliders directly (clamped to ROM). The sliders are
+# the single source of truth — there is no separate macro-offset layer.
+# Manual per-bone slider drags while a macro is active are visible
+# immediately but get overwritten on the next macro change; zero the
+# relevant macro before fine-tuning a single bone.
 #
 # Reference rotation: `_rest_rotation` is taken from `Skeleton3D.get_bone_rest`,
 # never from `get_bone_pose_rotation`. This is deliberate — `bone_rest` is
@@ -68,10 +71,6 @@ var _flex_slider: HSlider
 var _rot_slider: HSlider
 var _abd_slider: HSlider
 var _value_labels: Dictionary[Object, Label] = {}
-
-# Aggregated macro contribution in anatomical (flex, medial_rot, abduction)
-# radians. Set by the dock's macro slider section; zero when not driven.
-var _macro_offset: Vector3 = Vector3.ZERO
 
 # Gizmo refresh deferral now lives on the Marionette node (see
 # Marionette.request_gizmo_refresh) so the deferred call survives this
@@ -229,8 +228,8 @@ func _on_slider_changed(_v: float) -> void:
 
 
 # Public reset entry point. Used by the dock's "Reset All to Rest" and by
-# unit tests; replaces the old per-bone Reset button. Zeros every active
-# slider, clears the macro offset, and restores the canonical bone rest.
+# unit tests; replaces the old per-bone Reset button. Returns every active
+# slider to its rest-anatomical offset and restores the canonical bone rest.
 # `_rest_rotation` is anchored on `Skeleton3D.bone_rest` (set in `_ready`)
 # so this is idempotent — repeat calls always return to T-pose, regardless
 # of intervening pose modifications.
@@ -249,17 +248,28 @@ func reset_to_rest() -> void:
 	if _abd_slider != null:
 		_abd_slider.set_value_no_signal(rest_offset.z)
 		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(rest_offset.z)
-	_macro_offset = Vector3.ZERO
 	_restore_rest()
 
 
-# Pushes a macro-driven anatomical offset (radians) to compose with the
-# per-axis sliders. Called by the dock's macro section. Triggers an
-# immediate pose re-apply so dragging the macro slider is responsive.
-func set_macro_offset(offset: Vector3) -> void:
-	if _macro_offset == offset:
+# Drives the per-axis sliders to an absolute anatomical target (radians,
+# clamped to ROM). The dock calls this per macro slider change with
+# `rest_offset + composed_macro_offset` so the macro section literally
+# remote-controls the per-bone widgets — the user sees the slider knobs
+# move, then the existing slider→pose pipeline does the rest. No separate
+# macro layer, so manual per-bone slider drags work as direct overrides
+# (until the next macro change overwrites them).
+func set_anatomical_target(target: Vector3) -> void:
+	if not _has_snapshot:
 		return
-	_macro_offset = offset
+	if _flex_slider != null:
+		_flex_slider.set_value_no_signal(
+				clampf(target.x, _flex_slider.min_value, _flex_slider.max_value))
+	if _rot_slider != null:
+		_rot_slider.set_value_no_signal(
+				clampf(target.y, _rot_slider.min_value, _rot_slider.max_value))
+	if _abd_slider != null:
+		_abd_slider.set_value_no_signal(
+				clampf(target.z, _abd_slider.min_value, _abd_slider.max_value))
 	_apply_pose()
 
 
@@ -281,11 +291,8 @@ func _apply_pose() -> void:
 		_value_labels[_rot_slider].text = "%.0f°" % rad_to_deg(rot_v)
 	if _abd_slider != null:
 		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(abd_v)
-	var combined_flex: float = flex_v + _macro_offset.x
-	var combined_rot: float = rot_v + _macro_offset.y
-	var combined_abd: float = abd_v + _macro_offset.z
 	var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
-			_bone.bone_entry, combined_flex, combined_rot, combined_abd)
+			_bone.bone_entry, flex_v, rot_v, abd_v)
 	_skeleton.set_bone_pose_rotation(_bone_idx, _rest_rotation * anatomical)
 	_request_gizmo_refresh()
 
