@@ -53,6 +53,14 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 # hulls (or to point at just the body when accessories should be skipped).
 @export_node_path("Node3D") var collision_source_mesh: NodePath
 
+# Per-character soft-tissue tuning (CLAUDE.md §15). Optional; when set,
+# JiggleBones spawned by build_ragdoll get their reach / damping ratio
+# from this profile instead of the hardcoded fallbacks. Bones in
+# `bone_collision_profile.non_cascade_bones` but absent from the profile's
+# entries dict get the profile's default_reach_seconds / default_damping_ratio;
+# a null profile entirely uses the hardcoded code defaults (0.3 / 0.7).
+@export var jiggle_profile: JiggleProfile
+
 # Translates BoneProfile/SkeletonProfile bone names to the rig's bone names.
 # Optional — when null, build_ragdoll falls back to direct name match (which
 # works after Godot's import-time retargeting renames bones to canonical
@@ -754,14 +762,15 @@ func _build_jiggle_bone(
 		bone.set("joint_constraints/%s/linear_limit_upper" % axis, 0.05)
 
 	bone.mass = _estimate_jiggle_mass(skel_bone_name)
-	# Default spring tuning: critically-soft (damping ratio 0.7 → small
-	# wobble, no resonance), reach time ~0.3 s. Mass-portable derivation
-	# so a 5 kg breast and a 0.5 kg jowl share the same feel.
+	# Spring tuning: per-bone JiggleEntry > profile defaults > code defaults.
+	# Mass-portable SPD math so a 5 kg breast and a 0.5 kg jowl share the
+	# same feel for the same reach/damping params:
 	#   omega = 2π / reach_seconds
 	#   k     = m · omega²
 	#   c     = 2 · ζ · ω · m         (ζ = damping ratio)
-	var reach_seconds: float = 0.3
-	var damping_ratio: float = 0.7
+	var params: Vector2 = _resolve_jiggle_params(skel_bone_name)
+	var reach_seconds: float = params.x
+	var damping_ratio: float = params.y
 	var omega: float = TAU / max(reach_seconds, 0.001)
 	bone.stiffness = bone.mass * omega * omega
 	bone.damping = 2.0 * damping_ratio * omega * bone.mass
@@ -771,6 +780,16 @@ func _build_jiggle_bone(
 	bone.custom_integrator = true
 	bone.visible = show_physics_bones_in_editor
 	return bone
+
+
+# Resolves (reach_seconds, damping_ratio) for `skel_bone_name`. Per-bone
+# JiggleEntry wins; absent that the profile-level defaults; absent the
+# whole profile, the hardcoded code constants (0.3 s reach / 0.7 ζ —
+# critically-soft baseline that's worked well for breast tissue).
+func _resolve_jiggle_params(skel_bone_name: StringName) -> Vector2:
+	if jiggle_profile != null:
+		return jiggle_profile.params_for(skel_bone_name)
+	return Vector2(0.3, 0.7)
 
 
 # Hull AABB volume × water-equivalent density. Crude but defensible —

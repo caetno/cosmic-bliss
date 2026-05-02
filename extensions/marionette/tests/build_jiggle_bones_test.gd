@@ -52,6 +52,21 @@ func _init() -> void:
 	src_profile.non_cascade_bones = EXPECTED_JIGGLE_BONES
 	marionette.bone_collision_profile = src_profile
 
+	# 2b. Author a JiggleProfile with mixed entries: one bone uses a
+	#     custom reach (snappy), one bone uses the profile-level default
+	#     (which we set to a non-default value), the remaining two get
+	#     the profile defaults too. This validates all three resolution
+	#     tiers (per-entry, profile default, code default unreachable
+	#     when a profile is assigned).
+	var jp := JiggleProfile.new()
+	jp.default_reach_seconds = 0.5    # not the code default 0.3
+	jp.default_damping_ratio = 0.4    # not the code default 0.7
+	var snappy := JiggleEntry.new()
+	snappy.reach_seconds = 0.15
+	snappy.damping_ratio = 0.9
+	jp.entries[&"c_breast_01.l"] = snappy
+	marionette.jiggle_profile = jp
+
 	print("Building convex colliders ...")
 	marionette.build_convex_colliders()
 	await process_frame
@@ -120,6 +135,39 @@ func _init() -> void:
 			push_error("JiggleBone %s has un-tuned spring (k=%f c=%f)"
 					% [jb.bone_name, jb.stiffness, jb.damping])
 			failures += 1
+
+	# 5. JiggleProfile resolution: confirm the per-entry override won and
+	#    the profile-default tier landed on entries that have no explicit
+	#    JiggleEntry. Spring values are derived as
+	#       k = m · (TAU / reach)²
+	#       c = 2 · ζ · (TAU / reach) · m
+	#    so we recompute the expected k/c and compare against the bone's
+	#    actual values.
+	for jb: JiggleBone in jiggle_bones:
+		var bn: StringName = StringName(jb.bone_name)
+		var expected_reach: float
+		var expected_zeta: float
+		if bn == &"c_breast_01.l":
+			# Per-entry override.
+			expected_reach = 0.15
+			expected_zeta = 0.9
+		else:
+			# Profile-level default (we set 0.5 / 0.4 above).
+			expected_reach = 0.5
+			expected_zeta = 0.4
+		var omega: float = TAU / expected_reach
+		var expected_k: float = jb.mass * omega * omega
+		var expected_c: float = 2.0 * expected_zeta * omega * jb.mass
+		if not is_equal_approx(jb.stiffness, expected_k):
+			push_error("%s expected k=%.2f from JiggleProfile, got %.2f"
+					% [bn, expected_k, jb.stiffness])
+			failures += 1
+		if not is_equal_approx(jb.damping, expected_c):
+			push_error("%s expected c=%.2f from JiggleProfile, got %.2f"
+					% [bn, expected_c, jb.damping])
+			failures += 1
+		print("    %s spring resolved from profile: k=%.2f c=%.2f (reach %.2fs ζ %.2f)"
+				% [bn, jb.stiffness, jb.damping, expected_reach, expected_zeta])
 
 	if failures > 0:
 		push_error("%d failure(s)" % failures)
