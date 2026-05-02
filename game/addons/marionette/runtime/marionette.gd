@@ -2,20 +2,22 @@
 class_name Marionette
 extends Node3D
 
-# Top-level Marionette node. Owns the data resources (BoneProfile,
-# BoneStateProfile, CollisionExclusionProfile), resolves the live Skeleton3D,
-# and builds/tears down the physical ragdoll on demand. Phase 5 will also
-# host the SPD update path; for now Powered bones are simply dynamic.
-#
-# Gizmos that read off this node:
-#   - MarionetteAuthoringGizmo  — muscle frame + per-bone solver tripods
-#   - MarionetteJointLimitGizmo — per-bone ROM arcs in joint-local space
-#
-# The two inspector tool buttons drive the ragdoll lifecycle in editor:
-#   "Build Ragdoll" — creates PhysicalBoneSimulator3D + MarionetteBones
-#   "Clear Ragdoll" — removes the simulator (and all bones)
-# In editor builds the bones are forced kinematic so they don't drop while
-# the user is authoring; runtime callers get the actual configured states.
+## Top-level Marionette node. Owns the data resources (BoneProfile,
+## BoneStateProfile, CollisionExclusionProfile, BoneCollisionProfile,
+## JiggleProfile), resolves the live Skeleton3D, and builds / tears down
+## the physical ragdoll on demand.
+##
+## Inspector layout (slice 5):
+##   1 Bind            — skeleton, bone_map, collision_source_mesh
+##   2 Anatomy         — bone_profile, total_mass, muscle_frame_forward
+##   3 Collision Shapes — bone_collision_profile, hull build buttons
+##   4 Build           — state / exclusion / jiggle profiles, Build / Clear
+##   5 Tune & Test     — per-region spring/jiggle tuning widget
+##
+## Gizmos that read off this node:
+##   * MarionetteAuthoringGizmo  — muscle frame + per-bone solver tripods
+##   * MarionetteJointLimitGizmo — per-bone ROM arcs in joint-local space
+##   * MarionetteColliderGizmo   — convex-hull / capsule wireframes
 
 const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
@@ -28,7 +30,7 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 @export_group("Bind")
 
-# Path to a sibling/child Skeleton3D.
+## Path to a sibling/child Skeleton3D — the rig this Marionette drives.
 @export_node_path("Skeleton3D") var skeleton: NodePath:
 	set(value):
 		if skeleton == value:
@@ -36,10 +38,10 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 		skeleton = value
 		update_gizmos()
 
-# Translates BoneProfile/SkeletonProfile bone names to the rig's bone names.
-# Optional — when null, build_ragdoll falls back to direct name match (which
-# works after Godot's import-time retargeting renames bones to canonical
-# profile names).
+## Translates BoneProfile / SkeletonProfile bone names to the rig's
+## actual bone names. Optional — when null, build_ragdoll falls back to
+## direct name match (which works after Godot's import-time retargeting
+## renames bones to canonical profile names).
 @export var bone_map: BoneMap:
 	set(value):
 		if bone_map == value:
@@ -47,11 +49,10 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 		bone_map = value
 		update_gizmos()
 
-# Optional source for "Build Convex Colliders". When empty, the build
-# auto-discovers every skinned MeshInstance3D under the resolved
-# Skeleton3D's parent. Set to a specific node when the auto-discovery
-# picks up extra accessory meshes that shouldn't contribute to the body
-# hulls (or to point at just the body when accessories should be skipped).
+## Optional source for "Build Convex Colliders". When empty, the build
+## auto-discovers every skinned MeshInstance3D under the skeleton's
+## parent. Point at a specific node when auto-discovery picks up extra
+## accessory meshes that shouldn't contribute to the body hulls.
 @export_node_path("Node3D") var collision_source_mesh: NodePath
 
 
@@ -60,6 +61,8 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 @export_group("Anatomy")
 
+## Per-character anatomical authoring data — joint axes, ROM, mass,
+## springs. Populated by "Calibrate Profile from Skeleton".
 @export var bone_profile: BoneProfile:
 	set(value):
 		if bone_profile == value:
@@ -67,32 +70,20 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 		bone_profile = value
 		update_gizmos()
 
-# Total ragdoll mass in kg. Distributed via BoneEntry.mass_fraction; bones
-# with mass_fraction == 0 (the P2.10 default) split the remainder uniformly.
-# Single source of truth — the old BoneProfile.total_mass duplicate was
-# dropped in slice 5.
+## Total ragdoll mass in kg. Distributed via BoneEntry.mass_fraction;
+## bones with mass_fraction = 0 split the remainder uniformly. Single
+## source of truth — bones inherit, jiggle bones derive their own mass
+## from hull volume.
 @export_range(0.5, 200.0, 0.1) var total_mass: float = 70.0
 
-# Authoring-time override for the muscle frame's forward axis. Default
-# Vector3.ZERO autodetects via the foot-bone probe in MuscleFrameBuilder
-# (ankle -> toe is anatomical-forward regardless of which side the bone
-# sits on). Set to e.g. Vector3(0, 0, 1) when the autodetect picks the
-# wrong side — only relevant during Calibrate; ignored at runtime.
+## Override for the muscle frame's forward axis at Calibrate time.
+## Default Vector3.ZERO autodetects via the foot-bone probe; set to
+## e.g. Vector3(0, 0, 1) when autodetect picks the wrong side. Ignored
+## at runtime.
 @export var muscle_frame_forward_override: Vector3 = Vector3.ZERO
 
-# Recomputes BoneProfile entries against the actual Skeleton3D + BoneMap
-# on this Marionette. Use when per-rig roll differences leave joint frames
-# mis-aligned on the live skeleton (the BoneProfile inspector's "Generate
-# from Skeleton" uses template poses, which is fine for shipping defaults
-# but not per-character calibration). Mutates `bone_profile` in place;
-# preserves any user-tuned spring values across re-Calibrate.
 @export_tool_button("Calibrate Profile from Skeleton", "Tools") var _calibrate_btn: Callable = calibrate_bone_profile_from_skeleton
 
-# Static-analysis diagnostic: per-bone comparison of the BoneEntry-baked
-# anatomical frame against the solver's recomputed target frame, both in
-# world space. Prints OK/FLIPPED/SWAPPED/BAD per bone so misaligned
-# archetypes / matcher results can be pinpointed without test-driving
-# every joint by hand.
 @export_tool_button("Validate Joint Frames", "Reload") var _validate_btn: Callable = validate_joint_frames
 
 
@@ -101,11 +92,11 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 @export_group("Collision Shapes")
 
-# Per-character convex-hull colliders. When set, ragdoll creation uses
-# the stored hulls instead of the default per-bone capsule for any bone
-# that has a hull entry; bones missing from the profile fall back to
-# capsule. Setter rebuilds colliders on the live simulator (if any) so
-# swapping the resource in the inspector takes immediate effect.
+## Per-character convex-hull collider data. When set, build_ragdoll
+## uses the stored hulls instead of per-bone capsules for any bone that
+## has a hull entry; bones missing from the profile fall back to capsule.
+## Setter rebuilds colliders on a live simulator so swapping the
+## resource takes effect immediately.
 @export var bone_collision_profile: BoneCollisionProfile:
 	set(value):
 		if bone_collision_profile == value:
@@ -114,17 +105,8 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 		if _find_simulator() != null:
 			_rebuild_colliders_on_live_simulator()
 
-# Harvests skinned vertices off `collision_source_mesh` (or all skinned
-# meshes under the skeleton's parent), buckets them by dominant bone +
-# weight-threshold overlap, decimates each bucket adaptively, and writes
-# the result into `bone_collision_profile`. The .tres auto-saves when the
-# profile already has a resource_path (mirrors the Calibrate flow);
-# otherwise the new profile lives in scene memory until "Save As"d.
 @export_tool_button("Build Convex Colliders", "MeshInstance3D") var _build_colliders_btn: Callable = build_convex_colliders
 
-# Drops the convex hull profile reference. Bones revert to per-bone
-# capsules sized from bone length. Useful when iterating on the rig and
-# the cached hulls don't match the current mesh anymore.
 @export_tool_button("Revert to Capsules", "Reload") var _revert_colliders_btn: Callable = revert_to_capsules
 
 
@@ -133,28 +115,30 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 @export_group("Build")
 
+## Per-bone Kinematic / Powered / Unpowered state. Swappable at runtime
+## for injury / shock states. Null falls back to defaults
+## (everything Powered except jaw + eyes Kinematic).
 @export var bone_state_profile: BoneStateProfile
 
+## Bone-pair collision exclusions. Null falls back to parent-child
+## defaults derived from the skeleton hierarchy.
 @export var collision_exclusion_profile: CollisionExclusionProfile
 
-# Per-character soft-tissue tuning (CLAUDE.md §15). Optional; when set,
-# JiggleBones spawned by build_ragdoll get their reach / damping ratio
-# from this profile instead of the hardcoded fallbacks. Bones in
-# `bone_collision_profile.non_cascade_bones` but absent from the profile's
-# entries dict get the profile's default_reach_seconds / default_damping_ratio;
-# a null profile entirely uses the hardcoded code defaults (0.3 / 0.7).
+## Per-character soft-tissue tuning. Optional; when set, JiggleBones
+## spawned at Build Ragdoll get reach / damping_ratio from this profile.
+## Bones in BoneCollisionProfile.non_cascade_bones but missing here use
+## the profile's default_reach_seconds / default_damping_ratio. Null
+## profile uses hardcoded code defaults (0.3 / 0.7).
 @export var jiggle_profile: JiggleProfile
 
 @export_tool_button("Build Ragdoll", "Skeleton3D") var _build_btn: Callable = build_ragdoll
 @export_tool_button("Clear Ragdoll", "Remove") var _clear_btn: Callable = clear_ragdoll
 
-# Hides PhysicalBone3D children in the editor — both their (already-hidden)
-# capsule colliders and Godot's built-in 6DOF joint gizmo, which clutters the
-# scene at ~80 bones. Default off because the user almost never needs to see
-# the physical bones during authoring; the Marionette gizmos (authoring +
-# joint-limit) live on the Marionette node itself, which stays visible.
-# Setter walks any already-built bones and updates their `visible` live so
-# the toggle works without rebuild.
+## Show PhysicalBone3D children in the editor (capsule wireframes + the
+## built-in 6DOF joint gizmo). Off by default because ~80 bones is
+## cluttery. The MarionetteColliderGizmo on the Marionette node draws
+## hulls regardless. Toggling rewrites visibility on already-built
+## bones — no rebuild needed.
 @export var show_physics_bones_in_editor: bool = false:
 	set(value):
 		if show_physics_bones_in_editor == value:
@@ -233,11 +217,16 @@ func _resolve_profile_name(skel_bone_name: StringName) -> StringName:
 	return &""
 
 
-# Builds a physical ragdoll from the configured profiles. Idempotent: any
-# existing simulator is cleared first. Skeleton bones not present in the
-# BoneProfile are silently skipped (lets characters add cosmetic bones the
-# profile doesn't know about). Bones in `collision_exclusion_profile.disabled_bones`
-# are also skipped.
+## Builds a physical ragdoll from the configured profiles. Spawns a
+## PhysicalBoneSimulator3D + one MarionetteBone per BoneProfile entry +
+## one JiggleBone per BoneCollisionProfile.non_cascade_bones entry.
+##
+## Idempotent — any existing simulator is cleared first. Skeleton bones
+## not in the BoneProfile are silently skipped (cosmetic bones survive).
+## Bones in collision_exclusion_profile.disabled_bones are also skipped.
+##
+## Spawned bones get owner-set to the scene root so they bake into the
+## .tscn on Save (slice 6).
 func build_ragdoll() -> void:
 	var skel: Skeleton3D = resolve_skeleton()
 	if skel == null:
@@ -371,8 +360,9 @@ func build_ragdoll() -> void:
 	request_gizmo_refresh()
 
 
-# Tears down any existing PhysicalBoneSimulator3D under the resolved skeleton.
-# Safe to call when no ragdoll exists.
+## Tears down the active PhysicalBoneSimulator3D under the skeleton.
+## Safe to call when no ragdoll exists. Used by Build's idempotency
+## (Build calls Clear first) and the "Clear Ragdoll" tool button.
 func clear_ragdoll() -> void:
 	var skel: Skeleton3D = resolve_skeleton()
 	if skel == null:
@@ -393,11 +383,11 @@ func clear_ragdoll() -> void:
 	_dynamic_bone_names.clear()
 
 
-# Starts physics simulation on the dynamic bones (Powered + Unpowered).
-# Kinematic bones (Jaw, eyes, FIXED archetypes, anything explicitly marked
-# Kinematic in the BoneStateProfile) follow the skeleton instead. Must be
-# called after build_ragdoll(). Editor builds typically don't call this;
-# it's the runtime entry point.
+## Starts physics simulation on the dynamic bones (Powered + Unpowered
+## + every JiggleBone). Kinematic bones (Jaw, eyes, FIXED archetypes,
+## anything explicitly Kinematic in the BoneStateProfile) follow the
+## skeleton instead. Must be called after build_ragdoll. Editor builds
+## typically don't call this — it's the gameplay-runtime entry point.
 func start_simulation() -> void:
 	var sim: PhysicalBoneSimulator3D = _find_simulator()
 	if sim == null:
@@ -521,7 +511,8 @@ func _derive_dynamic_bone_names(sim: PhysicalBoneSimulator3D) -> Array[StringNam
 	return dynamic
 
 
-# Stops simulation; bones revert to kinematic-follows-skeleton.
+## Stops simulation; bones revert to kinematic-follows-skeleton until
+## start_simulation is called again.
 func stop_simulation() -> void:
 	var sim: PhysicalBoneSimulator3D = _find_simulator()
 	if sim == null:
@@ -529,12 +520,12 @@ func stop_simulation() -> void:
 	sim.physical_bones_stop_simulation()
 
 
-# Re-runs the BoneProfile pipeline against this Marionette's live skeleton +
-# bone_map, so each bone's permutation reflects the actual rig's rest bases
-# (including any per-bone roll baked at modeling time). Use this when the
-# template-derived permutations leave the gizmo arcs visibly off-axis on
-# your specific character. Calls `bone_profile.emit_changed()` so the editor
-# marks the resource dirty; user must Ctrl+S to persist.
+## Re-runs the BoneProfile pipeline against this Marionette's live
+## skeleton + bone_map. Each bone's permutation, ROM, mass-fraction,
+## and spring defaults are regenerated; user-tuned spring values are
+## preserved (per-axis non-zeros survive). Use when per-rig roll
+## differences leave joint frames mis-aligned on the live skeleton.
+## Mutates `bone_profile` in place — Ctrl+S to persist.
 func calibrate_bone_profile_from_skeleton() -> void:
 	_calibrate_with_method(BoneProfileGenerator.Method.ARCHETYPE)
 
@@ -638,6 +629,11 @@ func _refresh_marionette_bones_after_calibrate() -> void:
 		_apply_joint_constraints(mb, fresh)
 
 
+## Per-bone diagnostic comparing the BoneEntry-baked anatomical frame
+## against the solver's recomputed target frame in world space. Prints
+## OK / FLIPPED / SWAPPED / BAD per bone so misaligned archetypes /
+## matcher results can be pinpointed without test-driving every joint
+## by hand. Read-only — does not mutate the profile.
 func validate_joint_frames() -> void:
 	if bone_profile == null:
 		push_warning("Marionette.validate_joint_frames: bone_profile not set")
@@ -959,11 +955,12 @@ func _build_collider_for_bone(
 	return _make_capsule_collider(_bone_length(skel, skel_index))
 
 
-# Drives the "Build Convex Colliders" tool button. Resolves source meshes
-# (explicit `collision_source_mesh` path or auto-discovery), runs
-# ColliderBuilder per mesh, merges the per-mesh hulls, recomputes
-# overlap pairs against the merged geometry, and assigns the result to
-# `bone_collision_profile`. The setter rebuilds live colliders.
+## Harvests skinned vertices off `collision_source_mesh` (or auto-
+## discovered skinned meshes under the skeleton's parent), buckets per
+## bone, decimates each bucket, and assigns the result to
+## `bone_collision_profile`. Auto-saves the .tres when the profile has
+## a resource_path; otherwise the new profile lives in scene memory
+## until the user "Save As"s it.
 func build_convex_colliders() -> void:
 	var skel: Skeleton3D = resolve_skeleton()
 	if skel == null:
@@ -1008,6 +1005,10 @@ func build_convex_colliders() -> void:
 			% [merged.hulls.size(), merged.auto_exclusions.size(), meshes.size()])
 
 
+## Drops the bone_collision_profile reference. Bones revert to per-bone
+## capsules sized from bone length on the next live-rebuild. Useful
+## when iterating on the rig and the cached hulls don't match the
+## current mesh anymore.
 func revert_to_capsules() -> void:
 	bone_collision_profile = null
 

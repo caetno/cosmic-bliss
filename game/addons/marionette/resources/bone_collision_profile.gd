@@ -2,60 +2,46 @@
 class_name BoneCollisionProfile
 extends Resource
 
-# Per-character convex-hull collider data, generated at authoring time from
-# a skinned mesh. Replaces the default capsule colliders Marionette builds
-# in `_make_capsule_collider`. Kept on the Marionette node alongside the
-# other profiles (BoneProfile / BoneStateProfile / CollisionExclusionProfile);
-# see CLAUDE.md §10.
-#
-# Storage: `hulls[profile_bone_name]` holds the hull's input points already
-# in bone-local rest space (post-shrink), ready to drop into a
-# ConvexPolygonShape3D — Jolt computes the hull internally on assignment.
-# `auto_exclusions` lists Skeleton3D bone-index pairs whose hull AABBs
-# overlap; consumers merge these with the standard CollisionExclusionProfile
-# pairs so adjacent hulls don't fight at joints.
-#
-# Authoring parameters are persisted on the resource so a re-build with the
-# same knobs is a one-click action (see ColliderBuilder.build_profile).
+## Per-character convex-hull collider data, generated at authoring time
+## from the rig's skinned mesh by Marionette's "Build Convex Colliders"
+## tool button. Replaces the default per-bone capsule colliders.
+##
+## Hulls are stored already in bone-local rest space; auto_exclusions
+## index into the live Skeleton3D's bone list (rig-specific).
 
+## Per-bone hull input points, keyed by profile bone name. Each value
+## is in bone-local rest space (Skin bind pose × mesh vertex), ready
+## to drop into a ConvexPolygonShape3D.
 @export var hulls: Dictionary[StringName, PackedVector3Array] = {}
 
-# Skeleton bones that should keep their own bucket instead of cascading
-# their skin weights up to the nearest profile-bone ancestor. Used for
-# soft-tissue jiggle bones — c_breast_01.l/r, c_breast_02.l/r on ARP rigs;
-# any custom belly / glute bones a hero adds. Each entry must be the
-# Skeleton3D bone name (post-retarget if applicable). Bones in this list
-# get their own hull entry under their literal skel name; the runtime
-# spawns a translation-only PhysicalBone3D for each (CLAUDE.md §15) so
-# they participate in collision and (slice 4) jiggle physics.
-#
-# Without this list, ColliderBuilder would cascade c_breast_01.l up to
-# its UpperChest parent — the breast skin would absorb into the chest
-# hull and there would be no separate body for jiggle to act on.
+## Soft-tissue bones (breast, glute, jowl, etc.) that should keep their
+## own hull instead of cascading skin weights up to the nearest
+## profile-bone ancestor. Bones listed here also get a translation-only
+## PhysicalBone3D (JiggleBone) at Build Ragdoll time so they participate
+## in collision + jiggle physics. CLAUDE.md §15.
 @export var non_cascade_bones: Array[StringName] = []
 
-# Skeleton3D bone-index pairs whose hulls overlap in rest pose. Resolved
-# against the live skeleton at apply-time (same convention as
-# CollisionExclusionProfile.excluded_pairs).
+## Skeleton3D bone-index pairs whose hulls overlap in rest pose. Applied
+## as collision exceptions at start_simulation alongside the standard
+## CollisionExclusionProfile.excluded_pairs.
 @export var auto_exclusions: Array[Vector2i] = []
 
-# Vertex weight floor for multi-bone overlap assignment. Vertices with
-# weight >= threshold on a non-dominant bone are added to that bone's
-# bucket too — produces overlapping hulls at joints, which avoids the
-# silhouette gap a strict argmax assignment leaves on skinned meshes.
+## Vertex weight floor for multi-bone overlap assignment during harvest.
+## Vertices with weight ≥ threshold on a non-dominant bone are added to
+## that bone's bucket too — produces overlapping hulls at joints,
+## avoiding the silhouette gap a strict argmax would leave.
 @export_range(0.0, 1.0, 0.01) var weight_threshold: float = 0.3
 
-# Hard cap on hull input points per bone. ColliderBuilder runs stratified
-# furthest-point sampling along each bucket's longest AABB axis to fill
-# this budget — narrow cross-sections (wrist, ankle, toe-base) get their
-# own quota so the hull doesn't pinch. Jolt builds the actual convex hull
-# from these inputs.
+## Hard cap on hull input points per bone. ColliderBuilder runs
+## stratified furthest-point sampling along each bucket's longest AABB
+## axis to fill this budget — narrow cross-sections (wrist, ankle,
+## toe-base) get their own quota so the hull doesn't pinch.
 @export_range(8, 256, 1) var max_points_per_hull: int = 64
 
-# Inward shrink toward each hull's centroid, in bone-local space.
-# 0.02 = 2% — tiny but enough to prevent neighboring hulls from touching
-# at the bind-pose seams. Higher values trade silhouette accuracy for
-# joint clearance; set to 0 to keep the raw skin envelope.
+## Inward shrink toward each hull's centroid, in bone-local space.
+## 0.02 = 2% — enough to prevent neighboring hulls from touching at the
+## bind-pose seams. Higher trades silhouette accuracy for joint
+## clearance; 0 keeps the raw skin envelope.
 @export_range(0.0, 0.3, 0.005) var shrink_factor: float = 0.02
 
 

@@ -2,20 +2,22 @@
 class_name BoneStateProfile
 extends Resource
 
-# P3.3 — per-bone state controlling participation in physics + (later) muscle
-# control. Swappable at runtime for injury / shock / surrender state changes.
-#
-#   Kinematic — follows animation directly, no physics simulation. Jaw + eyes
-#               default here (out of Marionette scope per CLAUDE.md §9).
-#   Powered   — dynamic body, SPD pulls toward target pose. (SPD lands in P5.)
-#   Unpowered — dynamic body with no SPD; falls limp.
-#
-# Strength modulation (CLAUDE.md §12) is the *continuous* dial between Powered
-# and Unpowered. State transitions here are persistent mode changes that
-# rebuild which bones SPD touches at all.
+## Per-bone simulation state. Swappable at runtime for injury / shock /
+## surrender mode changes — for the *continuous* powered↔unpowered dial,
+## use the strength modulation system (CLAUDE.md §12) instead of touching
+## this profile.
+##
+## States:
+##   KINEMATIC — follows animation directly, no physics simulation.
+##               Jaw + eyes default here (out of Marionette scope).
+##   POWERED   — dynamic body, SPD pulls toward target pose. (SPD lands
+##               in Phase 5.)
+##   UNPOWERED — dynamic body with no SPD; falls limp.
 
 enum State { KINEMATIC, POWERED, UNPOWERED }
 
+## Per-bone state map. Keyed by skel/profile bone name. Bones absent
+## from the dict default to POWERED on `get_state()`.
 @export var states: Dictionary[StringName, int] = {}
 
 
