@@ -28,6 +28,18 @@ func _parse_begin(object: Object) -> void:
 	add_custom_control(pill)
 
 
+# Tune & Test region table goes at the end of the Marionette inspector
+# (after the slice-5 @export_group("Tune & Test") header). Read-only in
+# slice 7 — slice 8 swaps labels for sliders.
+func _parse_end(object: Object) -> void:
+	var marionette: Marionette = object as Marionette
+	if marionette == null:
+		return
+	var table := MarionetteRegionTable.new()
+	table.marionette = marionette
+	add_custom_control(table)
+
+
 # Replaces Godot's default Array editor on `BoneCollisionProfile.non_cascade_bones`
 # with a bone-name dropdown (MarionetteBoneListProperty). Returns true to
 # suppress the default editor; false to fall through.
