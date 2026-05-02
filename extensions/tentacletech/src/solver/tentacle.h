@@ -312,7 +312,7 @@ private:
 	float tentacle_lubricity = 0.0f;
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
-	float body_impulse_scale = 0.1f;
+	float body_impulse_scale = 1.0f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;
 	godot::PackedVector3Array env_contact_points_scratch;
