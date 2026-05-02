@@ -8,6 +8,7 @@
 #include <godot_cpp/templates/local_vector.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
 // Phase-4 slice 4D: per-particle sphere collision probe.
@@ -43,6 +44,7 @@ struct EnvironmentContact {
 	godot::Vector3 hit_point;
 	godot::Vector3 hit_normal;
 	uint64_t hit_object_id = 0; // 0 if no hit
+	godot::RID hit_rid; // body RID — used by slice 4E to apply impulses
 	godot::Vector3 hit_linear_velocity; // velocity of contacted body at hit point
 };
 

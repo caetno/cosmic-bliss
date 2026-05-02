@@ -305,6 +305,10 @@ private:
 	godot::PackedByteArray env_contact_active_scratch;
 
 	void _run_environment_probe();
+	// Slice 4E — apply equal-and-opposite friction impulses to dynamic
+	// bodies the chain contacted this tick (§4.3 type-1 reciprocal). Run
+	// after solver->tick() so friction_applied is final.
+	void _apply_collision_reciprocals(float p_delta);
 
 	void _allocate_render_resources();
 	void _ensure_mesh_instance();

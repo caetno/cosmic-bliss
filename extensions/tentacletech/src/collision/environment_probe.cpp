@@ -103,6 +103,9 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 		// as a signed int.
 		Variant cid = result["collider_id"];
 		c.hit_object_id = (uint64_t)(int64_t)cid;
+		if (result.has("rid")) {
+			c.hit_rid = result["rid"];
+		}
 		if (result.has("linear_velocity")) {
 			c.hit_linear_velocity = result["linear_velocity"];
 		}

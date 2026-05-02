@@ -1,10 +1,13 @@
 #include "tentacle.h"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/object.hpp>
+#include <godot_cpp/classes/physics_server3d.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/core/object_id.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 
 #include "../spline/spline_data_packer.h"
@@ -77,8 +80,69 @@ void Tentacle::tick(float p_delta) {
 	}
 	_run_environment_probe();
 	solver->tick(p_delta);
+	_apply_collision_reciprocals(p_delta);
 	_update_spline_data_texture();
 }
+
+void Tentacle::_apply_collision_reciprocals(float p_delta) {
+	// Slice 4E (§4.3 type-1 reciprocal): for each per-particle contact whose
+	// collider is a moving body (RigidBody3D, AnimatableBody3D in
+	// sync_to_physics mode, PhysicalBone3D), apply an equal impulse at the
+	// contact point in the friction direction. Heavy tentacle dragging on a
+	// PhysicalBone3D pulls the bone (and the skin attached to it) along the
+	// drag direction. Static bodies receive the impulse but the physics
+	// server treats it as a no-op.
+	//
+	// Per-particle sphere queries (slice 4D) have already given us the
+	// contact's RID. PhysicsServer3D::body_apply_impulse routes by RID
+	// directly so we don't need to upcast through Object/Node3D — the
+	// slight cost is that we need the body's center-of-mass-relative
+	// position. Use the contact's hit_point relative to the colliding
+	// body's get_global_position via the Object lookup; that gives the
+	// position argument the same "offset from origin in global coords"
+	// semantic the high-level apply_impulse() uses.
+	if (solver.is_null() || p_delta <= 0.0f) {
+		return;
+	}
+	const auto &contacts = environment_probe.get_contacts();
+	if (contacts.size() == 0) {
+		return;
+	}
+	PackedVector3Array friction_applied = solver->get_environment_friction_applied();
+	if (friction_applied.size() != (int)contacts.size()) {
+		return;
+	}
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	if (ps == nullptr) {
+		return;
+	}
+	for (uint32_t i = 0; i < contacts.size(); i++) {
+		const auto &c = contacts[i];
+		if (!c.hit) continue;
+		if (c.hit_object_id == 0) continue;
+		Vector3 fa = friction_applied[i];
+		if (fa.length_squared() < 1e-10f) continue;
+
+		float inv_mass = solver->get_particle_inv_mass(c.particle_index);
+		if (inv_mass <= 0.0f) continue;
+		float eff_mass = 1.0f / inv_mass;
+
+		// Effective particle mass mapped through the spec's J = m × Δx / dt.
+		Vector3 impulse = fa * (eff_mass / p_delta);
+
+		// Offset = contact point - body global origin. Need the body Node3D
+		// to read its origin. ObjectDB::get_instance returns the typed
+		// Object pointer if the ID is still alive.
+		Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)c.hit_object_id));
+		Node3D *body_node = Object::cast_to<Node3D>(obj);
+		Vector3 offset = c.hit_point;
+		if (body_node != nullptr) {
+			offset = c.hit_point - body_node->get_global_position();
+		}
+		ps->body_apply_impulse(c.hit_rid, impulse, offset);
+	}
+}
+
 
 void Tentacle::_run_environment_probe() {
 	if (solver.is_null()) {

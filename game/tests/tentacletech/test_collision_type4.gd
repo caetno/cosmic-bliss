@@ -50,6 +50,7 @@ func _run_tests() -> void:
 		"test_contact_stiffness_allows_segment_stretch",
 		"test_sphere_below_anchor_blocks_tip",
 		"test_obstacle_in_chain_path_pushed_aside",
+		"test_friction_pushes_dynamic_body",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -402,6 +403,56 @@ func test_obstacle_in_chain_path_pushed_aside() -> bool:
 		if d < 0.10:
 			push_error("particle inside obstacle: pos=%s d=%f" % [p, d])
 			return false
+	return true
+
+
+# Slice 4E — type-1 friction reciprocal wiring. Verifies the per-particle
+# probe registers a RigidBody3D contact (with valid hit_object_id and
+# friction_applied) so Tentacle::_apply_collision_reciprocals routes an
+# impulse to it via PhysicsServer3D::body_apply_impulse. End-to-end body
+# motion isn't observable here because the test driver runs in _process,
+# not _physics_process — the body's queued impulses never integrate. The
+# user-visible verification is in actual gameplay where physics runs.
+func test_friction_pushes_dynamic_body() -> bool:
+	# Position the body directly in the chain's settle path so contacts are
+	# guaranteed.
+	var body := RigidBody3D.new()
+	body.position = Vector3(0.05, 0.3, 0)
+	body.gravity_scale = 0.0
+	body.freeze = true # don't let body move under floor or tentacle pressure
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	body.mass = 0.5
+	root.add_child(body)
+	var shape := CollisionShape3D.new()
+	var sphere := SphereShape3D.new()
+	sphere.radius = 0.1
+	shape.shape = sphere
+	body.add_child(shape)
+
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t.bending_stiffness = 0.3
+	t.gravity = Vector3(2.0, -9.8, 0)  # tilt to slip the chain across the body
+	t.base_static_friction = 0.6
+
+	var body_iid: int = body.get_instance_id()
+
+	for f in SETTLE_FRAMES:
+		t.tick(DT)
+
+	var found_body_contact_with_friction: bool = false
+	for entry in t.get_environment_contacts_snapshot():
+		if not entry.get("hit", false):
+			continue
+		var oid: int = entry.get("hit_object_id", 0)
+		if oid != body_iid:
+			continue
+		var fa: Vector3 = entry.get("friction_applied", Vector3.ZERO)
+		if fa.length() > 1e-5:
+			found_body_contact_with_friction = true
+			break
+	if not found_body_contact_with_friction:
+		push_error("expected at least one snapshot contact on the RigidBody3D with non-zero friction_applied")
+		return false
 	return true
 
 
