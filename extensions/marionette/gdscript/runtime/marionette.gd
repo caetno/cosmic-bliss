@@ -270,6 +270,31 @@ func build_ragdoll() -> void:
 		if state != BoneStateProfile.State.KINEMATIC:
 			dynamic_bone_names.append(skel_bone_name)
 
+	# Pass 3: soft-region jiggle bones. Iterate the BoneCollisionProfile's
+	# non-cascade list and spawn a JiggleBone for any entry whose hull is
+	# present and whose skeleton bone exists. CLAUDE.md §15. Spawned
+	# KINEMATIC for now — they track the skeleton bone pose directly and
+	# only contribute collision; the translation-only SPD spring lands when
+	# the broader SPD work does.
+	if bone_collision_profile != null:
+		for jiggle_name: StringName in bone_collision_profile.non_cascade_bones:
+			var skel_idx: int = skel.find_bone(jiggle_name)
+			if skel_idx < 0:
+				push_warning("Marionette.build_ragdoll: jiggle bone '%s' not in skeleton — skipped" % jiggle_name)
+				continue
+			if not bone_collision_profile.has_hull(jiggle_name):
+				push_warning("Marionette.build_ragdoll: jiggle bone '%s' has no hull in profile — skipped" % jiggle_name)
+				continue
+			var host_idx: int = skel.get_bone_parent(skel_idx)
+			var host_name: StringName = StringName(skel.get_bone_name(host_idx)) if host_idx >= 0 else &""
+			var jb := _build_jiggle_bone(skel, skel_idx, jiggle_name, host_name)
+			sim.add_child(jb)
+			_set_owner_for_editor(jb)
+			var collider: CollisionShape3D = _build_collider_for_bone(jb, skel, skel_idx)
+			jb.add_child(collider)
+			# Hull colliders stay runtime-only for the same reason as the
+			# regular bones (PackedVector3Array bloat in the .tscn).
+
 	_dynamic_bone_names = dynamic_bone_names
 
 	# Collision exclusions are intentionally NOT applied here. add_collision_exception_with
@@ -679,6 +704,60 @@ func _build_bone(
 	return bone
 
 
+# Soft-region jiggle body. Distinct from `_build_bone`: no anatomical
+# basis bake (jiggle bones don't carry a BoneEntry), all 3 angular axes
+# locked at 0 (rotation follows the host), and a small linear excursion
+# budget on each axis. Mass derived from the hull AABB volume × tissue
+# density (~1000 kg/m³, water-equivalent for soft tissue) so the spring
+# physics that lands later has a sane starting point. CLAUDE.md §15.
+func _build_jiggle_bone(
+		skel: Skeleton3D,
+		skel_index: int,
+		skel_bone_name: StringName,
+		host_bone_name: StringName) -> JiggleBone:
+	var bone := JiggleBone.new()
+	bone.name = String(skel_bone_name)
+	bone.bone_name = String(skel_bone_name)
+	bone.host_bone_name = host_bone_name
+	bone.joint_type = PhysicalBone3D.JOINT_TYPE_6DOF
+
+	# Rotation locked: lower=upper=0 on every axis. The body inherits the
+	# host bone's orientation; jiggle is translation-only.
+	for i: int in range(3):
+		var axis: String = ["x", "y", "z"][i]
+		bone.set("joint_constraints/%s/angular_limit_enabled" % axis, true)
+		bone.set("joint_constraints/%s/angular_limit_lower" % axis, 0.0)
+		bone.set("joint_constraints/%s/angular_limit_upper" % axis, 0.0)
+		# Translation budget — wide enough that the SPD spring can swing
+		# without immediately hitting the hard limit, narrow enough that
+		# nothing wanders away from the host on a stiffness underflow.
+		bone.set("joint_constraints/%s/linear_limit_enabled" % axis, true)
+		bone.set("joint_constraints/%s/linear_limit_lower" % axis, -0.05)
+		bone.set("joint_constraints/%s/linear_limit_upper" % axis, 0.05)
+
+	bone.mass = _estimate_jiggle_mass(skel_bone_name)
+	bone.visible = show_physics_bones_in_editor
+	return bone
+
+
+# Hull AABB volume × water-equivalent density. Crude but defensible —
+# breast / glute tissue is ~94–104% the density of water, so 1000 kg/m³
+# is within a few percent for any soft region. Returns a small fallback
+# when no hull is available (jiggle bone gets spawned anyway with a
+# capsule, so it still needs a non-zero mass).
+func _estimate_jiggle_mass(skel_bone_name: StringName) -> float:
+	if bone_collision_profile == null or not bone_collision_profile.has_hull(skel_bone_name):
+		return 0.5
+	var pts: PackedVector3Array = bone_collision_profile.hulls[skel_bone_name]
+	var aabb := AABB(pts[0], Vector3.ZERO)
+	for i: int in range(1, pts.size()):
+		aabb = aabb.expand(pts[i])
+	var volume: float = aabb.size.x * aabb.size.y * aabb.size.z
+	# 1000 kg/m³ × volume; floor at 0.1 kg so a degenerate AABB doesn't
+	# produce a near-zero-mass body that physics chokes on.
+	return max(volume * 1000.0, 0.1)
+
+
 # Walks the active simulator's MarionetteBone children and pushes the current
 # `show_physics_bones_in_editor` value into their `visible` flag. Called from
 # the export's setter so the toggle works without a rebuild.
@@ -806,6 +885,7 @@ func build_convex_colliders() -> void:
 	merged.weight_threshold = template.weight_threshold
 	merged.max_points_per_hull = template.max_points_per_hull
 	merged.shrink_factor = template.shrink_factor
+	merged.non_cascade_bones = template.non_cascade_bones.duplicate()
 
 	for mi: MeshInstance3D in meshes:
 		if mi.mesh == null or mi.skin == null:
