@@ -278,7 +278,8 @@ After normal correction for any collision type, apply friction to tangential dis
 
 ```
 // Normal correction already applied:
-Δn = magnitude of normal projection (positive)
+Δn = magnitude of normal projection (positive); the equivalent normal
+     force is N = m × Δn / dt² (steady-state correspondence)
 
 // Tangential displacement since last tick
 Δx = particle.position - particle.prev_position
@@ -287,22 +288,27 @@ tangent_mag = length(Δx_tangent)
 
 // Friction cones
 μ_s = compose_static_friction(surface_pair, modulators)     // §4.4
-μ_k = μ_s × 0.8                                             // typical ratio
+μ_k = μ_s × kinetic_friction_ratio                          // default 0.8;
+                                                            // per-tentacle export
 static_cone = μ_s × Δn
 kinetic_cone = μ_k × Δn
 
-if tangent_mag < static_cone:
-    // Inside static cone: cancel tangential motion
+if tangent_mag <= static_cone:
+    // Inside static cone: friction fully opposes the tangent motion.
     particle.position -= Δx_tangent
     friction_applied = Δx_tangent
 else:
-    // Outside static cone: cap to kinetic
-    scale = 1.0 - (kinetic_cone / tangent_mag)
-    particle.position -= Δx_tangent × scale
-    friction_applied = Δx_tangent × scale
+    // Kinetic regime: friction caps at μ_k × Δn — it can cancel up to
+    // `kinetic_cone` of motion this iteration. Particle continues with
+    // (tangent_mag − kinetic_cone) of tangential motion.
+    cancel = (Δx_tangent / tangent_mag) × kinetic_cone
+    particle.position -= cancel
+    friction_applied = cancel
 ```
 
 **This single block handles stick-slip, grip, rib modulation, and all surface interactions.** There is no state machine. The friction cone *is* the state — whether tangential motion falls inside or outside of it is computed each iteration from current values.
+
+**Per-iteration semantics.** Friction projects every PBD iteration. In *naturally-resolved* contacts (gravity holds the chain to a floor) iter 1's collision push leaves Δn ≈ 0 in iters 2–4, so per-tick cancellation tapers to ~1× `kinetic_cone` automatically — `Δx` is measured from `prev_position` so iter 1 already canceled what it could against the start-of-tick reference. In *actively-driven* contacts (a pose target continuously pushing the chain into a wall) the depth re-accumulates each iter and friction can stack to `iter_count × kinetic_cone` per tick — a ~4× over-friction worst case at default `iter_count = 4`. Acceptable for now; a per-tick friction budget on `TentacleParticle` (reset in `predict()`, decremented per friction projection) is the proper fix when specific scenarios force it. See `Cosmic_Bliss_Update_2026-05-02_phase4_friction_correction.md`.
 
 For each friction projection on a type-1 collision, the friction displacement is also applied as an equal-and-opposite impulse on the contacted ragdoll bone:
 
@@ -310,6 +316,8 @@ For each friction projection on a type-1 collision, the friction displacement is
 impulse_friction = friction_applied × effective_mass / dt
 bone.apply_impulse_at_position(impulse_friction, contact_point)
 ```
+
+Δn is the just-applied normal correction in position units; the equivalent normal force is `N = m × Δn / dt²`. The friction reciprocal impulse `J = friction_applied × m / dt` therefore evaluates to `μ_k × N × dt` — the kinetic-friction impulse over `dt`. A `body_impulse_scale` multiplier (default 1.0) on the `Tentacle` lets designers tune per-tentacle for "feels heavier than physics" or "feels lighter".
 
 Heavy tentacle dragging across skin pulls the hero's skin (and the bone under it) in the drag direction. This is where the "tentacle friction makes the hero move" feel comes from.
 

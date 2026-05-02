@@ -1,5 +1,12 @@
 # Cosmic Bliss — Design Update 2026-05-02 — Phase 4 friction correction
 
+> **Status: applied 2026-05-02.** Top-level review of the friction-projection
+> implementation passed; the §4.3 spec text in `docs/architecture/TentacleTech_Architecture.md`
+> was edited to match the corrected pseudocode plus three review-requested
+> additions (explicit Δn → N mapping, per-iteration semantics caveat with
+> forward-reference to the deferred per-tick budget, and `kinetic_friction_ratio`
+> default + configurability note). This doc remains as changelog.
+
 **Audience: Repo organizer Claude (top-level review).**
 
 This update flags a bug in `TentacleTech_Architecture.md §4.3 Unified PBD friction projection` that the per-extension implementation has corrected, plus a follow-up default-value change. The architecture-doc text itself needs to be updated to match.
