@@ -191,6 +191,39 @@ void PBDSolver::iterate() {
 					particles[anchor_particle_index], anchor_xform);
 		}
 	}
+
+	// Slice 4J — final collision cleanup. Distance constraints in step 4
+	// run AFTER collision and can pull a contacting particle back into the
+	// obstacle that step 3 just pushed it out of. The within-iter cycle
+	// can't fully resolve this in finite iterations: even at convergence,
+	// the LAST step the particle sees per iter is the distance pull, so
+	// end-of-tick position can be inside the obstacle.
+	//
+	// Tick-to-tick variation in "how far inside" (driven by the per-tick
+	// gravity step, neighbor motion, pose-target advance) becomes visible
+	// jitter — and not a velocity-carried jitter, so the slice 4I damping
+	// can't address it. Fix is one normal-only push-out pass after the
+	// iter loop completes. No friction (already applied within the iter
+	// loop), no flag mutation (already correct). Light cost: one pass over
+	// active contacts at the end of the tick.
+	if (env_contact_active.size() == n &&
+			env_contact_points.size() == n &&
+			env_contact_normals.size() == n) {
+		const uint8_t *act = env_contact_active.ptr();
+		const Vector3 *cp = env_contact_points.ptr();
+		const Vector3 *cn = env_contact_normals.ptr();
+		for (int i = 0; i < n; i++) {
+			if (act[i] == 0) continue;
+			TentacleParticle &p = particles[i];
+			if (p.inv_mass <= 0.0f) continue;
+			float radius = collision_radius * p.girth_scale;
+			if (radius < 1e-5f) continue;
+			float depth = radius - (p.position - cp[i]).dot(cn[i]);
+			if (depth > 0.0f) {
+				p.position += cn[i] * depth;
+			}
+		}
+	}
 }
 
 void PBDSolver::apply_base_angular_clamp(float p_dt) {

@@ -53,6 +53,7 @@ func _run_tests() -> void:
 		"test_friction_pushes_dynamic_body",
 		"test_body_impulse_scale_default_full",
 		"test_contact_velocity_damping_suppresses_jitter",
+		"test_no_particle_inside_obstacle_at_tick_end",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -535,6 +536,47 @@ func test_contact_velocity_damping_suppresses_jitter() -> bool:
 	if loose_max_dy < damp_max_dy * 3.0:
 		# Maybe scenarios differ — log warning but pass if monotonic.
 		print("[INFO] contact_velocity_damping suppression ratio %.2fx (loose %.5f / damp %.5f)" % [loose_max_dy / max(damp_max_dy, 1e-9), loose_max_dy, damp_max_dy])
+	return true
+
+
+# Slice 4J — the final collision cleanup pass guarantees no particle
+# ends a tick inside an obstacle. Iteration's distance constraint runs
+# AFTER collision and can pull contacting particles back inside; the
+# end-of-iterate cleanup pushes them out one last time. Without it, the
+# end-of-tick position would vary tick-to-tick by the distance-induced
+# violation, manifesting as visible jitter.
+#
+# Test: chain wedged between three sphere obstacles, settle, then for 60
+# ticks verify NO particle ends a tick more than `particle_collision_radius`
+# inside any obstacle (counted along the obstacle's outward normal). With
+# the cleanup pass: zero violations. Without it: many.
+func test_no_particle_inside_obstacle_at_tick_end() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 14, 0.05)
+	t.bending_stiffness = 0.5
+	# Wedge: spheres at chain mid Y, slightly off-axis in Z and X so the
+	# chain has to weave between them.
+	var s1: StaticBody3D = _make_sphere(Vector3(0.0, 0.20, -0.04), 0.06)
+	var s2: StaticBody3D = _make_sphere(Vector3(0.04, 0.30, 0.04), 0.06)
+	var s3: StaticBody3D = _make_sphere(Vector3(-0.04, 0.40, 0.0), 0.06)
+	_step([t], SETTLE_FRAMES)
+
+	# Verify per-tick that no particle is more than a small slack inside
+	# any sphere. Allow a tiny tolerance for finite-precision projection.
+	const SPHERE_R: float = 0.06
+	const SLACK: float = 0.005  # allowed depth into the sphere
+	var max_violation: float = 0.0
+	for _f in 60:
+		t.tick(DT)
+		var positions: PackedVector3Array = t.get_particle_positions()
+		for sphere_pos in [s1.global_position, s2.global_position, s3.global_position]:
+			for p in positions:
+				var d: float = (p - sphere_pos).length()
+				var violation: float = (SPHERE_R - t.particle_collision_radius) - d
+				if violation > max_violation:
+					max_violation = violation
+	if max_violation > SLACK:
+		push_error("particle inside sphere by %f (slack %f)" % [max_violation, SLACK])
+		return false
 	return true
 
 
