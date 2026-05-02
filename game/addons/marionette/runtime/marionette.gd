@@ -272,10 +272,10 @@ func build_ragdoll() -> void:
 
 	# Pass 3: soft-region jiggle bones. Iterate the BoneCollisionProfile's
 	# non-cascade list and spawn a JiggleBone for any entry whose hull is
-	# present and whose skeleton bone exists. CLAUDE.md §15. Spawned
-	# KINEMATIC for now — they track the skeleton bone pose directly and
-	# only contribute collision; the translation-only SPD spring lands when
-	# the broader SPD work does.
+	# present and whose skeleton bone exists. CLAUDE.md §15. Each jiggle
+	# bone goes into the dynamic list (spring physics drives translation)
+	# but its rotation is joint-locked so the host's pose orientation is
+	# preserved.
 	if bone_collision_profile != null:
 		for jiggle_name: StringName in bone_collision_profile.non_cascade_bones:
 			var skel_idx: int = skel.find_bone(jiggle_name)
@@ -294,6 +294,16 @@ func build_ragdoll() -> void:
 			jb.add_child(collider)
 			# Hull colliders stay runtime-only for the same reason as the
 			# regular bones (PackedVector3Array bloat in the .tscn).
+			# Cache skel + indices on the bone so _integrate_forces avoids
+			# string lookups per tick. Host idx ≥ 0 is guaranteed for any
+			# bone with a parent; jiggle bones at the root would be weird
+			# but the spring just no-ops in that case.
+			if host_idx >= 0:
+				jb.configure_spring(skel, host_idx, skel.get_bone_rest(skel_idx))
+			# Dynamic so the simulator runs _integrate_forces. Without this
+			# the bone would track the skeleton kinematically and the spring
+			# code would never execute.
+			dynamic_bone_names.append(jiggle_name)
 
 	_dynamic_bone_names = dynamic_bone_names
 
@@ -736,6 +746,21 @@ func _build_jiggle_bone(
 		bone.set("joint_constraints/%s/linear_limit_upper" % axis, 0.05)
 
 	bone.mass = _estimate_jiggle_mass(skel_bone_name)
+	# Default spring tuning: critically-soft (damping ratio 0.7 → small
+	# wobble, no resonance), reach time ~0.3 s. Mass-portable derivation
+	# so a 5 kg breast and a 0.5 kg jowl share the same feel.
+	#   omega = 2π / reach_seconds
+	#   k     = m · omega²
+	#   c     = 2 · ζ · ω · m         (ζ = damping ratio)
+	var reach_seconds: float = 0.3
+	var damping_ratio: float = 0.7
+	var omega: float = TAU / max(reach_seconds, 0.001)
+	bone.stiffness = bone.mass * omega * omega
+	bone.damping = 2.0 * damping_ratio * omega * bone.mass
+	# Custom integrator so the spring's apply_central_force takes effect.
+	# Without this the simulator's default integration would still run
+	# gravity but ignore _integrate_forces.
+	bone.custom_integrator = true
 	bone.visible = show_physics_bones_in_editor
 	return bone
 

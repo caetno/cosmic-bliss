@@ -109,10 +109,19 @@ func _init() -> void:
 			push_error("JiggleBone %s shouldn't carry a bone_entry" % bn)
 			failures += 1
 
-	# 4. Jiggle bones should NOT be in the dynamic list (kinematic for now).
+	# 4. Jiggle bones MUST be in the dynamic list — without it the simulator
+	#    leaves them kinematic and _integrate_forces never fires (so no
+	#    spring). They also need custom_integrator + a configured spring.
 	for jb: JiggleBone in jiggle_bones:
-		if marionette._dynamic_bone_names.has(StringName(jb.bone_name)):
-			push_error("JiggleBone %s leaked into dynamic_bone_names" % jb.bone_name)
+		if not marionette._dynamic_bone_names.has(StringName(jb.bone_name)):
+			push_error("JiggleBone %s missing from dynamic_bone_names" % jb.bone_name)
+			failures += 1
+		if not jb.custom_integrator:
+			push_error("JiggleBone %s should have custom_integrator=true" % jb.bone_name)
+			failures += 1
+		if jb.stiffness <= 0.0 or jb.damping <= 0.0:
+			push_error("JiggleBone %s has un-tuned spring (k=%f c=%f)"
+					% [jb.bone_name, jb.stiffness, jb.damping])
 			failures += 1
 
 	if failures > 0:
