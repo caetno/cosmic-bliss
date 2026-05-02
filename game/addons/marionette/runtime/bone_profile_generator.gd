@@ -159,9 +159,23 @@ static func generate_with_method(
 		var parent_world: Transform3D = world_rests[parent_name] if (parent_name != &"" and world_rests.has(parent_name)) else Transform3D()
 		var is_left_side: bool = String(bone_name).begins_with("Left")
 
+		# Capture any tuning the user did on the previous entry (joint spring
+		# values, possibly other future-tuneable fields). We rebuild the
+		# entry from scratch each pass — solver basis, mirror_abd, ROM
+		# defaults are all regenerated — but tuning that lives outside that
+		# regeneration scope is propagated into the fresh entry below so a
+		# re-Calibrate doesn't blow it away.
+		var prior_stiffness: Vector3 = Vector3.ZERO
+		var prior_damping: Vector3 = Vector3.ZERO
+		if entries.has(bone_name) and entries[bone_name] != null:
+			prior_stiffness = entries[bone_name].spring_stiffness
+			prior_damping = entries[bone_name].spring_damping
+
 		var entry := BoneEntry.new()
 		entry.archetype = archetype
 		entry.is_left_side = is_left_side
+		entry.spring_stiffness = prior_stiffness
+		entry.spring_damping = prior_damping
 
 		# ROOT and FIXED bones aren't SPD-driven; the matcher score is
 		# meaningless for them. Leave permutation at BoneEntry defaults
@@ -219,6 +233,11 @@ static func generate_with_method(
 				outcome_label = "FALLBACK score=%.2f (calculated frame baked into joint_rotation)" % match_result.score
 
 		MarionetteRomDefaults.apply(entry, bone_name)
+		# Spring defaults: archetype + bone-name-refined values. Per-axis
+		# preservation — any non-zero value carried over from prior tuning
+		# stays; zeros get the default for that axis. ROOT and FIXED bones
+		# stay at zero (no spring needed; not joint-driven).
+		MarionetteSpringDefaults.apply(entry, bone_name)
 		entry.rest_anatomical_offset = _compute_rest_offset(
 				archetype, bone_world, child_world, parent_world, entry)
 

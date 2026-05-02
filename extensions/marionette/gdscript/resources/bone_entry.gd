@@ -26,8 +26,27 @@ extends Resource
 
 # SPD parameters (CLAUDE.md §6). alpha = reach-in-N-physics-steps, mass-independent.
 # damping_ratio is the wobble dial: 0 = unstable bounce, 1 = critical, >1 = overdamped.
+# Read by the SPD path in MarionetteBone._integrate_forces (Phase 5; not yet
+# implemented). Independent of the joint-spring fields below.
 @export var alpha: float = 4.0
 @export_range(0.0, 2.0, 0.001) var damping_ratio: float = 1.0
+
+# 6DOF joint angular spring, per anatomical axis (flex / medial_rotation /
+# abduction). Read at Build Ragdoll time and written into Jolt's
+# `joint_constraints/{x,y,z}/angular_limit_spring_{stiffness,damping}` fields
+# on the spawned MarionetteBone. A zero stiffness on an axis disables the
+# spring on that axis (Jolt's `_enabled` flag is derived: stiffness > 0).
+#
+# This is the Phase-5-stopgap path: until proper SPD lands, Jolt's joint
+# springs keep dynamic bones from going fully limp. Values are Jolt-direct
+# (no unit conversion); the user-facing scale is roughly 0.5 (toes) to 4.0
+# (hips), with values above ~5 prone to integrator instability.
+#
+# Defaults populated by `MarionetteSpringDefaults.apply()` during Calibrate;
+# the apply step only writes defaults if the existing value is zero, so
+# tuned bones survive a re-Calibrate.
+@export var spring_stiffness: Vector3 = Vector3.ZERO
+@export var spring_damping: Vector3 = Vector3.ZERO
 
 # Fraction of the parent BoneProfile's total_mass attributed to this bone.
 # Sum across all bones must equal 1.
