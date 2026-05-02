@@ -810,6 +810,22 @@ func _apply_physics_bone_visibility() -> void:
 # Godot 4.6 PhysicalBone3D 6DOF property paths use the form
 # `joint_constraints/<axis>/<limit_kind>_<bound>` — verified empirically via
 # get_property_list().
+#
+# Two Jolt-specific quirks (memory:reference_godot_physicalbone_jolt_angle_units):
+#
+# 1. The `angular_limit_lower/upper` properties carry the `radians_as_degrees`
+#    hint (inspector displays in degrees, converts on input — implying stored
+#    radians) but Jolt actually consumes the stored number AS DEGREES. So we
+#    rad_to_deg() before writing.
+#
+# 2. HINGE-only X-axis sign mirroring. Authoring `rom_min.x = -20°,
+#    rom_max.x = +120°` on an elbow produces motion `(-120°, +20°)` (bone
+#    hyperextends, can't curl) without a swap-and-negate flip. Suspected
+#    cause: HINGE is the only archetype that produces a non-zero
+#    `rest_anatomical_offset.x` (carrying-angle offset from
+#    `_compute_rest_offset`); the offset combines with Jolt's X-axis
+#    decomposition in a way that mirrors the limit. SADDLE / BALL / SPINE_
+#    SEGMENT / CLAVICLE all read correctly without the flip.
 static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> void:
 	# Anatomical ROM, shifted by `-rest_anatomical_offset` so canonical-anatomy
 	# bounds (rom_min/rom_max) map to joint-local Jolt limits. Joint identity
@@ -821,20 +837,45 @@ static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> 
 	var anatomical_max: Vector3 = entry.rom_max - entry.rest_anatomical_offset
 	for i: int in range(3):
 		var axis: String = ["x", "y", "z"][i]
-		var lower: float = anatomical_min[i]
-		var upper: float = anatomical_max[i]
+		var lower_rad: float = anatomical_min[i]
+		var upper_rad: float = anatomical_max[i]
 		# Mirror the abduction limits when the basis chirality flipped that
 		# axis (see BoneEntry.mirror_abd). Negate AND swap so the joint
 		# permits the anatomically-positive direction even though the joint-
 		# local +Z rotation produces motion in the anti-anatomical direction.
 		if i == 2 and entry.mirror_abd:
-			var temp: float = lower
-			lower = -upper
-			upper = -temp
+			var t: float = lower_rad
+			lower_rad = -upper_rad
+			upper_rad = -t
+		# HINGE X-axis flip (quirk #2 above).
+		if i == 0 and entry.archetype == BoneArchetype.Type.HINGE:
+			var t2: float = lower_rad
+			lower_rad = -upper_rad
+			upper_rad = -t2
 		bone.set("joint_constraints/%s/angular_limit_enabled" % axis, true)
-		bone.set("joint_constraints/%s/angular_limit_lower" % axis, lower)
-		bone.set("joint_constraints/%s/angular_limit_upper" % axis, upper)
-		# Lock linear motion across the joint — bones articulate, they don't slide.
+		bone.set("joint_constraints/%s/angular_limit_lower" % axis, rad_to_deg(lower_rad))
+		bone.set("joint_constraints/%s/angular_limit_upper" % axis, rad_to_deg(upper_rad))
+
+		# 6DOF angular spring (slice 3). Per-axis: a positive stiffness
+		# enables the spring on that axis. Zero stiffness disables — Jolt
+		# skips the constraint, keeping joint solve cheap on locked-DOF
+		# axes (Hinge Y/Z, Saddle Y, etc.). Damping is meaningful only when
+		# the spring is enabled.
+		#
+		# Property paths are `angular_spring_{enabled,stiffness,damping}` —
+		# NOT `angular_limit_spring_*` despite the limit fields above using
+		# `angular_limit_*`. Empirically verified via get_property_list.
+		var k: float = entry.spring_stiffness[i]
+		var c: float = entry.spring_damping[i]
+		var spring_on: bool = k > 0.0
+		bone.set("joint_constraints/%s/angular_spring_enabled" % axis, spring_on)
+		if spring_on:
+			bone.set("joint_constraints/%s/angular_spring_stiffness" % axis, k)
+			bone.set("joint_constraints/%s/angular_spring_damping" % axis, c)
+
+		# Lock linear motion across the joint — bones articulate, they don't
+		# slide. 0 is unit-agnostic (the rad-as-deg quirk doesn't matter for
+		# zero values).
 		bone.set("joint_constraints/%s/linear_limit_enabled" % axis, true)
 		bone.set("joint_constraints/%s/linear_limit_lower" % axis, 0.0)
 		bone.set("joint_constraints/%s/linear_limit_upper" % axis, 0.0)

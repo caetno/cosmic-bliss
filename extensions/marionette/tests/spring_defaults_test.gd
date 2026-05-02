@@ -113,6 +113,110 @@ func _init() -> void:
 	print("  LeftLowerArm  k=%s c=%s" % [elbow_after.spring_stiffness, elbow_after.spring_damping])
 	print("  LeftFoot      k=%s c=%s" % [foot_after.spring_stiffness, foot_after.spring_damping])
 
+	# Slice 3: build the ragdoll and verify spring/limit values landed on
+	# the spawned MarionetteBones via Jolt's joint_constraints/* property
+	# paths.
+	print()
+	print("Building ragdoll to verify _apply_joint_constraints writes ...")
+	marionette.build_ragdoll()
+	var sim: PhysicalBoneSimulator3D = null
+	var skel: Skeleton3D = marionette.resolve_skeleton()
+	for c: Node in skel.get_children():
+		if c is PhysicalBoneSimulator3D:
+			sim = c
+			break
+	if sim == null:
+		push_error("Marionette didn't build a simulator")
+		quit(1)
+		return
+	var bones_by_name: Dictionary[StringName, MarionetteBone] = {}
+	for c: Node in sim.get_children():
+		if c is MarionetteBone and not (c is JiggleBone):
+			bones_by_name[StringName((c as MarionetteBone).bone_name)] = c
+
+	# Spring readbacks: flex axis carries the user-tuned value; locked axes
+	# get spring_enabled = false.
+	var spring_checks: Array = [
+		# bone, axis, expected_k, expected_c, expected_enabled
+		[&"LeftBigToeDistal",   "x", 0.5, 2.0, true],
+		[&"LeftBigToeDistal",   "y", 0.0, 0.0, false],
+		[&"LeftBigToeDistal",   "z", 0.0, 0.0, false],
+		[&"LeftFoot",           "x", 1.2, 2.8, true],
+		[&"LeftFoot",           "y", 0.0, 0.0, false],
+		# LeftFoot.z damping = 9.9 was carried over from the earlier
+		# tune+re-Calibrate step; the build_ragdoll path should land it.
+		[&"LeftFoot",           "z", 1.2, 9.9, true],
+		[&"LeftUpperArm",       "y", 1.5, 3.0, true],   # BALL — all 3 axes
+		[&"LeftLowerArm",       "x", 7.7, 2.5, true],   # carried over from earlier tuning
+	]
+	for check in spring_checks:
+		var bn: StringName = check[0]
+		var ax: String = check[1]
+		var ek: float = check[2]
+		var ec: float = check[3]
+		var ee: bool = check[4]
+		var b: MarionetteBone = bones_by_name.get(bn)
+		if b == null:
+			push_error("Bone not in simulator: %s" % bn)
+			failures += 1
+			continue
+		var got_e: bool = b.get("joint_constraints/%s/angular_spring_enabled" % ax)
+		var got_k: float = b.get("joint_constraints/%s/angular_spring_stiffness" % ax)
+		var got_c: float = b.get("joint_constraints/%s/angular_spring_damping" % ax)
+		if got_e != ee:
+			push_error("%s.%s spring_enabled: expected %s, got %s" % [bn, ax, ee, got_e])
+			failures += 1
+		if ee:  # only check k/c when the spring is on; disabled axes leave the fields untouched
+			if not is_equal_approx(got_k, ek):
+				push_error("%s.%s stiffness: expected %.2f, got %.2f" % [bn, ax, ek, got_k])
+				failures += 1
+			if not is_equal_approx(got_c, ec):
+				push_error("%s.%s damping: expected %.2f, got %.2f" % [bn, ax, ec, got_c])
+				failures += 1
+
+	# Unit sanity: write goes through rad_to_deg. ROM stored in BoneEntry is
+	# radians; readback should be degrees. Pick a bone with a clearly
+	# asymmetric authored ROM where the difference between rad and deg is
+	# unambiguous. LeftFoot (SADDLE ankle): authored x ROM is roughly
+	# (-15°, +40°) ≈ (-0.26 rad, +0.70 rad). Readback should be ~ -15 / +40
+	# in degrees, not -0.26 / +0.70 in radians (and not the X-flip negated
+	# variant — that flip is HINGE-only).
+	var foot_bone: MarionetteBone = bones_by_name.get(&"LeftFoot")
+	if foot_bone != null:
+		var lo_x: float = foot_bone.get("joint_constraints/x/angular_limit_lower")
+		var up_x: float = foot_bone.get("joint_constraints/x/angular_limit_upper")
+		# Tolerance loose because rest_anatomical_offset shifts the bounds a
+		# few degrees. Magnitudes still > 5 — radians would be < 1 here.
+		if abs(lo_x) < 5.0 and abs(up_x) < 5.0:
+			push_error("LeftFoot.x angular limits look like radians (got %.3f / %.3f); rad_to_deg conversion missing"
+					% [lo_x, up_x])
+			failures += 1
+		print("  LeftFoot.x angular limit (deg): [%.1f, %.1f]" % [lo_x, up_x])
+
+	# HINGE X-flip sanity: an elbow's authored flex range is roughly
+	# (0°, 140°). After rest_anatomical_offset (~20° carrying angle) and
+	# the HINGE swap-and-negate, readback lands somewhere like (-120°, 20°)
+	# — large-magnitude lower, small-magnitude upper. Without the flip the
+	# readback would be mirrored: (-20°, 120°). The signature of "the flip
+	# happened" is the negative-leaning center: (lo + up) < 0.
+	var elbow_bone: MarionetteBone = bones_by_name.get(&"LeftLowerArm")
+	if elbow_bone != null:
+		var lo_x: float = elbow_bone.get("joint_constraints/x/angular_limit_lower")
+		var up_x: float = elbow_bone.get("joint_constraints/x/angular_limit_upper")
+		if (lo_x + up_x) >= 0.0:
+			push_error("LeftLowerArm.x angular limits don't look HINGE-flipped: [%.1f, %.1f] center=%.1f"
+					% [lo_x, up_x, (lo_x + up_x) * 0.5])
+			failures += 1
+		# Magnitudes must be in degrees (rom in radians is < π ≈ 3.14).
+		if abs(lo_x) < 5.0 or abs(up_x) < 5.0:
+			# Hmm, upper might be small by design (post-flip max ~20°).
+			# Only flag if BOTH are radian-magnitude.
+			if abs(lo_x) < 5.0 and abs(up_x) < 5.0:
+				push_error("LeftLowerArm.x angular limits look like radians: [%.3f, %.3f]"
+						% [lo_x, up_x])
+				failures += 1
+		print("  LeftLowerArm.x angular limit (deg, post-HINGE-flip): [%.1f, %.1f]" % [lo_x, up_x])
+
 	if failures > 0:
 		push_error("%d failure(s)" % failures)
 		quit(1)
