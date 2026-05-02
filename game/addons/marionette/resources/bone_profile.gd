@@ -8,10 +8,11 @@ extends Resource
 
 @export var skeleton_profile: SkeletonProfile
 
-# Total ragdoll mass in kg. Per-bone mass = total_mass * BoneEntry.mass_fraction.
-@export var total_mass: float = 70.0
-
 # Keys: bone names from skeleton_profile. Values: per-bone authoring data.
+# Total ragdoll mass lives on the consuming Marionette node (Marionette.
+# total_mass) — per-bone mass = Marionette.total_mass * BoneEntry.mass_fraction.
+# A profile is per-rig; total mass is per-character; one profile can drive
+# many characters of different total mass.
 @export var bones: Dictionary[StringName, BoneEntry] = {}
 
 

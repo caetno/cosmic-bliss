@@ -6,6 +6,7 @@ var _joint_limit_gizmo: MarionetteJointLimitGizmo
 var _collider_gizmo: MarionetteColliderGizmo
 var _bone_profile_inspector: MarionetteBoneProfileInspector
 var _bone_inspector: MarionetteBoneInspector
+var _marionette_inspector: MarionetteInspectorPlugin
 var _muscle_dock: MarionetteMuscleTestDock
 
 
@@ -23,6 +24,8 @@ func _enter_tree() -> void:
 	add_inspector_plugin(_bone_profile_inspector)
 	_bone_inspector = MarionetteBoneInspector.new()
 	add_inspector_plugin(_bone_inspector)
+	_marionette_inspector = MarionetteInspectorPlugin.new()
+	add_inspector_plugin(_marionette_inspector)
 	# Mount alongside Inspector / Node (Signals, Groups) / History so the
 	# muscle-test tab is one click away during authoring.
 	_muscle_dock = MarionetteMuscleTestDock.new()
@@ -45,6 +48,9 @@ func _exit_tree() -> void:
 	if _bone_inspector != null:
 		remove_inspector_plugin(_bone_inspector)
 		_bone_inspector = null
+	if _marionette_inspector != null:
+		remove_inspector_plugin(_marionette_inspector)
+		_marionette_inspector = null
 	if _muscle_dock != null:
 		remove_control_from_docks(_muscle_dock)
 		_muscle_dock.queue_free()

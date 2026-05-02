@@ -304,8 +304,8 @@ func _test_bone_entry_basis_round_trip() -> bool:
 
 func _test_bone_profile_defaults() -> bool:
 	var p := BoneProfile.new()
-	if not is_equal_approx(p.total_mass, 70.0):
-		return _fail("bone_profile_defaults", "total_mass default should be 70.0")
+	# total_mass moved to Marionette node in slice 5 — BoneProfile no longer
+	# carries it. Test what's left: bones dict + skeleton_profile + mass_fraction.
 	if p.bones.size() != 0:
 		return _fail("bone_profile_defaults", "bones default should be empty")
 	if p.skeleton_profile != null:
@@ -1436,7 +1436,6 @@ func _build_synthetic_marionette() -> Marionette:
 	var skel_profile := load(HUMANOID_PROFILE_PATH) as SkeletonProfile
 	var bp := BoneProfile.new()
 	bp.skeleton_profile = skel_profile
-	bp.total_mass = 70.0
 
 	var root_entry := BoneEntry.new()
 	root_entry.archetype = BoneArchetype.Type.ROOT
@@ -1581,7 +1580,6 @@ func _test_build_ragdoll_bakes_calculated_frame_when_flag_set() -> bool:
 
 	var bp := BoneProfile.new()
 	bp.skeleton_profile = load(HUMANOID_PROFILE_PATH) as SkeletonProfile
-	bp.total_mass = 70.0
 	bp.bones[&"Root"] = BoneEntry.new()
 	bp.bones[&"Root"].archetype = BoneArchetype.Type.ROOT
 	bp.bones[&"Hips"] = BoneEntry.new()
@@ -1627,13 +1625,16 @@ func _test_build_ragdoll_rom_round_trip() -> bool:
 	var leg := _find_bone(sim, "LeftUpperLeg")
 	var entry := leg.bone_entry
 
+	# _apply_joint_constraints writes degrees (Jolt unit quirk fix in slice 3)
+	# — convert expected values from rad to deg before compare. LeftUpperLeg
+	# is BALL: no HINGE X-flip, no mirror_abd.
 	var checks := {
-		"joint_constraints/x/angular_limit_lower": entry.rom_min.x,
-		"joint_constraints/x/angular_limit_upper": entry.rom_max.x,
-		"joint_constraints/y/angular_limit_lower": entry.rom_min.y,
-		"joint_constraints/y/angular_limit_upper": entry.rom_max.y,
-		"joint_constraints/z/angular_limit_lower": entry.rom_min.z,
-		"joint_constraints/z/angular_limit_upper": entry.rom_max.z,
+		"joint_constraints/x/angular_limit_lower": rad_to_deg(entry.rom_min.x),
+		"joint_constraints/x/angular_limit_upper": rad_to_deg(entry.rom_max.x),
+		"joint_constraints/y/angular_limit_lower": rad_to_deg(entry.rom_min.y),
+		"joint_constraints/y/angular_limit_upper": rad_to_deg(entry.rom_max.y),
+		"joint_constraints/z/angular_limit_lower": rad_to_deg(entry.rom_min.z),
+		"joint_constraints/z/angular_limit_upper": rad_to_deg(entry.rom_max.z),
 	}
 	for path: String in checks:
 		var got: float = leg.get(path)
@@ -2613,13 +2614,18 @@ func _test_build_ragdoll_rom_shifted_by_rest_offset() -> bool:
 	# Re-bake constraints using the same code path as build_ragdoll.
 	Marionette._apply_joint_constraints(leg, entry)
 
+	# _apply_joint_constraints writes degrees (Jolt unit quirk fix in
+	# slice 3) — convert expected values from rad to deg before compare.
+	# LeftUpperLeg is BALL: no HINGE X-flip applies, no mirror_abd, so the
+	# expected value is rom - offset on every axis as the original test
+	# computed, just unit-shifted.
 	var checks := {
-		"joint_constraints/x/angular_limit_lower": entry.rom_min.x - offset.x,
-		"joint_constraints/x/angular_limit_upper": entry.rom_max.x - offset.x,
-		"joint_constraints/y/angular_limit_lower": entry.rom_min.y - offset.y,
-		"joint_constraints/y/angular_limit_upper": entry.rom_max.y - offset.y,
-		"joint_constraints/z/angular_limit_lower": entry.rom_min.z - offset.z,
-		"joint_constraints/z/angular_limit_upper": entry.rom_max.z - offset.z,
+		"joint_constraints/x/angular_limit_lower": rad_to_deg(entry.rom_min.x - offset.x),
+		"joint_constraints/x/angular_limit_upper": rad_to_deg(entry.rom_max.x - offset.x),
+		"joint_constraints/y/angular_limit_lower": rad_to_deg(entry.rom_min.y - offset.y),
+		"joint_constraints/y/angular_limit_upper": rad_to_deg(entry.rom_max.y - offset.y),
+		"joint_constraints/z/angular_limit_lower": rad_to_deg(entry.rom_min.z - offset.z),
+		"joint_constraints/z/angular_limit_upper": rad_to_deg(entry.rom_max.z - offset.z),
 	}
 	for path: String in checks:
 		var got: float = leg.get(path)
