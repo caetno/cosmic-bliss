@@ -362,6 +362,14 @@ func build_ragdoll() -> void:
 	if not skel.pose_updated.is_connected(update_gizmos):
 		skel.pose_updated.connect(update_gizmos)
 
+	# Force an immediate gizmo refresh: the collider gizmo enumerates the
+	# simulator's children at _redraw time, and without an explicit kick the
+	# editor doesn't re-fire _redraw for purely structural changes (new
+	# child nodes). Without this, the user has to deselect-and-reselect
+	# the Marionette to see hulls appear after Build Ragdoll.
+	update_gizmos()
+	request_gizmo_refresh()
+
 
 # Tears down any existing PhysicalBoneSimulator3D under the resolved skeleton.
 # Safe to call when no ragdoll exists.
