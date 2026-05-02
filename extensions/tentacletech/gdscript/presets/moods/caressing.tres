@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="TentacleMood" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/tentacletech/scripts/behavior/tentacle_mood.gd" id="1_script"]
+
+[resource]
+resource_name = "caressing"
+script = ExtResource("1_script")
+wave_amplitude_scale = 0.7
+wave_temporal_freq = 0.6
+wave_drift_speed = 0.4
+wave_noise_freq = 0.3
+wave_spatial_phase = 1.0
+thrust_frequency = 0.4
+thrust_amplitude = 0.05
+thrust_bias = 0.0
+thrust_strike_sharpness = 0.8
+coil_amplitude = 0.10
+rest_extent = 0.88
+pose_stiffness = 0.08
+attractor_bias = 0.3
+amplitude_smoothing_rate = 4.0
+thrust_phase_edge_smoothing = 0.2
+time_scale = 0.7

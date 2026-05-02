@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="TentacleMood" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/tentacletech/scripts/behavior/tentacle_mood.gd" id="1_script"]
+
+[resource]
+resource_name = "curious"
+script = ExtResource("1_script")
+wave_amplitude_scale = 0.6
+wave_temporal_freq = 1.5
+wave_drift_speed = 0.8
+wave_noise_freq = 1.0
+wave_spatial_phase = 0.7
+thrust_frequency = 0.0
+thrust_amplitude = 0.0
+thrust_bias = 0.0
+thrust_strike_sharpness = 1.0
+coil_amplitude = 0.0
+rest_extent = 0.92
+pose_stiffness = 0.15
+attractor_bias = 0.4
+amplitude_smoothing_rate = 8.0
+thrust_phase_edge_smoothing = 0.1
+time_scale = 1.0

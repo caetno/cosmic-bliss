@@ -37,6 +37,24 @@ extends Node3D
 		tentacle_path = v
 		_resolve_tentacle()
 
+# --- Mood preset (slice 2 of param-cleanup) --------------------------------
+#
+# Copy-on-assign pattern: setting `mood` immediately copies its 16 fields
+# into the @exports below + connects to the resource's `changed` signal so
+# inspector edits on the .tres re-apply automatically. Setting `mood = null`
+# leaves the last-applied values in place — the @exports are still the live
+# source of truth at tick time.
+
+## Optional [code]TentacleMood[/code] resource. When assigned, copies its
+## fields onto the Wave / Thrust / Rest pose / Stiffness / Attractor /
+## Easing / Time @exports below. Library: [code]res://addons/tentacletech/presets/moods/[/code].
+@export var mood: TentacleMood :
+	set(v):
+		_disconnect_mood(mood)
+		mood = v
+		_connect_mood(mood)
+		_apply_mood()
+
 # --- Wave motion (the core) ------------------------------------------------
 
 @export_group("Wave")
@@ -238,6 +256,10 @@ var _last_pose_size: int = -1
 
 
 func _ready() -> void:
+	# Re-apply the mood resource on load so inspector-attached presets
+	# always wins over any stale values stored in the scene.
+	_connect_mood(mood)
+	_apply_mood()
 	if randomize_phase_on_ready and not Engine.is_editor_hint():
 		_wave_phase = randf() * TAU
 		_wave_drift_angle = randf() * TAU
@@ -481,6 +503,46 @@ func refresh_wiring() -> void:
 	_resolve_tentacle()
 	_resolve_attractor()
 	_apply_mass_from_girth()
+
+
+# --- Mood (preset) helpers -------------------------------------------------
+# Copy-on-assign + reapply-on-changed. The driver's @exports stay the live
+# source of truth at tick time; the mood resource is just a convenient way
+# to set them in bulk from a .tres preset.
+
+func _connect_mood(p_mood: TentacleMood) -> void:
+	if p_mood == null:
+		return
+	if not p_mood.changed.is_connected(_apply_mood):
+		p_mood.changed.connect(_apply_mood)
+
+
+func _disconnect_mood(p_mood: TentacleMood) -> void:
+	if p_mood == null:
+		return
+	if p_mood.changed.is_connected(_apply_mood):
+		p_mood.changed.disconnect(_apply_mood)
+
+
+func _apply_mood() -> void:
+	if mood == null:
+		return
+	wave_amplitude_scale = mood.wave_amplitude_scale
+	wave_temporal_freq = mood.wave_temporal_freq
+	wave_drift_speed = mood.wave_drift_speed
+	wave_noise_freq = mood.wave_noise_freq
+	wave_spatial_phase = mood.wave_spatial_phase
+	thrust_frequency = mood.thrust_frequency
+	thrust_amplitude = mood.thrust_amplitude
+	thrust_bias = mood.thrust_bias
+	thrust_strike_sharpness = mood.thrust_strike_sharpness
+	coil_amplitude = mood.coil_amplitude
+	rest_extent = mood.rest_extent
+	pose_stiffness = mood.pose_stiffness
+	attractor_bias = mood.attractor_bias
+	amplitude_smoothing_rate = mood.amplitude_smoothing_rate
+	thrust_phase_edge_smoothing = mood.thrust_phase_edge_smoothing
+	time_scale = mood.time_scale
 
 
 # Pulled out of `_ready` and exposed via the property setters so
