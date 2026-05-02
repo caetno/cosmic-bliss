@@ -71,13 +71,11 @@ func _init() -> void:
 	# so the test's behavior doesn't drift if the resource defaults are
 	# tuned later.
 	template.weight_threshold = 0.3
-	template.silhouette_quality = 0.97
 	template.max_points_per_hull = 64
 	template.shrink_factor = 0.02
 
 	var merged := BoneCollisionProfile.new()
 	merged.weight_threshold = template.weight_threshold
-	merged.silhouette_quality = template.silhouette_quality
 	merged.max_points_per_hull = template.max_points_per_hull
 	merged.shrink_factor = template.shrink_factor
 
@@ -167,4 +165,4 @@ func _merge_into(dst: BoneCollisionProfile, src: BoneCollisionProfile) -> void:
 		# Cap by re-running the same adaptive decimation; keeps merged
 		# hulls comparable to single-source ones in point count.
 		dst.hulls[bone_name] = ColliderBuilder.find_optimal_decimation(
-				combined, dst.silhouette_quality, dst.max_points_per_hull)
+				combined, dst.max_points_per_hull)

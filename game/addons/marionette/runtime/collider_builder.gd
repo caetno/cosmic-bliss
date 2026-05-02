@@ -25,11 +25,16 @@ class_name ColliderBuilder
 # poses change), so the build action is run once per character and
 # re-run when the mesh / rig is re-exported.
 
-const _DEFAULT_PROBE_DIRECTIONS: int = 64
-# Geometric-ish growth so coarse bones (forearm: maybe 200 verts) settle
-# quickly while fine bones (chest: thousands of verts) reach a useful
-# silhouette before hitting the per-hull cap.
-const _DECIMATION_CANDIDATES: Array[int] = [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+# Number of bands the bucket is split into along its longest AABB axis when
+# stratified-sampling. Each band gets its own furthest-point quota so wrist /
+# ankle / toe-base cross-sections aren't crowded out by the wider muscle-belly
+# vertices a single global FPS pass would prefer. 6 bands gives enough end-cap
+# coverage on long limbs while staying inexpensive for the inner FPS calls.
+const _STRATIFY_BANDS: int = 6
+# Floor of points per band — guarantees even short bones get cross-section
+# coverage at every band; the rest is allocated proportionally to the band's
+# vertex count.
+const _STRATIFY_FLOOR: int = 4
 
 
 # Top-level entry. Reads the authoring parameters off `template`
@@ -43,7 +48,6 @@ static func build_profile(
 	var profile := BoneCollisionProfile.new()
 	if template != null:
 		profile.weight_threshold = template.weight_threshold
-		profile.silhouette_quality = template.silhouette_quality
 		profile.max_points_per_hull = template.max_points_per_hull
 		profile.shrink_factor = template.shrink_factor
 
@@ -58,7 +62,7 @@ static func build_profile(
 		if pts.size() < 4:
 			continue
 		var optimized: PackedVector3Array = find_optimal_decimation(
-				pts, profile.silhouette_quality, profile.max_points_per_hull)
+				pts, profile.max_points_per_hull)
 		if profile.shrink_factor > 0.0:
 			optimized = apply_shrink(optimized, profile.shrink_factor)
 		profile.hulls[bone_name] = optimized
@@ -189,36 +193,87 @@ static func _emit_to_bucket(
 	buckets[profile_name] = arr
 
 
-# Maps each skin bind index to its profile bone name (or skeleton bone
-# name when `bone_map` is null). Mirrors Marionette._resolve_profile_name's
-# resolution order: bone_map.find_profile_bone_name first, then direct
-# skeleton-name match, &"" if neither resolves.
+# Maps each skin bind index to its profile bone name. For bones that aren't
+# in the profile (twist helpers, leaf tails, accessory bones) we walk up the
+# skeleton hierarchy until an ancestor *is* — so e.g. ARP's `arm_twist.l`
+# (parented under `arm_stretch.l` → LeftUpperArm) contributes its skin
+# weights to the upper-arm hull instead of forming a dead bucket. Without
+# the cascade, vertices skinned to the 8 ARP twist bones (arm_twist,
+# forearm_twist, thigh_twist, leg_twist × L/R) get dropped from the limb
+# hulls — visible as a missing band of skin around the long-bone midshafts.
+# `_twist_leaf` cascades through twist→stretch in two steps.
+#
+# Two retargeting workflows are both supported:
+#   - Pre-retarget (skel uses ARP names): `bone_map.find_profile_bone_name`
+#     resolves `arm_stretch.l` → `LeftUpperArm` directly.
+#   - Post-retarget (skel uses profile names; the kasumi pipeline):
+#     `find_profile_bone_name` returns &"" for everything because the map
+#     is keyed on ARP source names, but `bone_map.profile.find_bone(name)`
+#     is non-negative for legitimate profile slots — so we accept the skel
+#     name as-is when it's a slot, and cascade for the leftover helpers.
+# Null `bone_map` falls back to the legacy identity behavior (no profile
+# oracle available).
 static func _build_skin_name_table(
 		skin: Skin,
 		skel: Skeleton3D,
 		bone_map: BoneMap) -> Array[StringName]:
 	var out: Array[StringName] = []
 	out.resize(skin.get_bind_count())
+	var profile: SkeletonProfile = bone_map.profile if bone_map != null else null
 	for i: int in skin.get_bind_count():
 		var bind_name: StringName = StringName(skin.get_bind_name(i))
 		var skel_idx: int = skin.get_bind_bone(i)
 		var skel_name: StringName = bind_name
 		if skel_name == &"" and skel_idx >= 0:
 			skel_name = StringName(skel.get_bone_name(skel_idx))
-		out[i] = _resolve_profile_name(skel_name, bone_map)
+		out[i] = _resolve_profile_name_with_cascade(skel_name, skel_idx, skel, bone_map, profile)
 	return out
 
 
-# Skeleton bone name -> profile bone name. Identity when bone_map is null
-# or when the name isn't in the map (matching marionette.gd line 152's
-# convention).
-static func _resolve_profile_name(skel_name: StringName, bone_map: BoneMap) -> StringName:
+# Skeleton bone name -> profile bone name with parent-chain cascade for
+# helper bones. Resolution order:
+#   1. `bone_map.find_profile_bone_name(name)` (pre-retarget map hit).
+#   2. `profile.find_bone(name) >= 0` (post-retarget identity — the skel
+#      name already IS the profile slot name).
+#   3. Walk up the skeleton, repeating 1+2 at each ancestor.
+# Returns &"" only when no ancestor satisfies either path (e.g. `c_traj`
+# above the hips). Null `bone_map` short-circuits to identity, matching
+# the pre-cascade fallback behavior.
+static func _resolve_profile_name_with_cascade(
+		skel_name: StringName,
+		skel_idx_hint: int,
+		skel: Skeleton3D,
+		bone_map: BoneMap,
+		profile: SkeletonProfile) -> StringName:
 	if bone_map == null:
 		return skel_name
-	var pn: StringName = bone_map.find_profile_bone_name(skel_name)
+	var direct: StringName = _try_map_or_profile(skel_name, bone_map, profile)
+	if direct != &"":
+		return direct
+	var idx: int = skel_idx_hint
+	if idx < 0:
+		idx = skel.find_bone(skel_name)
+	while idx >= 0:
+		idx = skel.get_bone_parent(idx)
+		if idx < 0:
+			break
+		var ancestor_name: StringName = StringName(skel.get_bone_name(idx))
+		var ancestor: StringName = _try_map_or_profile(ancestor_name, bone_map, profile)
+		if ancestor != &"":
+			return ancestor
+	return &""
+
+
+static func _try_map_or_profile(
+		name: StringName,
+		bone_map: BoneMap,
+		profile: SkeletonProfile) -> StringName:
+	var pn: StringName = bone_map.find_profile_bone_name(name)
 	if pn != &"":
 		return pn
-	return skel_name
+	if profile != null and profile.find_bone(name) >= 0:
+		return name
+	return &""
 
 
 # Greedy farthest-point sampling. Seed at the most-negative-X point so
@@ -259,89 +314,110 @@ static func furthest_point_sample(points: PackedVector3Array, k: int) -> PackedV
 	return sample
 
 
-# Mean directional-extent ratio over `n_directions` Fibonacci-sphere
-# probes. 1.0 means the sample's hull projects to the same extent as
-# the full set in every direction; values below ~0.95 produce a
-# noticeably-pinched silhouette in practice.
-static func silhouette_quality_for(
-		full: PackedVector3Array,
-		sample: PackedVector3Array,
-		n_directions: int = _DEFAULT_PROBE_DIRECTIONS) -> float:
-	if full.is_empty() or sample.is_empty():
-		return 0.0
-	var directions: Array[Vector3] = _fibonacci_directions(n_directions)
-	var ratio_sum: float = 0.0
-	var counted: int = 0
-	for d: Vector3 in directions:
-		var f_min: float = INF
-		var f_max: float = -INF
-		for p: Vector3 in full:
-			var pd: float = p.dot(d)
-			if pd < f_min:
-				f_min = pd
-			if pd > f_max:
-				f_max = pd
-		var s_min: float = INF
-		var s_max: float = -INF
-		for p: Vector3 in sample:
-			var pd: float = p.dot(d)
-			if pd < s_min:
-				s_min = pd
-			if pd > s_max:
-				s_max = pd
-		var f_ext: float = f_max - f_min
-		var s_ext: float = s_max - s_min
-		# Skip directions where the full set is degenerate (collinear bones,
-		# etc.); they'd report 1.0 unconditionally and bias the average.
-		if f_ext > 1e-6:
-			ratio_sum += clamp(s_ext / f_ext, 0.0, 1.0)
-			counted += 1
-	if counted == 0:
-		return 0.0
-	return ratio_sum / float(counted)
-
-
-# Quasi-uniform unit vectors via the golden-section spiral. Cheaper and
-# more isotropic than `randf_range` on a sphere — and deterministic, so
-# silhouette quality is reproducible across rebuilds.
-static func _fibonacci_directions(n: int) -> Array[Vector3]:
-	var dirs: Array[Vector3] = []
-	dirs.resize(n)
-	var phi: float = PI * (sqrt(5.0) - 1.0)
+# Furthest-point sampling stratified along the bucket's longest AABB axis.
+# Splits the bucket into `_STRATIFY_BANDS` slabs along that axis and runs FPS
+# inside each slab with its own quota, so narrow cross-sections (wrist, ankle,
+# toe-base on a foot) get dedicated samples instead of being out-bid by the
+# wider muscle-belly band a single global FPS pass prefers. This is what fixes
+# the pinched-wrist / pinched-ankle hulls that show up once the cascade folds
+# twist-bone vertices into the parent limb's bucket.
+#
+# Allocation per band: a floor of `_STRATIFY_FLOOR` points (so even sparse
+# end caps still get a polygon), plus a proportional share of the leftover
+# budget weighted by the band's vertex count. Bands with no input contribute
+# nothing.
+static func stratified_furthest_point_sample(
+		points: PackedVector3Array, k: int) -> PackedVector3Array:
+	var n: int = points.size()
+	if n <= k:
+		return points
+	# Find the bucket's AABB and the index (0/1/2) of its longest axis.
+	var aabb_min: Vector3 = points[0]
+	var aabb_max: Vector3 = points[0]
+	for i: int in range(1, n):
+		var p: Vector3 = points[i]
+		aabb_min = aabb_min.min(p)
+		aabb_max = aabb_max.max(p)
+	var size: Vector3 = aabb_max - aabb_min
+	var axis: int = 0
+	if size.y > size[axis]:
+		axis = 1
+	if size.z > size[axis]:
+		axis = 2
+	var span: float = size[axis]
+	# Degenerate (planar / collinear) bucket — fall back to plain FPS to
+	# avoid div-by-zero on the band partition.
+	if span <= 1e-6:
+		return furthest_point_sample(points, k)
+	# Bin every input vertex into a band by its position along `axis`.
+	var bands: Array[PackedVector3Array] = []
+	bands.resize(_STRATIFY_BANDS)
+	for bi: int in _STRATIFY_BANDS:
+		bands[bi] = PackedVector3Array()
+	var axis_min: float = aabb_min[axis]
 	for i: int in n:
-		var y: float = 1.0 - 2.0 * float(i) / float(max(n - 1, 1))
-		var radius: float = sqrt(max(1.0 - y * y, 0.0))
-		var theta: float = phi * float(i)
-		dirs[i] = Vector3(cos(theta) * radius, y, sin(theta) * radius)
-	return dirs
+		var t: float = (points[i][axis] - axis_min) / span
+		var bi: int = clampi(int(t * _STRATIFY_BANDS), 0, _STRATIFY_BANDS - 1)
+		bands[bi].append(points[i])
+	# Allocate per-band quotas: floor + proportional share of the leftover.
+	# Empty bands contribute nothing; their quota becomes 0 and the floor
+	# rolls over into the proportional pool.
+	var occupied: int = 0
+	for bi: int in _STRATIFY_BANDS:
+		if bands[bi].size() > 0:
+			occupied += 1
+	var floor_total: int = min(_STRATIFY_FLOOR * occupied, k)
+	var leftover: int = k - floor_total
+	var quotas: Array[int] = []
+	quotas.resize(_STRATIFY_BANDS)
+	var assigned: int = 0
+	for bi: int in _STRATIFY_BANDS:
+		var sz: int = bands[bi].size()
+		if sz == 0:
+			quotas[bi] = 0
+			continue
+		var prop: int = int(round(float(leftover) * float(sz) / float(n)))
+		quotas[bi] = min(sz, _STRATIFY_FLOOR + prop)
+		assigned += quotas[bi]
+	# Rounding leftovers / cap clamps may leave us short of k. Distribute
+	# the remainder to bands that still have headroom (largest band first).
+	var deficit: int = k - assigned
+	while deficit > 0:
+		var best_bi: int = -1
+		var best_room: int = 0
+		for bi: int in _STRATIFY_BANDS:
+			var room: int = bands[bi].size() - quotas[bi]
+			if room > best_room:
+				best_room = room
+				best_bi = bi
+		if best_bi < 0:
+			break
+		var add: int = min(deficit, best_room)
+		quotas[best_bi] += add
+		deficit -= add
+	# Run FPS inside each band with its quota. Concatenate.
+	var out := PackedVector3Array()
+	for bi: int in _STRATIFY_BANDS:
+		var q: int = quotas[bi]
+		if q <= 0:
+			continue
+		out.append_array(furthest_point_sample(bands[bi], q))
+	return out
 
 
-# Walks the candidate sample sizes upward, returns the smallest that
-# meets `quality_threshold`. Falls back to the cap if nothing meets it.
-# Sub-4 input is returned untouched (Jolt won't hull a degenerate set).
+# Picks the per-bone hull input set: stratified FPS at the cap. Sub-4 input
+# is returned untouched (Jolt won't hull a degenerate set). The cap is now
+# the binding constraint — there's no early-stop because the previous
+# silhouette-quality criterion measured global directional extent and would
+# happily certify a hull that pinched at the wrist as long as the long-axis
+# extent stayed within tolerance.
 static func find_optimal_decimation(
 		points: PackedVector3Array,
-		quality_threshold: float,
 		max_points: int) -> PackedVector3Array:
 	var n: int = points.size()
 	if n <= 4:
 		return points
-	# Build the candidate list capped by both the per-bone limit and the
-	# input size. Always include `max_points` as the final fallback so we
-	# return *something* hull-able when the sweep doesn't meet threshold.
-	var candidates: Array[int] = []
-	for k: int in _DECIMATION_CANDIDATES:
-		if k <= max_points and k < n:
-			candidates.append(k)
-	if candidates.is_empty() or candidates[-1] < min(max_points, n):
-		candidates.append(min(max_points, n))
-	for k: int in candidates:
-		var sample: PackedVector3Array = furthest_point_sample(points, k)
-		var q: float = silhouette_quality_for(points, sample)
-		if q >= quality_threshold:
-			return sample
-	# Threshold not met within the cap — return the best we tried.
-	return furthest_point_sample(points, candidates[-1])
+	return stratified_furthest_point_sample(points, min(max_points, n))
 
 
 # Scales each point inward toward the centroid by `shrink` (0..0.5).

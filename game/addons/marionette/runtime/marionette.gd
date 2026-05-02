@@ -804,7 +804,6 @@ func build_convex_colliders() -> void:
 	var template: BoneCollisionProfile = bone_collision_profile if bone_collision_profile != null else BoneCollisionProfile.new()
 	var merged := BoneCollisionProfile.new()
 	merged.weight_threshold = template.weight_threshold
-	merged.silhouette_quality = template.silhouette_quality
 	merged.max_points_per_hull = template.max_points_per_hull
 	merged.shrink_factor = template.shrink_factor
 
@@ -889,7 +888,7 @@ static func _merge_collision_profile_into(
 		var combined: PackedVector3Array = dst.hulls[bone_name]
 		combined.append_array(src_pts)
 		dst.hulls[bone_name] = ColliderBuilder.find_optimal_decimation(
-				combined, dst.silhouette_quality, dst.max_points_per_hull)
+				combined, dst.max_points_per_hull)
 
 
 # Walks the live simulator and re-creates each bone's CollisionShape3D

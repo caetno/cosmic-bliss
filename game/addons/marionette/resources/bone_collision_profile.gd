@@ -31,15 +31,11 @@ extends Resource
 # silhouette gap a strict argmax assignment leaves on skinned meshes.
 @export_range(0.0, 1.0, 0.01) var weight_threshold: float = 0.3
 
-# Adaptive decimation target. ColliderBuilder grows the per-hull point
-# count until silhouette quality (mean directional-extent ratio over the
-# Fibonacci-sphere probe) reaches this fraction, then stops.
-@export_range(0.5, 1.0, 0.01) var silhouette_quality: float = 0.97
-
-# Hard cap on points per hull. Even when the silhouette threshold isn't
-# reached, decimation stops here. Jolt convex hulls handle large input
-# sets fine — the cap is mostly to keep the .tres readable and rebuilds
-# fast.
+# Hard cap on hull input points per bone. ColliderBuilder runs stratified
+# furthest-point sampling along each bucket's longest AABB axis to fill
+# this budget — narrow cross-sections (wrist, ankle, toe-base) get their
+# own quota so the hull doesn't pinch. Jolt builds the actual convex hull
+# from these inputs.
 @export_range(8, 256, 1) var max_points_per_hull: int = 64
 
 # Inward shrink toward each hull's centroid, in bone-local space.
