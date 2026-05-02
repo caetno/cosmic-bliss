@@ -34,6 +34,11 @@ const ENV_RAY_NO_HIT := Color(0.55, 0.55, 0.6, 0.35)
 const ENV_RAY_HIT := Color(1.0, 0.35, 0.85, 0.85)
 const ENV_HIT_POINT := Color(1.0, 0.35, 0.85)
 const ENV_HIT_NORMAL := Color(0.55, 1.0, 0.8)
+# Slice 4B: friction-applied vector at hit point. Lime-green so it reads
+# distinctly from the magenta ray/hit cluster, the mint hit-normal stub, and
+# Godot's default Skeleton3D gizmo (which eats warm hues). Off by default in
+# the overlay; toggled via `draw_friction_vectors`.
+const ENV_FRICTION := Color(0.6, 1.0, 0.2, 0.9)
 
 const COMPRESSED_RATIO := 0.95
 const STRETCHED_RATIO := 1.05

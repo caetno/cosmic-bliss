@@ -162,11 +162,27 @@ public:
 	void clear_environment_contacts();
 	int get_environment_contact_count() const;
 
+	// Slice 4B: tangential displacement actually canceled per contact this
+	// tick, summed across particles and iterations. Same length as the
+	// contact arrays; entry i pairs with `env_contact_points[i]`. Tentacle
+	// reads this when building the §15.2 environment-contacts snapshot so the
+	// gizmo overlay can draw friction arrows.
+	godot::PackedVector3Array get_environment_friction_applied() const;
+
 	// Per-tentacle base collision radius. Each particle's effective collision
 	// radius for slice 4A is `collision_radius * particle.girth_scale`.
 	// Asymmetry ellipse (§4.1) is deferred to a later slice.
 	void set_collision_radius(float p_radius);
 	float get_collision_radius() const;
+
+	// §4.3 friction coefficients. `static` is the composed μ_s after §4.4
+	// modulators are applied by the caller; `kinetic_ratio` is μ_k / μ_s
+	// (typical 0.8 per spec). For slice 4B both are tentacle-global; later
+	// slices replace this with per-contact composition once surface tagging
+	// lands.
+	void set_friction(float p_static, float p_kinetic_ratio);
+	float get_static_friction() const;
+	float get_kinetic_friction_ratio() const;
 
 protected:
 	static void _bind_methods();
@@ -207,7 +223,13 @@ private:
 	// the flat list during iteration. Slice 4A: normal projection only.
 	godot::PackedVector3Array env_contact_points;
 	godot::PackedVector3Array env_contact_normals;
+	// Slice 4B: per-contact friction accumulator, reset alongside the contact
+	// arrays. Sized identically to env_contact_points; iterate() sums the
+	// `friction_applied` returned by each project_friction call into entry [c].
+	godot::PackedVector3Array env_contact_friction_applied;
 	float collision_radius = 0.05f;
+	float friction_static = 0.0f;
+	float friction_kinetic_ratio = 0.8f;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior

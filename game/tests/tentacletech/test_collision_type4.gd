@@ -42,6 +42,9 @@ func _run_tests() -> void:
 		"test_chain_settles_above_floor",
 		"test_no_floor_no_collision",
 		"test_disable_probe_clears_contacts",
+		"test_friction_applied_recorded_in_snapshot",
+		"test_lubricity_one_zeros_friction",
+		"test_friction_resists_lateral_drift",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -163,6 +166,80 @@ func test_no_floor_no_collision() -> bool:
 	var positions: PackedVector3Array = t.get_particle_positions()
 	if positions[positions.size() - 1].y >= 1.0:
 		push_error("tip not falling under gravity (y=%f)" % positions[positions.size() - 1].y)
+		return false
+	return true
+
+
+# Phase-4 slice 4B — §4.3 friction. After settle on the floor, at least one
+# hit contact should report nonzero `friction_applied`: the chain has been
+# resisting tangential motion against the floor under gravity and bending.
+func test_friction_applied_recorded_in_snapshot() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t.bending_stiffness = 0.5
+	# Tilt gravity so there's tangential motion to resist.
+	t.gravity = Vector3(1.5, -9.8, 0)
+	_make_floor(0.0)
+	_step([t], SETTLE_FRAMES)
+	var snap: Array = t.get_environment_contacts_snapshot()
+	var max_fric: float = 0.0
+	for entry in snap:
+		if not entry.get("hit", false):
+			continue
+		var fa: Vector3 = entry.get("friction_applied", Vector3.ZERO)
+		if fa.length() > max_fric:
+			max_fric = fa.length()
+	if max_fric < 1e-5:
+		push_error("expected nonzero friction_applied somewhere in snapshot, got %f" % max_fric)
+		return false
+	return true
+
+
+# Slice 4B — lubricity=1.0 zeroes the friction coefficient handed to the solver,
+# so no tangential cancellation happens regardless of contact. The friction-
+# applied buffer stays at zero.
+func test_lubricity_one_zeros_friction() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t.bending_stiffness = 0.5
+	t.gravity = Vector3(1.5, -9.8, 0)
+	t.tentacle_lubricity = 1.0
+	_make_floor(0.0)
+	_step([t], SETTLE_FRAMES)
+	var snap: Array = t.get_environment_contacts_snapshot()
+	for entry in snap:
+		if not entry.get("hit", false):
+			continue
+		var fa: Vector3 = entry.get("friction_applied", Vector3.ZERO)
+		if fa.length() > 1e-5:
+			push_error("lubricity=1.0 still applied friction: %f" % fa.length())
+			return false
+	return true
+
+
+# Slice 4B — behavior check. Two tentacles dropped on the same floor under the
+# same tilted gravity, identical except for `tentacle_lubricity`. The slick one
+# (lubricity=1.0) should drift further along +X than the high-friction one
+# because nothing resists tangential motion at the floor contacts.
+func test_friction_resists_lateral_drift() -> bool:
+	var t_friction: Node3D = _make_tentacle(Vector3(0.0, 0.6, 0), 12, 0.05)
+	t_friction.bending_stiffness = 0.5
+	t_friction.gravity = Vector3(2.0, -9.8, 0)
+	t_friction.tentacle_lubricity = 0.0  # default
+
+	var t_slick: Node3D = _make_tentacle(Vector3(2.0, 0.6, 0), 12, 0.05)
+	t_slick.bending_stiffness = 0.5
+	t_slick.gravity = Vector3(2.0, -9.8, 0)
+	t_slick.tentacle_lubricity = 1.0
+
+	_make_floor(0.0)
+	_step([t_friction, t_slick], SETTLE_FRAMES)
+
+	var n: int = t_friction.particle_count
+	var tip_dx_friction: float = t_friction.get_particle_positions()[n - 1].x - 0.0
+	var tip_dx_slick: float = t_slick.get_particle_positions()[n - 1].x - 2.0
+
+	# Slick tip should drift visibly further than the friction tip.
+	if tip_dx_slick - tip_dx_friction < 0.01:
+		push_error("expected slick tip to drift further; slick_dx=%f friction_dx=%f" % [tip_dx_slick, tip_dx_friction])
 		return false
 	return true
 

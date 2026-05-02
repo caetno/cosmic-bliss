@@ -31,6 +31,8 @@ Tentacle::Tentacle() {
 	solver.instantiate();
 	solver->initialize_chain(particle_count, segment_length);
 	solver->set_collision_radius(particle_collision_radius);
+	solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
+			kinetic_friction_ratio);
 	render_spline.instantiate();
 }
 
@@ -422,11 +424,52 @@ void Tentacle::set_particle_collision_radius(float p_r) {
 }
 float Tentacle::get_particle_collision_radius() const { return particle_collision_radius; }
 
+void Tentacle::set_base_static_friction(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	base_static_friction = p_v;
+	if (solver.is_valid()) {
+		solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
+				kinetic_friction_ratio);
+	}
+}
+float Tentacle::get_base_static_friction() const { return base_static_friction; }
+
+void Tentacle::set_tentacle_lubricity(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	tentacle_lubricity = p_v;
+	if (solver.is_valid()) {
+		solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
+				kinetic_friction_ratio);
+	}
+}
+float Tentacle::get_tentacle_lubricity() const { return tentacle_lubricity; }
+
+void Tentacle::set_kinetic_friction_ratio(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	kinetic_friction_ratio = p_v;
+	if (solver.is_valid()) {
+		solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
+				kinetic_friction_ratio);
+	}
+}
+float Tentacle::get_kinetic_friction_ratio() const { return kinetic_friction_ratio; }
+
 Array Tentacle::get_environment_contacts_snapshot() const {
 	Array out;
 	const auto &contacts = environment_probe.get_contacts();
 	int n = (int)contacts.size();
 	out.resize(n);
+	// Friction-applied buffer is sized the same as the solver's contact list,
+	// which is rebuilt from `contacts` each tick — but only entries with
+	// hit==true become solver contacts, so the buffer is shorter than `n`.
+	// Walk the two in lock-step over hit entries to align indices.
+	PackedVector3Array friction_applied;
+	if (solver.is_valid()) {
+		friction_applied = solver->get_environment_friction_applied();
+	}
+	int hit_cursor = 0;
 	for (int i = 0; i < n; i++) {
 		const tentacletech::EnvironmentContact &c = contacts[i];
 		Dictionary d;
@@ -436,6 +479,12 @@ Array Tentacle::get_environment_contacts_snapshot() const {
 		d["hit_point"] = c.hit_point;
 		d["hit_normal"] = c.hit_normal;
 		d["hit_object_id"] = (int64_t)c.hit_object_id;
+		Vector3 fa;
+		if (c.hit && hit_cursor < friction_applied.size()) {
+			fa = friction_applied[hit_cursor];
+			hit_cursor++;
+		}
+		d["friction_applied"] = fa;
 		out[i] = d;
 	}
 	return out;
@@ -952,6 +1001,18 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_particle_collision_radius);
 	ClassDB::bind_method(D_METHOD("get_particle_collision_radius"),
 			&Tentacle::get_particle_collision_radius);
+	ClassDB::bind_method(D_METHOD("set_base_static_friction", "value"),
+			&Tentacle::set_base_static_friction);
+	ClassDB::bind_method(D_METHOD("get_base_static_friction"),
+			&Tentacle::get_base_static_friction);
+	ClassDB::bind_method(D_METHOD("set_tentacle_lubricity", "value"),
+			&Tentacle::set_tentacle_lubricity);
+	ClassDB::bind_method(D_METHOD("get_tentacle_lubricity"),
+			&Tentacle::get_tentacle_lubricity);
+	ClassDB::bind_method(D_METHOD("set_kinetic_friction_ratio", "value"),
+			&Tentacle::set_kinetic_friction_ratio);
+	ClassDB::bind_method(D_METHOD("get_kinetic_friction_ratio"),
+			&Tentacle::get_kinetic_friction_ratio);
 	ClassDB::bind_method(D_METHOD("get_environment_contacts_snapshot"),
 			&Tentacle::get_environment_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
@@ -1025,6 +1086,15 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "particle_collision_radius",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001,or_greater"),
 			"set_particle_collision_radius", "get_particle_collision_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "base_static_friction",
+					 PROPERTY_HINT_RANGE, "0.0,4.0,0.01"),
+			"set_base_static_friction", "get_base_static_friction");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "tentacle_lubricity",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
+			"set_tentacle_lubricity", "get_tentacle_lubricity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "kinetic_friction_ratio",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
+			"set_kinetic_friction_ratio", "get_kinetic_friction_ratio");
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),

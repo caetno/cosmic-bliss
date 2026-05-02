@@ -120,6 +120,20 @@ public:
 	void set_particle_collision_radius(float p_radius);
 	float get_particle_collision_radius() const;
 
+	// Phase-4 slice 4B — §4.3 friction. `base_static_friction` is μ_s in the
+	// "smooth tentacle vs dry skin" baseline of §4.4 (default 0.4); it is
+	// modulated by `(1 - tentacle_lubricity)` before being handed to the
+	// solver. `kinetic_friction_ratio` is μ_k / μ_s (default 0.8 per §4.3).
+	// Surface tagging / per-contact composition lands in a later slice; for
+	// now these are tentacle-global. Set lubricity to 1.0 to disable friction
+	// entirely without touching the baseline coefficient.
+	void set_base_static_friction(float p_value);
+	float get_base_static_friction() const;
+	void set_tentacle_lubricity(float p_value);
+	float get_tentacle_lubricity() const;
+	void set_kinetic_friction_ratio(float p_value);
+	float get_kinetic_friction_ratio() const;
+
 	// Snapshot accessor (§15.2): returns one Dictionary per ray with keys
 	// ray_origin, ray_direction, hit (bool), hit_point, hit_normal,
 	// hit_object_id (int). Stale rays from the last tick are returned as
@@ -275,6 +289,9 @@ private:
 	float environment_probe_distance = 1.0f;
 	int environment_collision_layer_mask = 0xFFFFFFFF;
 	float particle_collision_radius = 0.05f;
+	float base_static_friction = 0.4f;
+	float tentacle_lubricity = 0.0f;
+	float kinetic_friction_ratio = 0.8f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;

@@ -4,6 +4,7 @@
 #include <godot_cpp/core/math.hpp>
 
 #include "constraints.h"
+#include "../collision/friction_projection.h"
 
 using namespace godot;
 
@@ -130,13 +131,20 @@ void PBDSolver::iterate() {
 					particles[i], particles[i + 1],
 					rest_lengths[i], distance_stiffness);
 		}
-		// 4. Type-4 environment collision: half-space projection per §4.2.
-		// Slice 4A: normal-only correction. Friction (§4.3) is slice 4B.
+		// 4. Type-4 environment collision: half-space projection per §4.2,
+		// then unified §4.3 friction cone projection on the same particle in
+		// the same iteration. Slice 4B layers friction on top of slice 4A's
+		// normal-only correction. Type-1 reciprocal routing lands in 4D.
 		{
 			int contact_n = env_contact_points.size();
 			if (contact_n > 0 && contact_n == env_contact_normals.size()) {
 				const Vector3 *cp = env_contact_points.ptr();
 				const Vector3 *cn = env_contact_normals.ptr();
+				Vector3 *cf = (env_contact_friction_applied.size() == contact_n)
+						? env_contact_friction_applied.ptrw()
+						: nullptr;
+				float mu_s = friction_static;
+				float mu_k = friction_static * friction_kinetic_ratio;
 				for (int i = 0; i < n; i++) {
 					TentacleParticle &p = particles[i];
 					if (p.inv_mass <= 0.0f) continue;
@@ -146,12 +154,19 @@ void PBDSolver::iterate() {
 						float depth = radius - (p.position - cp[c]).dot(cn[c]);
 						if (depth > 0.0f) {
 							p.position += cn[c] * depth;
+							if (mu_s > 0.0f) {
+								Vector3 friction_applied;
+								tentacletech::project_friction(p, cn[c], depth,
+										mu_s, mu_k, friction_applied);
+								if (cf != nullptr) {
+									cf[c] += friction_applied;
+								}
+							}
 						}
 					}
 				}
 			}
 		}
-		// 5. Friction tangential — Phase 4 slice 4B.
 		// 6. Anchor last so it overrides any earlier violation.
 		if (anchor_active && anchor_particle_index >= 0 && anchor_particle_index < n) {
 			tentacletech::constraints::project_anchor(
@@ -601,6 +616,14 @@ void PBDSolver::set_environment_contacts(const PackedVector3Array &p_points,
 	int n = np < nn ? np : nn;
 	env_contact_points.resize(n);
 	env_contact_normals.resize(n);
+	env_contact_friction_applied.resize(n);
+	// Friction accumulator zeroed each tick when contacts are written.
+	if (n > 0) {
+		Vector3 *dst_f = env_contact_friction_applied.ptrw();
+		for (int i = 0; i < n; i++) {
+			dst_f[i] = Vector3();
+		}
+	}
 	if (n == 0) {
 		return;
 	}
@@ -628,10 +651,15 @@ void PBDSolver::set_environment_contacts(const PackedVector3Array &p_points,
 void PBDSolver::clear_environment_contacts() {
 	env_contact_points.clear();
 	env_contact_normals.clear();
+	env_contact_friction_applied.clear();
 }
 
 int PBDSolver::get_environment_contact_count() const {
 	return env_contact_points.size();
+}
+
+PackedVector3Array PBDSolver::get_environment_friction_applied() const {
+	return env_contact_friction_applied;
 }
 
 void PBDSolver::set_collision_radius(float p_radius) {
@@ -640,6 +668,17 @@ void PBDSolver::set_collision_radius(float p_radius) {
 }
 
 float PBDSolver::get_collision_radius() const { return collision_radius; }
+
+void PBDSolver::set_friction(float p_static, float p_kinetic_ratio) {
+	if (p_static < 0.0f) p_static = 0.0f;
+	if (p_kinetic_ratio < 0.0f) p_kinetic_ratio = 0.0f;
+	if (p_kinetic_ratio > 1.0f) p_kinetic_ratio = 1.0f;
+	friction_static = p_static;
+	friction_kinetic_ratio = p_kinetic_ratio;
+}
+
+float PBDSolver::get_static_friction() const { return friction_static; }
+float PBDSolver::get_kinetic_friction_ratio() const { return friction_kinetic_ratio; }
 
 // -- Binding ----------------------------------------------------------------
 
@@ -708,8 +747,15 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_environment_contacts);
 	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
 	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
+	ClassDB::bind_method(D_METHOD("get_environment_friction_applied"),
+			&PBDSolver::get_environment_friction_applied);
 	ClassDB::bind_method(D_METHOD("set_collision_radius", "radius"), &PBDSolver::set_collision_radius);
 	ClassDB::bind_method(D_METHOD("get_collision_radius"), &PBDSolver::get_collision_radius);
+	ClassDB::bind_method(D_METHOD("set_friction", "static_coeff", "kinetic_ratio"),
+			&PBDSolver::set_friction);
+	ClassDB::bind_method(D_METHOD("get_static_friction"), &PBDSolver::get_static_friction);
+	ClassDB::bind_method(D_METHOD("get_kinetic_friction_ratio"),
+			&PBDSolver::get_kinetic_friction_ratio);
 
 	BIND_CONSTANT(DEFAULT_ITERATION_COUNT);
 	BIND_CONSTANT(MAX_ITERATION_COUNT);
