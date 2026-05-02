@@ -20,6 +20,20 @@ extends Resource
 
 @export var hulls: Dictionary[StringName, PackedVector3Array] = {}
 
+# Skeleton bones that should keep their own bucket instead of cascading
+# their skin weights up to the nearest profile-bone ancestor. Used for
+# soft-tissue jiggle bones — c_breast_01.l/r, c_breast_02.l/r on ARP rigs;
+# any custom belly / glute bones a hero adds. Each entry must be the
+# Skeleton3D bone name (post-retarget if applicable). Bones in this list
+# get their own hull entry under their literal skel name; the runtime
+# spawns a translation-only PhysicalBone3D for each (CLAUDE.md §15) so
+# they participate in collision and (slice 4) jiggle physics.
+#
+# Without this list, ColliderBuilder would cascade c_breast_01.l up to
+# its UpperChest parent — the breast skin would absorb into the chest
+# hull and there would be no separate body for jiggle to act on.
+@export var non_cascade_bones: Array[StringName] = []
+
 # Skeleton3D bone-index pairs whose hulls overlap in rest pose. Resolved
 # against the live skeleton at apply-time (same convention as
 # CollisionExclusionProfile.excluded_pairs).

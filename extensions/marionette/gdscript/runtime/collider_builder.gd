@@ -50,13 +50,15 @@ static func build_profile(
 		profile.weight_threshold = template.weight_threshold
 		profile.max_points_per_hull = template.max_points_per_hull
 		profile.shrink_factor = template.shrink_factor
+		profile.non_cascade_bones = template.non_cascade_bones.duplicate()
 
 	if mesh_instance == null or skel == null:
 		push_error("ColliderBuilder.build_profile: mesh_instance and skel are required")
 		return profile
 
 	var buckets: Dictionary[StringName, PackedVector3Array] = harvest_vertex_buckets(
-			mesh_instance, skel, bone_map, profile.weight_threshold)
+			mesh_instance, skel, bone_map, profile.weight_threshold,
+			profile.non_cascade_bones)
 	for bone_name: StringName in buckets.keys():
 		var pts: PackedVector3Array = buckets[bone_name]
 		if pts.size() < 4:
@@ -83,7 +85,8 @@ static func harvest_vertex_buckets(
 		mesh_instance: MeshInstance3D,
 		skel: Skeleton3D,
 		bone_map: BoneMap,
-		weight_threshold: float) -> Dictionary[StringName, PackedVector3Array]:
+		weight_threshold: float,
+		non_cascade_bones: Array[StringName] = []) -> Dictionary[StringName, PackedVector3Array]:
 	var buckets: Dictionary[StringName, PackedVector3Array] = {}
 	if mesh_instance == null or skel == null:
 		push_error("ColliderBuilder.harvest: mesh_instance and skel are required")
@@ -97,7 +100,8 @@ static func harvest_vertex_buckets(
 		push_error("ColliderBuilder.harvest: MeshInstance3D '%s' has no Skin assigned" % mesh_instance.name)
 		return buckets
 
-	var skin_to_profile: Array[StringName] = _build_skin_name_table(skin, skel, bone_map)
+	var skin_to_profile: Array[StringName] = _build_skin_name_table(
+			skin, skel, bone_map, non_cascade_bones)
 	# Pre-cache bind poses so the inner loop avoids the GDScript getter cost
 	# on every vertex (Skin getters are O(1) but reflective).
 	var bind_poses: Array[Transform3D] = []
@@ -216,7 +220,8 @@ static func _emit_to_bucket(
 static func _build_skin_name_table(
 		skin: Skin,
 		skel: Skeleton3D,
-		bone_map: BoneMap) -> Array[StringName]:
+		bone_map: BoneMap,
+		non_cascade_bones: Array[StringName] = []) -> Array[StringName]:
 	var out: Array[StringName] = []
 	out.resize(skin.get_bind_count())
 	var profile: SkeletonProfile = bone_map.profile if bone_map != null else null
@@ -226,6 +231,13 @@ static func _build_skin_name_table(
 		var skel_name: StringName = bind_name
 		if skel_name == &"" and skel_idx >= 0:
 			skel_name = StringName(skel.get_bone_name(skel_idx))
+		# Soft-region bones keep their own bucket: cascade is bypassed and
+		# the bind name is its own resolution. Lets jiggle bones (breast,
+		# glute, ...) form their own hulls instead of folding into the
+		# parent's. CLAUDE.md §15.
+		if non_cascade_bones.has(skel_name):
+			out[i] = skel_name
+			continue
 		out[i] = _resolve_profile_name_with_cascade(skel_name, skel_idx, skel, bone_map, profile)
 	return out
 

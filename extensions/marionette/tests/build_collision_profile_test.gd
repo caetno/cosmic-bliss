@@ -73,11 +73,20 @@ func _init() -> void:
 	template.weight_threshold = 0.3
 	template.max_points_per_hull = 64
 	template.shrink_factor = 0.02
+	# Breast bones are the canonical jiggle bones on the kasumi/ARP rig.
+	# Listing them here keeps each one in its own bucket instead of
+	# cascading into UpperChest — slice-4 runtime spawns translation-only
+	# PhysicalBone3Ds for them.
+	template.non_cascade_bones = [
+		&"c_breast_01.l", &"c_breast_01.r",
+		&"c_breast_02.l", &"c_breast_02.r",
+	]
 
 	var merged := BoneCollisionProfile.new()
 	merged.weight_threshold = template.weight_threshold
 	merged.max_points_per_hull = template.max_points_per_hull
 	merged.shrink_factor = template.shrink_factor
+	merged.non_cascade_bones = template.non_cascade_bones
 
 	for m: MeshInstance3D in meshes:
 		if m.mesh == null or m.skin == null:
