@@ -2,6 +2,7 @@
 #define TENTACLETECH_PBD_SOLVER_H
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -184,6 +185,19 @@ public:
 	float get_static_friction() const;
 	float get_kinetic_friction_ratio() const;
 
+	// Slice 4C (§4.3): per-particle distance constraint stiffness during
+	// active contact. Default 0.5 — the chain stretches temporarily over
+	// wrapped geometry instead of fighting collision push-out, then springs
+	// back when contact ends. Compounds across iterations: at 4 iterations,
+	// 0.5 → ~0.94 effective per tick.
+	void set_contact_stiffness(float p_stiffness);
+	float get_contact_stiffness() const;
+
+	// Snapshot (§15.2) of `in_contact_this_tick` flags. Byte per particle:
+	// 1 = in contact, 0 = free. PackedByteArray rather than bool[] so it
+	// crosses the GDScript boundary without a per-element Variant box.
+	godot::PackedByteArray get_particle_in_contact_snapshot() const;
+
 protected:
 	static void _bind_methods();
 
@@ -230,6 +244,7 @@ private:
 	float collision_radius = 0.05f;
 	float friction_static = 0.0f;
 	float friction_kinetic_ratio = 0.8f;
+	float contact_stiffness = 0.5f;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior

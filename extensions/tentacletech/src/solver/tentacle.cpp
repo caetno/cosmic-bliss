@@ -33,6 +33,7 @@ Tentacle::Tentacle() {
 	solver->set_collision_radius(particle_collision_radius);
 	solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
 			kinetic_friction_ratio);
+	solver->set_contact_stiffness(contact_stiffness);
 	render_spline.instantiate();
 }
 
@@ -455,6 +456,16 @@ void Tentacle::set_kinetic_friction_ratio(float p_v) {
 	}
 }
 float Tentacle::get_kinetic_friction_ratio() const { return kinetic_friction_ratio; }
+
+void Tentacle::set_contact_stiffness(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	contact_stiffness = p_v;
+	if (solver.is_valid()) {
+		solver->set_contact_stiffness(p_v);
+	}
+}
+float Tentacle::get_contact_stiffness() const { return contact_stiffness; }
 
 Array Tentacle::get_environment_contacts_snapshot() const {
 	Array out;
@@ -1013,6 +1024,10 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_kinetic_friction_ratio);
 	ClassDB::bind_method(D_METHOD("get_kinetic_friction_ratio"),
 			&Tentacle::get_kinetic_friction_ratio);
+	ClassDB::bind_method(D_METHOD("set_contact_stiffness", "value"),
+			&Tentacle::set_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
+			&Tentacle::get_contact_stiffness);
 	ClassDB::bind_method(D_METHOD("get_environment_contacts_snapshot"),
 			&Tentacle::get_environment_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
@@ -1095,6 +1110,9 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "kinetic_friction_ratio",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_kinetic_friction_ratio", "get_kinetic_friction_ratio");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_stiffness",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
+			"set_contact_stiffness", "get_contact_stiffness");
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),

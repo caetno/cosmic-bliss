@@ -45,6 +45,9 @@ func _run_tests() -> void:
 		"test_friction_applied_recorded_in_snapshot",
 		"test_lubricity_one_zeros_friction",
 		"test_friction_resists_lateral_drift",
+		"test_in_contact_flag_set_under_floor",
+		"test_in_contact_flag_clears_when_lifted",
+		"test_contact_stiffness_allows_segment_stretch",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -89,6 +92,18 @@ func _make_floor(p_y: float = 0.0, p_size: Vector3 = Vector3(20, 0.1, 20)) -> St
 	var box := BoxShape3D.new()
 	box.size = p_size
 	shape.shape = box
+	body.add_child(shape)
+	return body
+
+
+func _make_sphere(p_pos: Vector3, p_radius: float) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.position = p_pos
+	root.add_child(body)
+	var shape := CollisionShape3D.new()
+	var sphere := SphereShape3D.new()
+	sphere.radius = p_radius
+	shape.shape = sphere
 	body.add_child(shape)
 	return body
 
@@ -240,6 +255,79 @@ func test_friction_resists_lateral_drift() -> bool:
 	# Slick tip should drift visibly further than the friction tip.
 	if tip_dx_slick - tip_dx_friction < 0.01:
 		push_error("expected slick tip to drift further; slick_dx=%f friction_dx=%f" % [tip_dx_slick, tip_dx_friction])
+		return false
+	return true
+
+
+# Slice 4C — at least one particle in the lower portion of a settled chain
+# reports `in_contact_this_tick = 1` after the chain has draped onto the
+# floor. The flag is what `contact_stiffness` selection keys off in the
+# distance constraint loop.
+func test_in_contact_flag_set_under_floor() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t.bending_stiffness = 0.5
+	_make_floor(0.0)
+	_step([t], SETTLE_FRAMES)
+	var solver = t.get_solver()
+	var flags: PackedByteArray = solver.get_particle_in_contact_snapshot()
+	if flags.size() != t.particle_count:
+		push_error("flag array size %d != particle_count %d" % [flags.size(), t.particle_count])
+		return false
+	var any_in_contact: bool = false
+	for b in flags:
+		if b != 0:
+			any_in_contact = true
+			break
+	if not any_in_contact:
+		push_error("no particle reports in_contact_this_tick=1 after settle")
+		return false
+	return true
+
+
+# Slice 4C — the flag is per-tick, cleared in predict() at the start of
+# every step. With the chain hanging in air (no collider), no particle
+# should report in-contact regardless of motion.
+func test_in_contact_flag_clears_when_lifted() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 1.0, 0), 8, 0.05)
+	# No floor — pure pendulum.
+	_step([t], 60)
+	var solver = t.get_solver()
+	var flags: PackedByteArray = solver.get_particle_in_contact_snapshot()
+	for b in flags:
+		if b != 0:
+			push_error("particle flagged in-contact with no collider in scene")
+			return false
+	return true
+
+
+# Slice 4C — direct measurement of what contact_stiffness controls: when a
+# segment has at least one endpoint in contact, its distance constraint
+# stiffness drops from `distance_stiffness` (1.0) to `contact_stiffness`
+# (0.05 here for a clear signal), so the segment is allowed to stretch
+# under gravity load instead of fighting collision push-out at rigid
+# stiffness. Compare two tentacles, identical except for contact_stiffness;
+# soft chain reports a larger max segment-stretch deviation from rest length.
+func test_contact_stiffness_allows_segment_stretch() -> bool:
+	var t_soft: Node3D = _make_tentacle(Vector3(0.0, 0.6, 0.0), 12, 0.05)
+	t_soft.bending_stiffness = 0.5
+	t_soft.contact_stiffness = 0.05  # very soft
+
+	var t_rigid: Node3D = _make_tentacle(Vector3(2.0, 0.6, 0.0), 12, 0.05)
+	t_rigid.bending_stiffness = 0.5
+	t_rigid.contact_stiffness = 1.0  # rigid (matches base distance stiffness)
+
+	_make_floor(0.0)
+	_step([t_soft, t_rigid], SETTLE_FRAMES)
+
+	var soft_max_stretch: float = 0.0
+	for s in t_soft.get_segment_stretch_ratios():
+		soft_max_stretch = maxf(soft_max_stretch, absf(s - 1.0))
+	var rigid_max_stretch: float = 0.0
+	for s in t_rigid.get_segment_stretch_ratios():
+		rigid_max_stretch = maxf(rigid_max_stretch, absf(s - 1.0))
+
+	if soft_max_stretch <= rigid_max_stretch + 0.005:
+		push_error("expected soft chain segments to stretch more than rigid; soft_max=%f rigid_max=%f" % [soft_max_stretch, rigid_max_stretch])
 		return false
 	return true
 

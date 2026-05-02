@@ -133,6 +133,11 @@ public:
 	float get_tentacle_lubricity() const;
 	void set_kinetic_friction_ratio(float p_value);
 	float get_kinetic_friction_ratio() const;
+	// Slice 4C — distance-constraint stiffness during active contact (§4.3).
+	// Default 0.5 lets the chain stretch over wrapped geometry instead of
+	// fighting collision push-out, then snap back when contact ends.
+	void set_contact_stiffness(float p_value);
+	float get_contact_stiffness() const;
 
 	// Snapshot accessor (§15.2): returns one Dictionary per ray with keys
 	// ray_origin, ray_direction, hit (bool), hit_point, hit_normal,
@@ -292,6 +297,7 @@ private:
 	float base_static_friction = 0.4f;
 	float tentacle_lubricity = 0.0f;
 	float kinetic_friction_ratio = 0.8f;
+	float contact_stiffness = 0.5f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;

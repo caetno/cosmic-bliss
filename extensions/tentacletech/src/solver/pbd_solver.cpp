@@ -76,6 +76,9 @@ void PBDSolver::predict(float p_dt) {
 	int n = (int)particles.size();
 	for (int i = 0; i < n; i++) {
 		TentacleParticle &p = particles[i];
+		// Slice 4C: clear the per-tick contact flag here so the iteration
+		// loop can set it as collisions are projected.
+		p.in_contact_this_tick = false;
 		if (p.inv_mass <= 0.0f) {
 			// Pinned: prev_position tracks position so velocity stays zero.
 			p.prev_position = p.position;
@@ -123,18 +126,15 @@ void PBDSolver::iterate() {
 						particles[idx], pose_pos[k], pose_stf[k]);
 			}
 		}
-		// 3. Distance constraints (segment length). Hard physics — runs
-		// last among shape constraints so segments never end up stretched
-		// or compressed by pose pulls.
-		for (int i = 0; i + 1 < n; i++) {
-			tentacletech::constraints::project_distance(
-					particles[i], particles[i + 1],
-					rest_lengths[i], distance_stiffness);
-		}
-		// 4. Type-4 environment collision: half-space projection per §4.2,
+		// 3. Type-4 environment collision: half-space projection per §4.2,
 		// then unified §4.3 friction cone projection on the same particle in
 		// the same iteration. Slice 4B layers friction on top of slice 4A's
 		// normal-only correction. Type-1 reciprocal routing lands in 4D.
+		// Slice 4C ordering: collision runs BEFORE distance so the soft
+		// `contact_stiffness` path applies starting iteration 1 — otherwise
+		// distance fights collision at full stiffness in iter 1 and the
+		// "stretches over wrapped geometry" effect only barely materializes
+		// from iter 2 onward.
 		{
 			int contact_n = env_contact_points.size();
 			if (contact_n > 0 && contact_n == env_contact_normals.size()) {
@@ -154,6 +154,7 @@ void PBDSolver::iterate() {
 						float depth = radius - (p.position - cp[c]).dot(cn[c]);
 						if (depth > 0.0f) {
 							p.position += cn[c] * depth;
+							p.in_contact_this_tick = true;
 							if (mu_s > 0.0f) {
 								Vector3 friction_applied;
 								tentacletech::project_friction(p, cn[c], depth,
@@ -167,7 +168,23 @@ void PBDSolver::iterate() {
 				}
 			}
 		}
-		// 6. Anchor last so it overrides any earlier violation.
+		// 4. Distance constraints (segment length). Slice 4C: when either
+		// endpoint is in active contact (flagged by the collision pass
+		// above this iteration), drop stiffness from `distance_stiffness`
+		// to `contact_stiffness` so the chain stretches temporarily over
+		// wrapped geometry instead of fighting the collision push-out.
+		// Free-segment stiffness stays at the user's `distance_stiffness`
+		// so non-contact behavior is unchanged.
+		for (int i = 0; i + 1 < n; i++) {
+			float seg_stiffness = (particles[i].in_contact_this_tick ||
+					particles[i + 1].in_contact_this_tick)
+					? contact_stiffness
+					: distance_stiffness;
+			tentacletech::constraints::project_distance(
+					particles[i], particles[i + 1],
+					rest_lengths[i], seg_stiffness);
+		}
+		// 5. Anchor last so it overrides any earlier violation.
 		if (anchor_active && anchor_particle_index >= 0 && anchor_particle_index < n) {
 			tentacletech::constraints::project_anchor(
 					particles[anchor_particle_index], anchor_xform);
@@ -680,6 +697,24 @@ void PBDSolver::set_friction(float p_static, float p_kinetic_ratio) {
 float PBDSolver::get_static_friction() const { return friction_static; }
 float PBDSolver::get_kinetic_friction_ratio() const { return friction_kinetic_ratio; }
 
+void PBDSolver::set_contact_stiffness(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	contact_stiffness = p_v;
+}
+float PBDSolver::get_contact_stiffness() const { return contact_stiffness; }
+
+PackedByteArray PBDSolver::get_particle_in_contact_snapshot() const {
+	int n = (int)particles.size();
+	PackedByteArray out;
+	out.resize(n);
+	uint8_t *dst = out.ptrw();
+	for (int i = 0; i < n; i++) {
+		dst[i] = particles[i].in_contact_this_tick ? 1 : 0;
+	}
+	return out;
+}
+
 // -- Binding ----------------------------------------------------------------
 
 void PBDSolver::_bind_methods() {
@@ -756,6 +791,12 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_static_friction"), &PBDSolver::get_static_friction);
 	ClassDB::bind_method(D_METHOD("get_kinetic_friction_ratio"),
 			&PBDSolver::get_kinetic_friction_ratio);
+	ClassDB::bind_method(D_METHOD("set_contact_stiffness", "stiffness"),
+			&PBDSolver::set_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
+			&PBDSolver::get_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("get_particle_in_contact_snapshot"),
+			&PBDSolver::get_particle_in_contact_snapshot);
 
 	BIND_CONSTANT(DEFAULT_ITERATION_COUNT);
 	BIND_CONSTANT(MAX_ITERATION_COUNT);
