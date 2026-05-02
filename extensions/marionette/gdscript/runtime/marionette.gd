@@ -627,6 +627,12 @@ func _refresh_marionette_bones_after_calibrate() -> void:
 		mb.bone_entry = fresh
 		mb.joint_rotation = fresh.anatomical_basis_in_bone_local().get_euler()
 		_apply_joint_constraints(mb, fresh)
+		# Refresh mass too — Calibrate may have updated mass_fraction
+		# (e.g. seeding anatomical defaults via MarionetteMassDefaults).
+		# Without this, live bones stay at their build-time mass while
+		# the profile says otherwise — visible as stale per-bone weights.
+		var fallback_mass: float = total_mass / max(sim.get_child_count(), 1)
+		mb.mass = total_mass * fresh.mass_fraction if fresh.mass_fraction > 0.0 else fallback_mass
 
 
 ## Per-bone diagnostic comparing the BoneEntry-baked anatomical frame

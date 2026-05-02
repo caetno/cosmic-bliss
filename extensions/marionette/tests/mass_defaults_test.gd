@@ -134,6 +134,22 @@ func _init() -> void:
 	print("  Hips after tune+re-Calibrate: %.4f (preserved)" % hips_after)
 	print("  Head after tune+re-Calibrate: %.4f (default seeded)" % head_after)
 
+	# Re-Calibrate's refresh path must also push the new mass onto live
+	# MarionetteBones (without needing a full Build Ragdoll). The Hips
+	# bone in the simulator should now weigh 70 × 0.300 = 21 kg.
+	var hips_bone: MarionetteBone = bones_by_name.get(&"Hips")
+	if hips_bone == null:
+		push_error("Hips not in simulator after re-Calibrate")
+		failures += 1
+	else:
+		var expected_kg: float = 70.0 * 0.300
+		if not is_equal_approx(hips_bone.mass, expected_kg):
+			push_error("Hips mass not refreshed after re-Calibrate: expected %.2f kg, got %.2f kg"
+					% [expected_kg, hips_bone.mass])
+			failures += 1
+		else:
+			print("  Hips live MarionetteBone mass refreshed: %.3f kg" % hips_bone.mass)
+
 	if failures > 0:
 		push_error("%d failure(s)" % failures)
 		quit(1)
