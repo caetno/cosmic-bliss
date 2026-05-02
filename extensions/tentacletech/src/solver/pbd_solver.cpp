@@ -325,6 +325,28 @@ void PBDSolver::finalize(float p_dt) {
 			particles[i].asymmetry = particles[i].asymmetry / mag * ASYMMETRY_MAGNITUDE_CAP;
 		}
 	}
+
+	// Slice 4I — contact velocity damping (§4.3 footnote, addresses tick-rate
+	// jitter from constraint conflict during contact). PBD's iterate loop
+	// can fail to converge when bending / pose / distance pull a contacting
+	// particle in directions collision must reverse — each iter introduces
+	// non-zero net displacement, summed across iter_count this becomes
+	// implicit per-tick velocity that carries forward via Verlet
+	// integration in next predict(). Lerp prev_position toward position for
+	// in-contact particles to bleed off that residual velocity at tick end.
+	// 0 = disabled, 1 = fully kill velocity. 0.5 default halves it per
+	// tick, killing visible oscillation in 4–5 ticks while leaving
+	// legitimate sliding (high tick-to-tick velocity, decays slowly) intact.
+	if (contact_velocity_damping > 1e-5f) {
+		float t = contact_velocity_damping;
+		if (t > 1.0f) t = 1.0f;
+		for (int i = 0; i < n; i++) {
+			TentacleParticle &p = particles[i];
+			if (!p.in_contact_this_tick) continue;
+			if (p.inv_mass <= 0.0f) continue;
+			p.prev_position = p.prev_position.lerp(p.position, t);
+		}
+	}
 }
 
 // -- Configuration ----------------------------------------------------------
@@ -720,6 +742,13 @@ void PBDSolver::set_contact_stiffness(float p_v) {
 }
 float PBDSolver::get_contact_stiffness() const { return contact_stiffness; }
 
+void PBDSolver::set_contact_velocity_damping(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	contact_velocity_damping = p_v;
+}
+float PBDSolver::get_contact_velocity_damping() const { return contact_velocity_damping; }
+
 PackedByteArray PBDSolver::get_particle_in_contact_snapshot() const {
 	int n = (int)particles.size();
 	PackedByteArray out;
@@ -811,6 +840,10 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_contact_stiffness);
 	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
 			&PBDSolver::get_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "damping"),
+			&PBDSolver::set_contact_velocity_damping);
+	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
+			&PBDSolver::get_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_particle_in_contact_snapshot"),
 			&PBDSolver::get_particle_in_contact_snapshot);
 

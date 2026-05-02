@@ -195,6 +195,17 @@ public:
 	void set_contact_stiffness(float p_stiffness);
 	float get_contact_stiffness() const;
 
+	// Slice 4I — contact velocity damping. Lerp factor (0..1) applied at
+	// end of finalize() to bleed implicit per-tick velocity from particles
+	// flagged in_contact_this_tick. Addresses tick-rate jitter caused by
+	// constraint conflict (bending wants chord-into-obstacle, collision
+	// pushes out, etc.) which the iter loop cannot converge — each iter
+	// adds net drift, sum becomes implicit velocity that carries forward.
+	// 0 = disabled, 1 = fully kill velocity for in-contact particles,
+	// 0.5 = halve per tick (visible oscillation fades in 4–5 ticks).
+	void set_contact_velocity_damping(float p_damping);
+	float get_contact_velocity_damping() const;
+
 	// Snapshot (§15.2) of `in_contact_this_tick` flags. Byte per particle:
 	// 1 = in contact, 0 = free. PackedByteArray rather than bool[] so it
 	// crosses the GDScript boundary without a per-element Variant box.
@@ -248,6 +259,7 @@ private:
 	float friction_static = 0.0f;
 	float friction_kinetic_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
+	float contact_velocity_damping = 0.5f;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior

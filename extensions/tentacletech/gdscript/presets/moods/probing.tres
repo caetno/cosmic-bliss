@@ -21,6 +21,7 @@ pose_softness_when_blocked = 0.5
 bending_stiffness = 0.7
 damping = 0.95
 contact_stiffness = 0.7
+contact_velocity_damping = 0.3
 attractor_bias = 0.7
 amplitude_smoothing_rate = 10.0
 thrust_phase_edge_smoothing = 0.05

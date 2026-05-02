@@ -92,6 +92,14 @@ extends Resource
 ## chain stretches over wrapped geometry. 0.2 = very compliant,
 ## 0.7 = mostly rigid. Forwarded to [code]Tentacle.contact_stiffness[/code].
 @export_range(0.0, 1.0) var contact_stiffness: float = 0.5
+## Mood-tunable implicit-velocity damping for in-contact particles. Per-
+## tick lerp factor on prev_position → position; kills tick-rate jitter
+## from constraint-conflict mid-iteration without affecting free-chain
+## motion. Higher = more damping = stickier feel against contact;
+## lower = looser, slidier. 0.5 default; caressing/idle want higher
+## (~0.7) for a settled feel, probing wants lower (~0.3) for snappy
+## response. Forwarded to [code]Tentacle.contact_velocity_damping[/code].
+@export_range(0.0, 1.0) var contact_velocity_damping: float = 0.5
 
 # --- Attractor -------------------------------------------------------------
 

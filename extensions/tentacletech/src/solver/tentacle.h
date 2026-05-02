@@ -138,6 +138,17 @@ public:
 	// fighting collision push-out, then snap back when contact ends.
 	void set_contact_stiffness(float p_value);
 	float get_contact_stiffness() const;
+	// Slice 4I — implicit-velocity damping for in-contact particles. 0.5
+	// (default) halves the per-tick implicit velocity for any particle
+	// flagged in_contact_this_tick at end-of-tick, which kills tick-rate
+	// oscillation born of constraint conflict during contact (the iter
+	// loop can't always converge when bending / pose / distance pull
+	// inward and collision pushes out — each iter accumulates net drift).
+	// Free particles unaffected; legitimate sliding (high tick-to-tick
+	// velocity) decays slowly compared to sub-millimeter oscillation.
+	// 0 = disabled, 1 = fully kill velocity for in-contact particles.
+	void set_contact_velocity_damping(float p_value);
+	float get_contact_velocity_damping() const;
 	// Slice 4F — global multiplier on the type-1 friction reciprocal impulse
 	// applied to dynamic bodies (RigidBody3D / PhysicalBone3D / etc.) via
 	// PhysicsServer3D.body_apply_impulse. PBD friction in the kinetic regime
@@ -312,6 +323,7 @@ private:
 	float tentacle_lubricity = 0.0f;
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
+	float contact_velocity_damping = 0.5f;
 	float body_impulse_scale = 1.0f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;

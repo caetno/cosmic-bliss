@@ -207,6 +207,9 @@
 		<member name="contact_stiffness" type="float" setter="set_contact_stiffness" getter="get_contact_stiffness" default="0.5">
 			Distance-constraint stiffness on segments where either endpoint is in active contact (§4.3 slice 4C). Below [member distance_stiffness] so the chain stretches temporarily over wrapped geometry instead of fighting collision push-out. Snaps back to rest length when contact ends.
 		</member>
+		<member name="contact_velocity_damping" type="float" setter="set_contact_velocity_damping" getter="get_contact_velocity_damping" default="0.5">
+			Implicit-velocity damping for in-contact particles. Lerp factor (0..1) applied at end-of-tick to in-contact particles' [code]prev_position[/code] toward [code]position[/code], which bleeds the per-tick implicit velocity carried via Verlet integration. PBD's iterate loop can fail to converge when bending / pose / distance pull a contacting particle inward and collision pushes out — each iter adds net drift, accumulating into visible tick-rate jitter ("tentacle jitters between two colliders"). 0 = disabled, 0.5 (default) = halve velocity per tick, 1.0 = fully kill velocity for in-contact particles. Free particles unaffected; legitimate sliding (high tick-to-tick velocity) decays slowly compared to sub-millimeter oscillation, so cling-and-slide motion stays fluid.
+		</member>
 		<member name="damping" type="float" setter="set_damping" getter="get_damping" default="0.99">
 			Per-tick velocity retention. 1.0 = lossless, 0.0 = snaps to anchor every tick. Default 0.99 reads as "underwater drag"; drop toward 0.95 for a stiffer, more-damped feel.
 		</member>

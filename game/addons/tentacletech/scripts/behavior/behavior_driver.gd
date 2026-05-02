@@ -578,6 +578,7 @@ func _apply_mood() -> void:
 		_tentacle.bending_stiffness = mood.bending_stiffness
 		_tentacle.damping = mood.damping
 		_tentacle.contact_stiffness = mood.contact_stiffness
+		_tentacle.contact_velocity_damping = mood.contact_velocity_damping
 
 
 # Pulled out of `_ready` and exposed via the property setters so
