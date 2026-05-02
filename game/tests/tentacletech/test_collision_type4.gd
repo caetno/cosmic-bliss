@@ -51,6 +51,7 @@ func _run_tests() -> void:
 		"test_sphere_below_anchor_blocks_tip",
 		"test_obstacle_in_chain_path_pushed_aside",
 		"test_friction_pushes_dynamic_body",
+		"test_body_impulse_scale_default_is_gentle",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -453,6 +454,26 @@ func test_friction_pushes_dynamic_body() -> bool:
 	if not found_body_contact_with_friction:
 		push_error("expected at least one snapshot contact on the RigidBody3D with non-zero friction_applied")
 		return false
+	return true
+
+
+# Slice 4F: body_impulse_scale defaults to 0.1 (pragmatic cap on PBD's
+# over-stated friction reciprocal). Verify the export exists, default
+# matches the spec, and setting it to 0 disables impulse routing entirely
+# (chain still reacts to contacts; dynamic bodies just don't get pushed).
+func test_body_impulse_scale_default_is_gentle() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	if absf(t.body_impulse_scale - 0.1) > 1e-5:
+		push_error("expected body_impulse_scale default 0.1, got %f" % t.body_impulse_scale)
+		return false
+	t.body_impulse_scale = 0.0
+	if absf(t.body_impulse_scale) > 1e-5:
+		return false
+	# Drive a tick to make sure the zero scale path doesn't blow up. With
+	# no body in scene, no impulse-routing branch is taken anyway, but the
+	# zero-magnitude early-out should be hit when it would have been.
+	_make_floor(0.0)
+	_step([t], 30)
 	return true
 
 

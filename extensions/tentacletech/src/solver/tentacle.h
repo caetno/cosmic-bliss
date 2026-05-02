@@ -138,6 +138,20 @@ public:
 	// fighting collision push-out, then snap back when contact ends.
 	void set_contact_stiffness(float p_value);
 	float get_contact_stiffness() const;
+	// Slice 4F — global multiplier on the type-1 friction reciprocal impulse
+	// applied to dynamic bodies (RigidBody3D / PhysicalBone3D / etc.) via
+	// PhysicsServer3D.body_apply_impulse. PBD friction in the kinetic regime
+	// (fast tangential motion) cancels nearly the full per-particle motion
+	// regardless of μ, which translates to a per-particle impulse roughly
+	// equal to the particle's tangential momentum per tick — multiply by N
+	// particles in contact and small bones (toes, fingers) get yeeted. The
+	// default 0.1 makes the chain feel ~10× gentler on ragdolls; user can
+	// dial up toward 1.0 for kinematic-feeling impact, or to 0.0 to fully
+	// decouple the chain from dynamic-body reactions while keeping the
+	// chain itself responsive to contact. Real fix is a physics-correct
+	// `μ_k × N × dt` impulse cap; this scale knob is the pragmatic stopgap.
+	void set_body_impulse_scale(float p_value);
+	float get_body_impulse_scale() const;
 
 	// Snapshot accessor (§15.2): returns one Dictionary per ray with keys
 	// ray_origin, ray_direction, hit (bool), hit_point, hit_normal,
@@ -298,6 +312,7 @@ private:
 	float tentacle_lubricity = 0.0f;
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
+	float body_impulse_scale = 0.1f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;
 	godot::PackedVector3Array env_contact_points_scratch;

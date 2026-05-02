@@ -128,7 +128,12 @@ void Tentacle::_apply_collision_reciprocals(float p_delta) {
 		float eff_mass = 1.0f / inv_mass;
 
 		// Effective particle mass mapped through the spec's J = m × Δx / dt.
-		Vector3 impulse = fa * (eff_mass / p_delta);
+		// Scaled by `body_impulse_scale` (slice 4F) — PBD friction in the
+		// kinetic regime cancels ~full tangential motion regardless of μ,
+		// which over-states the impulse on light dynamic bodies. The
+		// scale knob is the pragmatic cap.
+		Vector3 impulse = fa * (eff_mass * body_impulse_scale / p_delta);
+		if (impulse.length_squared() < 1e-12f) continue;
 
 		// Offset = contact point - body global origin. Need the body Node3D
 		// to read its origin. ObjectDB::get_instance returns the typed
@@ -536,6 +541,12 @@ void Tentacle::set_contact_stiffness(float p_v) {
 	}
 }
 float Tentacle::get_contact_stiffness() const { return contact_stiffness; }
+
+void Tentacle::set_body_impulse_scale(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	body_impulse_scale = p_v;
+}
+float Tentacle::get_body_impulse_scale() const { return body_impulse_scale; }
 
 Array Tentacle::get_environment_contacts_snapshot() const {
 	// Slice 4D: one entry per particle. `hit=false` entries are valid (the
@@ -1096,6 +1107,10 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_contact_stiffness);
 	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
 			&Tentacle::get_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("set_body_impulse_scale", "value"),
+			&Tentacle::set_body_impulse_scale);
+	ClassDB::bind_method(D_METHOD("get_body_impulse_scale"),
+			&Tentacle::get_body_impulse_scale);
 	ClassDB::bind_method(D_METHOD("get_environment_contacts_snapshot"),
 			&Tentacle::get_environment_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
@@ -1181,6 +1196,9 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_stiffness",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_contact_stiffness", "get_contact_stiffness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "body_impulse_scale",
+					 PROPERTY_HINT_RANGE, "0.0,2.0,0.001,or_greater"),
+			"set_body_impulse_scale", "get_body_impulse_scale");
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),

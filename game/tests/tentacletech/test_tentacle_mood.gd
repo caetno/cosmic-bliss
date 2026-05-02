@@ -37,6 +37,7 @@ func _init() -> void:
 		"test_mood_changed_signal_reapplies",
 		"test_swap_mood_overwrites_previous",
 		"test_preset_files_load",
+		"test_mood_writes_solver_params_to_tentacle",
 	]:
 		if call(test_name):
 			print("[PASS] %s" % test_name)
@@ -106,6 +107,44 @@ func test_assigning_mood_copies_values() -> bool:
 	if not _approx(d.amplitude_smoothing_rate, 12.0): return false
 	if not _approx(d.thrust_phase_edge_smoothing, 0.25): return false
 	if not _approx(d.time_scale, 0.5): return false
+	# Slice 4F additions:
+	m.pose_softness_when_blocked = 0.45
+	m.emit_changed()
+	if not _approx(d.pose_softness_when_blocked, 0.45): return false
+	return true
+
+
+# Slice 4F: mood owns three solver-side params (bending / damping /
+# contact_stiffness). When applied with a Tentacle parent in scope, the
+# driver forwards them onto the Tentacle node.
+func test_mood_writes_solver_params_to_tentacle() -> bool:
+	var t: Node3D = ClassDB.instantiate("Tentacle")
+	t.particle_count = 8
+	t.segment_length = 0.05
+	root.add_child(t)
+	var d: Node = _make_driver()
+	t.add_child(d)
+	# Exercise _resolve_tentacle.
+	d.tentacle_path = NodePath("..")
+
+	var m: Resource = _Mood.new()
+	m.bending_stiffness = 0.83
+	m.damping = 0.92
+	m.contact_stiffness = 0.27
+	d.mood = m
+
+	if not _approx(t.bending_stiffness, 0.83):
+		push_error("bending_stiffness not forwarded to Tentacle")
+		return false
+	if not _approx(t.damping, 0.92):
+		push_error("damping not forwarded to Tentacle")
+		return false
+	if not _approx(t.contact_stiffness, 0.27):
+		push_error("contact_stiffness not forwarded to Tentacle")
+		return false
+
+	# Cleanup so the next test gets a fresh root.
+	t.free()
 	return true
 
 

@@ -65,12 +65,33 @@ extends Resource
 ## mood swaps.
 @export_range(0.0, 1.5) var rest_extent: float = 0.92
 
-# --- Stiffness -------------------------------------------------------------
+# --- Stiffness / character physics -----------------------------------------
 
 @export_group("Stiffness")
 ## Per-particle pose-target stiffness. Higher = pinned to the wave;
 ## lower = laggy / smeary. 0.10–0.20 reads "muscular but loose".
 @export_range(0.0, 1.0) var pose_stiffness: float = 0.15
+## When the tentacle is constrained (e.g. wedged against a body), the
+## pose-target stiffness for in-contact particles is multiplied by this
+## factor. Below 1.0 lets the chain *give* to constraints instead of
+## fighting them — fixes the "tentacle jitters / tries to break out"
+## behavior in tight spaces. 0.3 is a good middle ground; drop to 0.1
+## for very soft "complies easily" moods.
+@export_range(0.0, 1.0) var pose_softness_when_blocked: float = 0.3
+## Mood-tunable solver bending stiffness. Probing wants high (taut,
+## holds shape under contact); caressing/idle want low (limp, drapes
+## willingly). Forwarded to [code]Tentacle.bending_stiffness[/code] when
+## the mood is applied.
+@export_range(0.0, 1.0) var bending_stiffness: float = 0.5
+## Mood-tunable solver damping (per-tick velocity retention). Higher =
+## less ringing, gentler / underwater feel. Lower = snappier strikes.
+## Forwarded to [code]Tentacle.damping[/code] when the mood is applied.
+@export_range(0.0, 1.0) var damping: float = 0.99
+## Mood-tunable distance-constraint stiffness during active contact
+## (§4.3). Below [code]Tentacle.distance_stiffness[/code] (=1.0) so the
+## chain stretches over wrapped geometry. 0.2 = very compliant,
+## 0.7 = mostly rigid. Forwarded to [code]Tentacle.contact_stiffness[/code].
+@export_range(0.0, 1.0) var contact_stiffness: float = 0.5
 
 # --- Attractor -------------------------------------------------------------
 

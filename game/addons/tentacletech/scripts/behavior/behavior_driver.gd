@@ -141,6 +141,12 @@ extends Node3D
 ## Per-particle pose-target stiffness. Higher = pinned to the wave;
 ## lower = laggy / smeary. 0.10–0.20 reads "muscular but loose".
 @export_range(0.0, 1.0) var pose_stiffness: float = 0.15
+## Multiplier on [member pose_stiffness] for particles whose
+## [code]in_contact_this_tick[/code] flag is set. Below 1 lets the chain
+## *give* to obstacles instead of fighting them — addresses the "tentacle
+## jitters between legs" failure mode where pose pulls fight collision
+## push-out at full strength.
+@export_range(0.0, 1.0) var pose_softness_when_blocked: float = 0.3
 
 # --- Easing ----------------------------------------------------------------
 #
@@ -394,6 +400,21 @@ func _physics_process(p_delta: float) -> void:
 
 	var xform: Transform3D = _tentacle.global_transform
 
+	# --- In-contact snapshot for soft-pose-on-contact (slice 4F) ---------
+	# Pulled before the per-particle synthesis so we can reduce pose
+	# stiffness for particles flagged in_contact_this_tick — the chain
+	# gives way to obstacles instead of fighting them. Snapshot reflects
+	# either the current tick (if Tentacle's _physics_process ran first)
+	# or the previous tick (if the driver ran first); both are fine for
+	# this purpose since contact state changes slowly relative to 60Hz.
+	var in_contact: PackedByteArray = PackedByteArray()
+	if pose_softness_when_blocked < 1.0 - 1e-4:
+		var solver = _tentacle.get_solver()
+		if solver != null:
+			in_contact = solver.get_particle_in_contact_snapshot()
+	var blocked_stiffness: float = pose_stiffness * pose_softness_when_blocked
+	var has_contact_softening: bool = in_contact.size() == n
+
 	# --- Resolved attractor world pos (one-shot per tick) ----------------
 
 	var has_attractor: bool = _attractor != null and attractor_bias > 0.0
@@ -453,7 +474,10 @@ func _physics_process(p_delta: float) -> void:
 
 		_pose_indices[k - 1] = k
 		_pose_world_positions[k - 1] = target_world
-		_pose_stiffnesses[k - 1] = pose_stiffness
+		var s: float = pose_stiffness
+		if has_contact_softening and in_contact[k] != 0:
+			s = blocked_stiffness
+		_pose_stiffnesses[k - 1] = s
 
 	_tentacle.set_pose_targets(_pose_indices, _pose_world_positions, _pose_stiffnesses)
 
@@ -539,10 +563,21 @@ func _apply_mood() -> void:
 	coil_amplitude = mood.coil_amplitude
 	rest_extent = mood.rest_extent
 	pose_stiffness = mood.pose_stiffness
+	pose_softness_when_blocked = mood.pose_softness_when_blocked
 	attractor_bias = mood.attractor_bias
 	amplitude_smoothing_rate = mood.amplitude_smoothing_rate
 	thrust_phase_edge_smoothing = mood.thrust_phase_edge_smoothing
 	time_scale = mood.time_scale
+	# Slice 4F: forward solver-side mood params to the Tentacle node. The
+	# driver's _resolve_tentacle may not have run yet (e.g. when mood is
+	# set during scene load before _ready); skip silently in that case
+	# and rely on _ready's _apply_mood call to retry.
+	if _tentacle == null:
+		_resolve_tentacle()
+	if _tentacle != null:
+		_tentacle.bending_stiffness = mood.bending_stiffness
+		_tentacle.damping = mood.damping
+		_tentacle.contact_stiffness = mood.contact_stiffness
 
 
 # Pulled out of `_ready` and exposed via the property setters so
