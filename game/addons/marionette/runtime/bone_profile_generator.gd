@@ -167,15 +167,18 @@ static func generate_with_method(
 		# re-Calibrate doesn't blow it away.
 		var prior_stiffness: Vector3 = Vector3.ZERO
 		var prior_damping: Vector3 = Vector3.ZERO
+		var prior_mass_fraction: float = 0.0
 		if entries.has(bone_name) and entries[bone_name] != null:
 			prior_stiffness = entries[bone_name].spring_stiffness
 			prior_damping = entries[bone_name].spring_damping
+			prior_mass_fraction = entries[bone_name].mass_fraction
 
 		var entry := BoneEntry.new()
 		entry.archetype = archetype
 		entry.is_left_side = is_left_side
 		entry.spring_stiffness = prior_stiffness
 		entry.spring_damping = prior_damping
+		entry.mass_fraction = prior_mass_fraction
 
 		# ROOT and FIXED bones aren't SPD-driven; the matcher score is
 		# meaningless for them. Leave permutation at BoneEntry defaults
@@ -238,6 +241,10 @@ static func generate_with_method(
 		# stays; zeros get the default for that axis. ROOT and FIXED bones
 		# stay at zero (no spring needed; not joint-driven).
 		MarionetteSpringDefaults.apply(entry, bone_name)
+		# Mass defaults: anthropometric per-bone fractions (~50 % trunk,
+		# ~10 % per upper leg, etc.). Preserved across re-Calibrate via
+		# the same non-zero-stays-tuned policy.
+		MarionetteMassDefaults.apply(entry, bone_name)
 		entry.rest_anatomical_offset = _compute_rest_offset(
 				archetype, bone_world, child_world, parent_world, entry)
 
