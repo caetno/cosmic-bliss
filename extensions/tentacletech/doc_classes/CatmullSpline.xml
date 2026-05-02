@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="CatmullSpline" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		Catmull-Rom spline with arc-length LUT and parallel-transport binormals.
+	</brief_description>
+	<description>
+		Used by [Tentacle] to evaluate the chain centerline at sub-segment resolution and to produce stable T/N/B frames for mesh skinning. Internal to the extension; exposed for tests and authoring tools.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="build_binormal_lut">
+			<return type="void" />
+			<param index="0" name="sample_count" type="int" default="32" />
+			<description>
+			</description>
+		</method>
+		<method name="build_distance_lut">
+			<return type="void" />
+			<param index="0" name="sample_count" type="int" default="32" />
+			<description>
+			</description>
+		</method>
+		<method name="build_from_points">
+			<return type="void" />
+			<param index="0" name="points" type="PackedVector3Array" />
+			<description>
+			</description>
+		</method>
+		<method name="distance_to_parameter" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="distance" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="evaluate_frame" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="t" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="evaluate_position" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="t" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="evaluate_tangent" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="t" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_arc_length" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_binormal_lut" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_binormal_lut_sample_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_distance_lut" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_distance_lut_sample_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_point_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_segment_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_segment_weights" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="parameter_to_distance" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="t" type="float" />
+			<description>
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="DEFAULT_DISTANCE_LUT_SAMPLES" value="32">
+		</constant>
+		<constant name="DEFAULT_BINORMAL_LUT_SAMPLES" value="32">
+		</constant>
+		<constant name="SEGMENT_FLOAT_COUNT" value="16">
+		</constant>
+	</constants>
+</class>

@@ -25,7 +25,13 @@ extends Node3D
 
 # --- Wiring ----------------------------------------------------------------
 
+## When false, the driver stops writing pose targets and clears any it had set.
+## The chain falls back to gravity + bending only — useful for stunning the
+## tentacle (frozen in place) or temporarily handing control to another driver.
 @export var enabled: bool = true
+## Path to the [code]Tentacle[/code] node this driver writes pose targets to.
+## Default ".." assumes the driver is a direct child of the Tentacle, which
+## matches the recommended scene layout.
 @export var tentacle_path: NodePath = NodePath("..") :
 	set(v):
 		tentacle_path = v
@@ -68,9 +74,18 @@ extends Node3D
 # tip, and let bending stiffness express the slack as body curl.
 
 @export_group("Thrust")
-@export_range(0.0, 5.0) var thrust_frequency: float = 0.0     ## Hz
-@export_range(0.0, 0.5) var thrust_amplitude: float = 0.0     ## fraction of chain length
-@export_range(-1.0, 1.0) var thrust_bias: float = 0.0         ## -1 = always retracting; +1 = always thrusting
+## Cycle rate of the load/strike thrust (Hz). 0 = no thrust (just wave).
+## Combine with [member thrust_amplitude] to set how aggressive the strike
+## is; 1–2 Hz reads as deliberate, 3+ as agitated.
+@export_range(0.0, 5.0) var thrust_frequency: float = 0.0
+## Peak axial extension of the strike, expressed as a fraction of chain
+## length. Adds to [member rest_extent] on strike, subtracts on load. 0
+## disables thrust without changing the cycle clock.
+@export_range(0.0, 0.5) var thrust_amplitude: float = 0.0
+## Shifts the load/strike duty cycle. -1 = always retracting (load only),
+## 0 = symmetric, +1 = always thrusting (strike only). Combine with
+## [member thrust_strike_sharpness] for explosive snake-strike timing.
+@export_range(-1.0, 1.0) var thrust_bias: float = 0.0
 ## Length of tip-quiet zone (m) where wave/thrust fade out. Body coils
 ## below it; tip stays balanced. Set 0 for legacy uniform-scale behavior.
 @export_range(0.0, 0.5) var tip_rigid_length: float = 0.08
@@ -140,6 +155,9 @@ extends Node3D
 # --- Attractor (target bias) -----------------------------------------------
 
 @export_group("Attractor")
+## Optional [code]Node3D[/code] the tip is biased toward each tick. Leave
+## empty to disable. The bias respects the wave: the body keeps moving,
+## the tip leans toward the attractor with weight [member attractor_bias].
 @export var attractor_path: NodePath :
 	set(v):
 		attractor_path = v
@@ -156,7 +174,13 @@ extends Node3D
 # --- Time ------------------------------------------------------------------
 
 @export_group("Time")
+## Multiplier on dt before phase integration. 1.0 = real-time; 0.5 =
+## half-speed (everything moves slower); 0 = frozen wave (rest pose
+## still renders). Useful for slow-mo / hit-stop / pause.
 @export var time_scale: float = 1.0
+## When true, the wave / drift / noise / thrust phases are seeded with
+## random offsets at [code]_ready[/code] so multiple tentacles in the
+## same scene don't move in lockstep. Disable for deterministic tests.
 @export var randomize_phase_on_ready: bool = true
 
 # --- Mass distribution -----------------------------------------------------

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="SplineDataPacker" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		Packs spline samples into the per-tick RGBA32F data texture the vertex shader reads.
+	</brief_description>
+	<description>
+		Internal helper that lays out per-particle position + frame data in the layout agreed with [code]tentacle_lib.gdshaderinc[/code]. Driven by [Tentacle]; not normally instantiated by user code.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="compute_packed_size" qualifiers="static">
+			<return type="int" />
+			<param index="0" name="segment_count" type="int" />
+			<param index="1" name="distance_lut_size" type="int" />
+			<param index="2" name="binormal_lut_size" type="int" />
+			<param index="3" name="channel_count" type="int" />
+			<param index="4" name="point_count" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="create_texture" qualifiers="static">
+			<return type="ImageTexture" />
+			<param index="0" name="packed" type="PackedFloat32Array" />
+			<param index="1" name="width" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="pack" qualifiers="static">
+			<return type="PackedFloat32Array" />
+			<param index="0" name="spline" type="CatmullSpline" />
+			<param index="1" name="per_point_scalars" type="Array" />
+			<description>
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="HEADER_FLOAT_COUNT" value="8">
+		</constant>
+	</constants>
+</class>

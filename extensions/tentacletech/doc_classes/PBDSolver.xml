@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="PBDSolver" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		Position-based dynamics chain solver. The physics engine inside a [Tentacle].
+	</brief_description>
+	<description>
+		Holds an array of mass particles connected by distance + bending constraints, plus optional anchor / soft target / pose / collision projections (§3 of the architecture doc). One [Tentacle] node owns one [PBDSolver]; the Tentacle's exports are forwarding setters on this instance.
+		Direct access is exposed for tests + tooling. Normal authoring should go through the Tentacle's @exports.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="clear_anchor">
+			<return type="void" />
+			<description>
+			</description>
+		</method>
+		<method name="clear_environment_contacts">
+			<return type="void" />
+			<description>
+			</description>
+		</method>
+		<method name="clear_pose_targets">
+			<return type="void" />
+			<description>
+			</description>
+		</method>
+		<method name="clear_target">
+			<return type="void" />
+			<description>
+			</description>
+		</method>
+		<method name="get_anchor_particle_index" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_anchor_transform" qualifiers="const">
+			<return type="Transform3D" />
+			<description>
+			</description>
+		</method>
+		<method name="get_asymmetry_recovery_rate" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_base_angular_velocity_limit" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_bending_stiffness" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_collision_radius" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_contact_stiffness" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_damping" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_distance_stiffness" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_environment_contact_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_environment_friction_applied" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_gravity" qualifiers="const">
+			<return type="Vector3" />
+			<description>
+			</description>
+		</method>
+		<method name="get_iteration_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_kinetic_friction_ratio" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_asymmetry" qualifiers="const">
+			<return type="Vector2" />
+			<param index="0" name="index" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_girth_scale" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_girth_scales" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_in_contact_snapshot" qualifiers="const">
+			<return type="PackedByteArray" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_inv_mass" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="index" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_inv_masses" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_position" qualifiers="const">
+			<return type="Vector3" />
+			<param index="0" name="index" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_particle_positions" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_pose_target_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_pose_target_indices" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_pose_target_positions" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_pose_target_stiffnesses" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_rest_length" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="segment_index" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_rigid_base_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_segment_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_segment_stretch_ratios" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="get_static_friction" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_target_particle_index" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_target_position" qualifiers="const">
+			<return type="Vector3" />
+			<description>
+			</description>
+		</method>
+		<method name="get_target_stiffness" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="has_anchor" qualifiers="const">
+			<return type="bool" />
+			<description>
+			</description>
+		</method>
+		<method name="has_target" qualifiers="const">
+			<return type="bool" />
+			<description>
+			</description>
+		</method>
+		<method name="initialize_chain">
+			<return type="void" />
+			<param index="0" name="particle_count" type="int" />
+			<param index="1" name="segment_length" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_anchor">
+			<return type="void" />
+			<param index="0" name="particle_index" type="int" />
+			<param index="1" name="world_xform" type="Transform3D" />
+			<description>
+			</description>
+		</method>
+		<method name="set_asymmetry_recovery_rate">
+			<return type="void" />
+			<param index="0" name="rate" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_base_angular_velocity_limit">
+			<return type="void" />
+			<param index="0" name="omega" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_bending_stiffness">
+			<return type="void" />
+			<param index="0" name="stiffness" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_collision_radius">
+			<return type="void" />
+			<param index="0" name="radius" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_contact_stiffness">
+			<return type="void" />
+			<param index="0" name="stiffness" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_damping">
+			<return type="void" />
+			<param index="0" name="damping" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_distance_stiffness">
+			<return type="void" />
+			<param index="0" name="stiffness" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_environment_contacts_per_particle">
+			<return type="void" />
+			<param index="0" name="points" type="PackedVector3Array" />
+			<param index="1" name="normals" type="PackedVector3Array" />
+			<param index="2" name="active" type="PackedByteArray" />
+			<description>
+			</description>
+		</method>
+		<method name="set_friction">
+			<return type="void" />
+			<param index="0" name="static_coeff" type="float" />
+			<param index="1" name="kinetic_ratio" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_gravity">
+			<return type="void" />
+			<param index="0" name="gravity" type="Vector3" />
+			<description>
+			</description>
+		</method>
+		<method name="set_iteration_count">
+			<return type="void" />
+			<param index="0" name="iter" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="set_particle_asymmetry">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="asymmetry" type="Vector2" />
+			<description>
+			</description>
+		</method>
+		<method name="set_particle_inv_mass">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="inv_mass" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_particle_position">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<param index="1" name="position" type="Vector3" />
+			<description>
+			</description>
+		</method>
+		<method name="set_pose_targets">
+			<return type="void" />
+			<param index="0" name="indices" type="PackedInt32Array" />
+			<param index="1" name="world_positions" type="PackedVector3Array" />
+			<param index="2" name="stiffnesses" type="PackedFloat32Array" />
+			<description>
+			</description>
+		</method>
+		<method name="set_rigid_base_count">
+			<return type="void" />
+			<param index="0" name="count" type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="set_target">
+			<return type="void" />
+			<param index="0" name="particle_index" type="int" />
+			<param index="1" name="world_pos" type="Vector3" />
+			<param index="2" name="stiffness" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="set_uniform_rest_length">
+			<return type="void" />
+			<param index="0" name="length" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="tick">
+			<return type="void" />
+			<param index="0" name="dt" type="float" />
+			<description>
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="DEFAULT_ITERATION_COUNT" value="4">
+		</constant>
+		<constant name="MAX_ITERATION_COUNT" value="6">
+		</constant>
+		<constant name="DEFAULT_PARTICLE_COUNT" value="16">
+		</constant>
+	</constants>
+</class>

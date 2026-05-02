@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="Tentacle" inherits="Node3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+	<brief_description>
+		PBD-based tentacle: a chain of mass particles with a spline-skinned mesh.
+	</brief_description>
+	<description>
+		Owns one [PBDSolver] (a chain of particles connected by distance + bending constraints) and one [MeshInstance3D] driven by a unique [ShaderMaterial] that reads spline data from a per-tick [code]RGBA32F[/code] data texture. Anchored at the node's transform; the chain hangs from the anchor and is shaped by gravity, optional pose targets, and contact with the world.
+		[b]Authoring split:[/b] this node owns the [i]physics character[/i] (chain length, segment count, stiffness, friction, collision). Behavioral knobs (wave / thrust / coil / attractor) live on a sibling [code]TentacleBehavior[/code] node so a single tentacle can swap moods at runtime.
+		[b]Collision:[/b] each particle issues a sphere shape query against the physics server every tick (slice 4D), so the chain reacts uniformly to [StaticBody3D], [RigidBody3D], [AnimatableBody3D] and [PhysicalBone3D] (ragdoll bones). Friction reciprocals are routed back to dynamic bodies via [code]PhysicsServer3D.body_apply_impulse[/code] so a heavy chain dragging across a ragdoll bone pulls the bone in the drag direction.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="clear_anchor_override">
+			<return type="void" />
+			<description>
+				Restore the default anchor (the chain's particle 0 follows this node's [code]global_transform[/code] each tick).
+			</description>
+		</method>
+		<method name="clear_pose_targets">
+			<return type="void" />
+			<description>
+				Drop all soft per-particle pose pulls.
+			</description>
+		</method>
+		<method name="clear_target">
+			<return type="void" />
+			<description>
+				Drop the single tip target-pull, if any.
+			</description>
+		</method>
+		<method name="get_anchor_state" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Snapshot of the active anchor: [code]{ particle_index: int, world_xform: Transform3D }[/code]. [code]particle_index = -1[/code] when no anchor is set.
+			</description>
+		</method>
+		<method name="get_environment_contacts_snapshot" qualifiers="const">
+			<return type="Array" />
+			<description>
+				One entry per particle (size = [member particle_count]) describing the latest tick's collision probe result. Each entry is a [Dictionary] with keys [code]particle_index[/code], [code]query_origin[/code], [code]hit[/code] (bool), [code]hit_point[/code], [code]hit_normal[/code], [code]hit_object_id[/code], [code]hit_linear_velocity[/code], [code]friction_applied[/code]. Consumed by the debug overlay; safe to read every frame (returns by copy).
+			</description>
+		</method>
+		<method name="get_particle_inv_masses" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Per-particle inverse mass. 0 = pinned (anchor / rigid base); 1.0 = unit mass; values in between scale with the [code]TentacleBehavior.mass_from_girth[/code] helper.
+			</description>
+		</method>
+		<method name="get_particle_positions" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+				Per-particle world positions, snapshot copy. Index 0 is the anchor.
+			</description>
+		</method>
+		<method name="get_pose_target_count" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_rest_girth_texture" qualifiers="const">
+			<return type="ImageTexture" />
+			<description>
+				The 256-bin rest-girth profile (FORMAT_RF) read by the vertex shader to scale radius along arc length. Auto-populated when [member tentacle_mesh] is a [code]TentacleMesh[/code] resource that exposes [code]get_baked_girth_texture[/code].
+			</description>
+		</method>
+		<method name="get_segment_stretch_ratios" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Current segment length / rest length, one entry per segment. 1.0 = at rest, &gt;1 stretched, &lt;1 compressed. Used by the gizmo overlay to color-code stretch.
+			</description>
+		</method>
+		<method name="get_solver" qualifiers="const">
+			<return type="PBDSolver" />
+			<description>
+				Underlying [PBDSolver]. Direct manipulation is allowed for tests + tooling; the Tentacle's exports are forwarding setters onto the same instance.
+			</description>
+		</method>
+		<method name="get_spline_data_image" qualifiers="const">
+			<return type="Image" />
+			<description>
+				CPU-side mirror of the per-tick spline data texture (RGBA32F). For inspection / tests only — the GPU texture is what the shader actually reads.
+			</description>
+		</method>
+		<method name="get_spline_data_texture" qualifiers="const">
+			<return type="ImageTexture" />
+			<description>
+				Per-tick spline data texture (RGBA32F) bound to the shader as [code]spline_data_texture[/code]. Owned by the Tentacle, never reallocated after [code]_ready[/code].
+			</description>
+		</method>
+		<method name="get_spline_data_texture_width" qualifiers="const">
+			<return type="int" />
+			<description>
+				Width of the spline data texture in samples. Bound to the shader as [code]spline_data_width[/code].
+			</description>
+		</method>
+		<method name="get_spline_frames" qualifiers="const">
+			<return type="Array" />
+			<param index="0" name="count" type="int" />
+			<description>
+				Sampled parallel-transport frames along the chain's centerline; an array of [code]count[/code] dictionaries with [code]tangent[/code] / [code]normal[/code] / [code]binormal[/code] vectors. For tooling / gizmos.
+			</description>
+		</method>
+		<method name="get_spline_samples" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<param index="0" name="count" type="int" />
+			<description>
+				[code]count[/code] equally-spaced world-space points along the chain's spline.
+			</description>
+		</method>
+		<method name="get_target_particle_index" qualifiers="const">
+			<return type="int" />
+			<description>
+			</description>
+		</method>
+		<method name="get_target_pull_state" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Snapshot of the single tip target-pull: [code]{ active: bool, particle_index: int, world_pos: Vector3, stiffness: float }[/code].
+			</description>
+		</method>
+		<method name="get_target_stiffness" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="rebuild_chain">
+			<return type="void" />
+			<description>
+				Reset the particle chain to its rest pose at the current node transform. Called automatically when [member particle_count] or [member segment_length] changes; expose for tooling that wants a hard reset.
+			</description>
+		</method>
+		<method name="set_anchor_transform">
+			<return type="void" />
+			<param index="0" name="xform" type="Transform3D" />
+			<description>
+				Override the anchor with an explicit world transform. Call [method clear_anchor_override] to restore the default (follow this node's [code]global_transform[/code]).
+			</description>
+		</method>
+		<method name="set_pose_targets">
+			<return type="void" />
+			<param index="0" name="indices" type="PackedInt32Array" />
+			<param index="1" name="world_positions" type="PackedVector3Array" />
+			<param index="2" name="stiffnesses" type="PackedFloat32Array" />
+			<description>
+				Soft per-particle pose pulls — the behavior driver writes these every tick to shape the chain. Three parallel arrays of equal length; cleared via [method clear_pose_targets].
+			</description>
+		</method>
+		<method name="set_rest_girth_texture">
+			<return type="void" />
+			<param index="0" name="tex" type="ImageTexture" />
+			<description>
+				Override the rest-girth profile manually. Normally auto-populated from [member tentacle_mesh]; only call when wiring a stock primitive that doesn't expose a baked profile.
+			</description>
+		</method>
+		<method name="set_target">
+			<return type="void" />
+			<param index="0" name="world_pos" type="Vector3" />
+			<description>
+				Set a single tip target-pull at [code]world_pos[/code] with the current [method get_target_stiffness].
+			</description>
+		</method>
+		<method name="set_target_particle_index">
+			<return type="void" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Which particle the single target-pull acts on. Defaults to the tip ([code]particle_count - 1[/code]).
+			</description>
+		</method>
+		<method name="set_target_stiffness">
+			<return type="void" />
+			<param index="0" name="stiffness" type="float" />
+			<description>
+				Per-iteration stiffness of the single tip target-pull. 0 = ignored, 1 = closes the gap each iteration. Compounds across iterations (4 iters × 0.2 ≈ 0.59 effective).
+			</description>
+		</method>
+		<method name="tick">
+			<return type="void" />
+			<param index="0" name="delta" type="float" />
+			<description>
+				Drive one solver step. Called automatically from [code]_physics_process[/code]; exposed so headless tests can drive the same pipeline without the SceneTree.
+			</description>
+		</method>
+		<method name="update_render_data">
+			<return type="void" />
+			<description>
+				Force a refresh of the spline data texture from the current particle state. Called automatically at end-of-tick; exposed for tools that mutate solver state outside the tick (e.g. authoring gizmos).
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="asymmetry_recovery_rate" type="float" setter="set_asymmetry_recovery_rate" getter="get_asymmetry_recovery_rate" default="3.0">
+			How fast directional squeeze (orifice ring pressure, future) decays per second. Higher = snappier recovery; lower = longer-lived deformation.
+		</member>
+		<member name="base_angular_velocity_limit" type="float" setter="set_base_angular_velocity_limit" getter="get_base_angular_velocity_limit" default="0.0">
+			Cap on the angular speed (rad/s) of the dynamic particle adjacent to the anchor as it sweeps around the anchor in one tick. 0 disables. Use to tame whip-back when pose pulls or inertia would otherwise spin the base too fast.
+		</member>
+		<member name="base_static_friction" type="float" setter="set_base_static_friction" getter="get_base_static_friction" default="0.4">
+			Static friction coefficient μ_s at contact (§4.4 smooth-vs-skin-dry default). Modulated by [member tentacle_lubricity] before being handed to the solver. Friction cancels tangential motion within the cone μ_s · Δn; outside it, motion is capped at the kinetic cone.
+		</member>
+		<member name="bending_stiffness" type="float" setter="set_bending_stiffness" getter="get_bending_stiffness" default="0.5">
+			Per-iteration stiffness of the bending constraint (resists curvature, pushing the chain back toward straight). Compounds across iterations. 0 = noodle, 1 = stiff. Combine with [member distance_stiffness] to balance "muscle tone".
+		</member>
+		<member name="contact_stiffness" type="float" setter="set_contact_stiffness" getter="get_contact_stiffness" default="0.5">
+			Distance-constraint stiffness on segments where either endpoint is in active contact (§4.3 slice 4C). Below [member distance_stiffness] so the chain stretches temporarily over wrapped geometry instead of fighting collision push-out. Snaps back to rest length when contact ends.
+		</member>
+		<member name="damping" type="float" setter="set_damping" getter="get_damping" default="0.99">
+			Per-tick velocity retention. 1.0 = lossless, 0.0 = snaps to anchor every tick. Default 0.99 reads as "underwater drag"; drop toward 0.95 for a stiffer, more-damped feel.
+		</member>
+		<member name="distance_stiffness" type="float" setter="set_distance_stiffness" getter="get_distance_stiffness" default="1.0">
+			Per-iteration stiffness of segment-length distance constraints. 1.0 = rigid; below 1.0 lets segments stretch under load. See [member contact_stiffness] for the during-contact override.
+		</member>
+		<member name="draw_gizmo" type="bool" setter="set_draw_gizmo" getter="get_draw_gizmo" default="false">
+			Spawn the runtime debug overlay (particles, constraints, environment probe, friction arrows) as a child node. The overlay reads snapshots every frame; cheap to leave on while iterating.
+		</member>
+		<member name="environment_collision_layer_mask" type="int" setter="set_environment_collision_layer_mask" getter="get_environment_collision_layer_mask" default="-1">
+			Physics-layer mask the per-particle sphere probe filters against. Use to exclude e.g. ragdoll bones from the collision pipeline (so the tentacle doesn't push back on the hero). Default −1 = all layers.
+		</member>
+		<member name="environment_probe_distance" type="float" setter="set_environment_probe_distance" getter="get_environment_probe_distance" default="1.0">
+			[b]Legacy[/b] (slice 4A): max raycast distance for the gravity-only probe. Unused since slice 4D switched to per-particle sphere queries — the probe radius is now [member particle_collision_radius]. Kept to avoid breaking existing scenes that set the export.
+		</member>
+		<member name="environment_probe_enabled" type="bool" setter="set_environment_probe_enabled" getter="get_environment_probe_enabled" default="true">
+			Toggle for the unified collision probe. Disables ALL collision detection — environment AND ragdoll — when off. Use [member environment_collision_layer_mask] for selective filtering.
+		</member>
+		<member name="gravity" type="Vector3" setter="set_gravity" getter="get_gravity" default="Vector3(0, -9.8, 0)">
+			Per-tentacle gravity vector. Independent of the global physics gravity so individual tentacles can hang in different directions (e.g. a ceiling-mounted vs floor-anchored tentacle).
+		</member>
+		<member name="iteration_count" type="int" setter="set_iteration_count" getter="get_iteration_count" default="4">
+			PBD iterations per tick (clamped to [1, 6]). Higher = stiffer constraints (each runs more times per tick) and more stable contact, but linearly more cost. 4 is the default for a good cost/quality tradeoff.
+		</member>
+		<member name="kinetic_friction_ratio" type="float" setter="set_kinetic_friction_ratio" getter="get_kinetic_friction_ratio" default="0.8">
+			μ_k / μ_s. 0.8 (default) matches the §4.3 "typical" ratio. Drops below 1 so once a particle slips it slides easier than it grips.
+		</member>
+		<member name="mesh_arc_axis" type="int" setter="set_mesh_arc_axis" getter="get_mesh_arc_axis" default="2" enum="Tentacle.MeshArcAxis">
+			Which mesh-local axis is the spline arc-length axis. Default Z (matches §10.1 and [code]TentacleMesh[/code]); use Y for stock CylinderMesh primitives (pair with [member mesh_arc_offset] = height/2).
+		</member>
+		<member name="mesh_arc_offset" type="float" setter="set_mesh_arc_offset" getter="get_mesh_arc_offset" default="0.0">
+			Additive offset on the chosen arc axis after the sign multiplier. Use to convert a centered mesh (axis ∈ [−h/2, h/2]) to the base-at-zero convention the shader expects (arc ∈ [0, h]).
+		</member>
+		<member name="mesh_arc_sign" type="int" setter="set_mesh_arc_sign" getter="get_mesh_arc_sign" default="1">
+			Sign multiplier on the chosen arc axis. −1 maps a tip-at-negative mesh onto the shader's positive-arc convention. Auto-set when [member tentacle_mesh] is a [code]TentacleMesh[/code]; leave +1 for stock primitives.
+		</member>
+		<member name="particle_collision_radius" type="float" setter="set_particle_collision_radius" getter="get_particle_collision_radius" default="0.05">
+			Per-particle collision sphere radius (m). Effective radius is [code]particle_collision_radius × girth_scale[/code] — the chain's auto-baked girth profile already scales it along the body. The probe queries with a 5% bias so tangent contacts still detect.
+		</member>
+		<member name="particle_count" type="int" setter="set_particle_count" getter="get_particle_count" default="16">
+			Chain length in particles. More = smoother bend at higher cost (PBD per-particle work scales linearly). 12–24 is a good range.
+		</member>
+		<member name="rigid_base_count" type="int" setter="set_rigid_base_count" getter="get_rigid_base_count" default="1">
+			Pin the first N particles to the anchor transform. 1 (default) = single-particle anchor. 2 fixes the segment 0→1 orientation so the base doesn't tilt under pose pulls. 3 also locks 1→2, etc. Local offsets are captured at the time the count changes.
+		</member>
+		<member name="segment_length" type="float" setter="set_segment_length" getter="get_segment_length" default="0.1">
+			Distance between adjacent particles at rest (m). Total chain length = [code]segment_length × (particle_count − 1)[/code]. Reset live without rebuilding.
+		</member>
+		<member name="shader_material" type="ShaderMaterial" setter="set_shader_material" getter="get_shader_material">
+			Per-instance [ShaderMaterial] driving the spline-skinned mesh. Each tentacle owns its own; the [code].gdshader[/code] file is shared. Auto-created on [code]_ready[/code] if not assigned.
+		</member>
+		<member name="tentacle_lubricity" type="float" setter="set_tentacle_lubricity" getter="get_tentacle_lubricity" default="0.0">
+			0..1 modulator on [member base_static_friction]. Scales μ_s as [code](1 − lubricity)[/code]. 1.0 = frictionless (slick); 0 = full base coefficient. The cleanest knob for "this tentacle is slippery / dry".
+		</member>
+		<member name="tentacle_mesh" type="Mesh" setter="set_tentacle_mesh" getter="get_tentacle_mesh">
+			Mesh deformed along the chain. Accepts any [Mesh]; when assigned a [code]TentacleMesh[/code] resource, auto-detects baked girth, arc axis sign, and rest length. For stock primitives (CylinderMesh etc.), set [member mesh_arc_axis] / [member mesh_arc_sign] / [member mesh_arc_offset] manually.
+		</member>
+	</members>
+	<constants>
+		<constant name="MESH_ARC_AXIS_X" value="0" enum="MeshArcAxis">
+			Spline arc runs along the mesh's local +X.
+		</constant>
+		<constant name="MESH_ARC_AXIS_Y" value="1" enum="MeshArcAxis">
+			Spline arc runs along the mesh's local +Y. Use for stock [CylinderMesh] (paired with [member mesh_arc_offset] = height/2).
+		</constant>
+		<constant name="MESH_ARC_AXIS_Z" value="2" enum="MeshArcAxis">
+			Spline arc runs along the mesh's local +Z. Default; matches [code]TentacleMesh[/code].
+		</constant>
+	</constants>
+</class>
