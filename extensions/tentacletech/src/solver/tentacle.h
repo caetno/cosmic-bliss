@@ -149,6 +149,14 @@ public:
 	// 0 = disabled, 1 = fully kill velocity for in-contact particles.
 	void set_contact_velocity_damping(float p_value);
 	float get_contact_velocity_damping() const;
+	// Slice 4K — gravity supported by contact. Default true: in-contact
+	// particles get only the contact-tangent component of gravity per tick
+	// (the contact supports the normal component, like a brick on a floor
+	// doesn't sink). Eliminates the per-tick "gravity-sinks-particle / iter-
+	// pushes-out" cycle that seeded the iter-amplification jitter the
+	// user saw in wedged configurations.
+	void set_support_in_contact(bool p_value);
+	bool get_support_in_contact() const;
 	// Slice 4F — global multiplier on the type-1 friction reciprocal impulse
 	// applied to dynamic bodies (RigidBody3D / PhysicalBone3D / etc.) via
 	// PhysicsServer3D.body_apply_impulse. PBD friction in the kinetic regime
@@ -324,6 +332,7 @@ private:
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
 	float contact_velocity_damping = 0.5f;
+	bool support_in_contact = true;
 	float body_impulse_scale = 1.0f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;

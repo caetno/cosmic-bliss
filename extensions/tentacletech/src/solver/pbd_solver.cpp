@@ -76,6 +76,14 @@ void PBDSolver::tick(float p_dt) {
 void PBDSolver::predict(float p_dt) {
 	float dt2 = p_dt * p_dt;
 	int n = (int)particles.size();
+	// Slice 4K: gravity-support preconditions. Probe runs before solver.tick(),
+	// so env_contact_active / env_contact_normals reflect THIS tick's contacts
+	// already. We use them to project the per-particle gravity step onto the
+	// contact tangent plane.
+	bool have_contact_data = (env_contact_active.size() == n &&
+			env_contact_normals.size() == n);
+	const uint8_t *act = have_contact_data ? env_contact_active.ptr() : nullptr;
+	const Vector3 *cn_arr = have_contact_data ? env_contact_normals.ptr() : nullptr;
 	for (int i = 0; i < n; i++) {
 		TentacleParticle &p = particles[i];
 		// Slice 4C: clear the per-tick contact flag here so the iteration
@@ -89,7 +97,20 @@ void PBDSolver::predict(float p_dt) {
 		Vector3 temp_prev = p.prev_position;
 		p.prev_position = p.position;
 		Vector3 velocity = (p.position - temp_prev) * damping;
-		p.position += velocity + gravity * dt2;
+		Vector3 gravity_step = gravity * dt2;
+		if (support_in_contact && have_contact_data && act[i] != 0) {
+			// In contact: project gravity onto the contact tangent plane.
+			// The contact supports the normal-direction gravity component;
+			// only tangent component (slope-driven sliding) acts on the
+			// particle. Eliminates the per-tick "gravity sinks particle
+			// into surface, iter loop pushes back out" cycle which seeds
+			// the tick-rate jitter the user reported (slice 4K).
+			Vector3 cn = cn_arr[i];
+			if (cn.length_squared() > 1e-10f) {
+				gravity_step -= cn * gravity_step.dot(cn);
+			}
+		}
+		p.position += velocity + gravity_step;
 	}
 }
 
@@ -782,6 +803,9 @@ void PBDSolver::set_contact_velocity_damping(float p_v) {
 }
 float PBDSolver::get_contact_velocity_damping() const { return contact_velocity_damping; }
 
+void PBDSolver::set_support_in_contact(bool p_v) { support_in_contact = p_v; }
+bool PBDSolver::get_support_in_contact() const { return support_in_contact; }
+
 PackedByteArray PBDSolver::get_particle_in_contact_snapshot() const {
 	int n = (int)particles.size();
 	PackedByteArray out;
@@ -877,6 +901,10 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
 			&PBDSolver::get_contact_velocity_damping);
+	ClassDB::bind_method(D_METHOD("set_support_in_contact", "value"),
+			&PBDSolver::set_support_in_contact);
+	ClassDB::bind_method(D_METHOD("get_support_in_contact"),
+			&PBDSolver::get_support_in_contact);
 	ClassDB::bind_method(D_METHOD("get_particle_in_contact_snapshot"),
 			&PBDSolver::get_particle_in_contact_snapshot);
 

@@ -38,6 +38,7 @@ Tentacle::Tentacle() {
 			kinetic_friction_ratio);
 	solver->set_contact_stiffness(contact_stiffness);
 	solver->set_contact_velocity_damping(contact_velocity_damping);
+	solver->set_support_in_contact(support_in_contact);
 	render_spline.instantiate();
 }
 
@@ -552,6 +553,14 @@ void Tentacle::set_contact_velocity_damping(float p_v) {
 	}
 }
 float Tentacle::get_contact_velocity_damping() const { return contact_velocity_damping; }
+
+void Tentacle::set_support_in_contact(bool p_v) {
+	support_in_contact = p_v;
+	if (solver.is_valid()) {
+		solver->set_support_in_contact(p_v);
+	}
+}
+bool Tentacle::get_support_in_contact() const { return support_in_contact; }
 
 void Tentacle::set_body_impulse_scale(float p_v) {
 	if (p_v < 0.0f) p_v = 0.0f;
@@ -1122,6 +1131,10 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
 			&Tentacle::get_contact_velocity_damping);
+	ClassDB::bind_method(D_METHOD("set_support_in_contact", "value"),
+			&Tentacle::set_support_in_contact);
+	ClassDB::bind_method(D_METHOD("get_support_in_contact"),
+			&Tentacle::get_support_in_contact);
 	ClassDB::bind_method(D_METHOD("set_body_impulse_scale", "value"),
 			&Tentacle::set_body_impulse_scale);
 	ClassDB::bind_method(D_METHOD("get_body_impulse_scale"),
@@ -1214,6 +1227,8 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_velocity_damping",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_contact_velocity_damping", "get_contact_velocity_damping");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "support_in_contact"),
+			"set_support_in_contact", "get_support_in_contact");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "body_impulse_scale",
 					 PROPERTY_HINT_RANGE, "0.0,2.0,0.001,or_greater"),
 			"set_body_impulse_scale", "get_body_impulse_scale");

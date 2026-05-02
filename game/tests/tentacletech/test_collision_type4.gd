@@ -54,6 +54,7 @@ func _run_tests() -> void:
 		"test_body_impulse_scale_default_full",
 		"test_contact_velocity_damping_suppresses_jitter",
 		"test_no_particle_inside_obstacle_at_tick_end",
+		"test_support_in_contact_holds_settled_chain",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -244,15 +245,22 @@ func test_lubricity_one_zeros_friction() -> bool:
 # (lubricity=1.0) should drift further along +X than the high-friction one
 # because nothing resists tangential motion at the floor contacts.
 func test_friction_resists_lateral_drift() -> bool:
+	# Tests friction behavior under tilted gravity. Friction needs normal-
+	# correction depth `dn` to bound the cone (μ × dn); slice 4K's
+	# gravity-support mode eliminates dn for in-contact particles, which
+	# zeroes the friction cone. Disable support here so we're testing
+	# friction proper, not the no-friction-because-no-dn case.
 	var t_friction: Node3D = _make_tentacle(Vector3(0.0, 0.6, 0), 12, 0.05)
 	t_friction.bending_stiffness = 0.5
 	t_friction.gravity = Vector3(2.0, -9.8, 0)
 	t_friction.tentacle_lubricity = 0.0  # default
+	t_friction.support_in_contact = false
 
 	var t_slick: Node3D = _make_tentacle(Vector3(2.0, 0.6, 0), 12, 0.05)
 	t_slick.bending_stiffness = 0.5
 	t_slick.gravity = Vector3(2.0, -9.8, 0)
 	t_slick.tentacle_lubricity = 1.0
+	t_slick.support_in_contact = false
 
 	_make_floor(0.0)
 	_step([t_friction, t_slick], SETTLE_FRAMES)
@@ -317,13 +325,19 @@ func test_in_contact_flag_clears_when_lifted() -> bool:
 # stiffness. Compare two tentacles, identical except for contact_stiffness;
 # soft chain reports a larger max segment-stretch deviation from rest length.
 func test_contact_stiffness_allows_segment_stretch() -> bool:
+	# Like test_friction_resists_lateral_drift: this test relies on the
+	# gravity-driven contact push to load segments. Slice 4K's gravity
+	# support eliminates that load — both chains stretch the same minimal
+	# amount (just from chain weight tension). Disable support here.
 	var t_soft: Node3D = _make_tentacle(Vector3(0.0, 0.6, 0.0), 12, 0.05)
 	t_soft.bending_stiffness = 0.5
 	t_soft.contact_stiffness = 0.05  # very soft
+	t_soft.support_in_contact = false
 
 	var t_rigid: Node3D = _make_tentacle(Vector3(2.0, 0.6, 0.0), 12, 0.05)
 	t_rigid.bending_stiffness = 0.5
 	t_rigid.contact_stiffness = 1.0  # rigid (matches base distance stiffness)
+	t_rigid.support_in_contact = false
 
 	_make_floor(0.0)
 	_step([t_soft, t_rigid], SETTLE_FRAMES)
@@ -576,6 +590,55 @@ func test_no_particle_inside_obstacle_at_tick_end() -> bool:
 					max_violation = violation
 	if max_violation > SLACK:
 		push_error("particle inside sphere by %f (slack %f)" % [max_violation, SLACK])
+		return false
+	return true
+
+
+# Slice 4K — `support_in_contact = true` (default) prevents the per-tick
+# gravity step from pushing in-contact particles into their supporting
+# surface, which is the seed of the iter-loop amplification jitter. After
+# settle, an in-contact particle's tick-to-tick Y motion should be at
+# noise floor (sub-µm). With support_in_contact=false (legacy) the
+# particle gravity-bounces against the contact each tick and the iter loop
+# corrects, producing larger per-tick Y motion.
+func test_support_in_contact_holds_settled_chain() -> bool:
+	var t_supported: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t_supported.bending_stiffness = 0.5
+	t_supported.support_in_contact = true
+
+	var t_legacy: Node3D = _make_tentacle(Vector3(2.0, 0.6, 0), 12, 0.05)
+	t_legacy.bending_stiffness = 0.5
+	t_legacy.support_in_contact = false
+
+	_make_floor(0.0)
+	_step([t_supported, t_legacy], SETTLE_FRAMES)
+
+	# Sample tick-to-tick Y motion of the lowest particle for both.
+	var max_dy_supported: float = 0.0
+	var max_dy_legacy: float = 0.0
+	var prev_supported: float = 1e9
+	var prev_legacy: float = 1e9
+	for ps in t_supported.get_particle_positions():
+		prev_supported = minf(prev_supported, ps.y)
+	for ps in t_legacy.get_particle_positions():
+		prev_legacy = minf(prev_legacy, ps.y)
+	for _f in 60:
+		t_supported.tick(DT)
+		t_legacy.tick(DT)
+		var min_supported: float = 1e9
+		for ps in t_supported.get_particle_positions():
+			min_supported = minf(min_supported, ps.y)
+		var min_legacy: float = 1e9
+		for ps in t_legacy.get_particle_positions():
+			min_legacy = minf(min_legacy, ps.y)
+		max_dy_supported = maxf(max_dy_supported, absf(min_supported - prev_supported))
+		max_dy_legacy = maxf(max_dy_legacy, absf(min_legacy - prev_legacy))
+		prev_supported = min_supported
+		prev_legacy = min_legacy
+	# Expect supported ≤ legacy. If they're identical the feature isn't
+	# engaging; if supported > legacy something is broken.
+	if max_dy_supported > max_dy_legacy + 1e-6:
+		push_error("expected supported ≤ legacy; supported=%f legacy=%f" % [max_dy_supported, max_dy_legacy])
 		return false
 	return true
 

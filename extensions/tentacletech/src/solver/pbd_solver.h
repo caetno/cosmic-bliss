@@ -206,6 +206,19 @@ public:
 	void set_contact_velocity_damping(float p_damping);
 	float get_contact_velocity_damping() const;
 
+	// Slice 4K — gravity supported by contact. When true (default), in
+	// predict() the gravity step `gravity × dt²` is projected onto the
+	// contact tangent plane for particles whose probe reports an active
+	// contact, instead of being added in full. Physical model: a brick on
+	// a floor doesn't sink — the contact supports its weight. Per-tick
+	// the in-contact particle no longer "gravity-bounces" against the
+	// constraint, removing the seed of the iter-loop amplification that
+	// is responsible for the tick-rate jitter the user sees in wedged
+	// configurations. Tangent gravity (slope component) is preserved so
+	// sliding still works.
+	void set_support_in_contact(bool p_value);
+	bool get_support_in_contact() const;
+
 	// Snapshot (§15.2) of `in_contact_this_tick` flags. Byte per particle:
 	// 1 = in contact, 0 = free. PackedByteArray rather than bool[] so it
 	// crosses the GDScript boundary without a per-element Variant box.
@@ -260,6 +273,7 @@ private:
 	float friction_kinetic_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
 	float contact_velocity_damping = 0.5f;
+	bool support_in_contact = true;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior
