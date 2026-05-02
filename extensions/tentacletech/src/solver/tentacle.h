@@ -299,8 +299,10 @@ private:
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
 	godot::PackedVector3Array env_position_scratch;
+	godot::PackedFloat32Array env_girth_scratch;
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;
+	godot::PackedByteArray env_contact_active_scratch;
 
 	void _run_environment_probe();
 

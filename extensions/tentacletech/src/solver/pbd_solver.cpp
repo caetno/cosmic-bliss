@@ -49,6 +49,8 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 
 	env_contact_points.clear();
 	env_contact_normals.clear();
+	env_contact_active.clear();
+	env_contact_friction_applied.clear();
 }
 
 int PBDSolver::get_particle_count() const {
@@ -126,44 +128,43 @@ void PBDSolver::iterate() {
 						particles[idx], pose_pos[k], pose_stf[k]);
 			}
 		}
-		// 3. Type-4 environment collision: half-space projection per §4.2,
-		// then unified §4.3 friction cone projection on the same particle in
-		// the same iteration. Slice 4B layers friction on top of slice 4A's
-		// normal-only correction. Type-1 reciprocal routing lands in 4D.
-		// Slice 4C ordering: collision runs BEFORE distance so the soft
-		// `contact_stiffness` path applies starting iteration 1 — otherwise
-		// distance fights collision at full stiffness in iter 1 and the
-		// "stretches over wrapped geometry" effect only barely materializes
-		// from iter 2 onward.
-		{
-			int contact_n = env_contact_points.size();
-			if (contact_n > 0 && contact_n == env_contact_normals.size()) {
-				const Vector3 *cp = env_contact_points.ptr();
-				const Vector3 *cn = env_contact_normals.ptr();
-				Vector3 *cf = (env_contact_friction_applied.size() == contact_n)
-						? env_contact_friction_applied.ptrw()
-						: nullptr;
-				float mu_s = friction_static;
-				float mu_k = friction_static * friction_kinetic_ratio;
-				for (int i = 0; i < n; i++) {
-					TentacleParticle &p = particles[i];
-					if (p.inv_mass <= 0.0f) continue;
-					float radius = collision_radius * p.girth_scale;
-					if (radius < 1e-5f) continue;
-					for (int c = 0; c < contact_n; c++) {
-						float depth = radius - (p.position - cp[c]).dot(cn[c]);
-						if (depth > 0.0f) {
-							p.position += cn[c] * depth;
-							p.in_contact_this_tick = true;
-							if (mu_s > 0.0f) {
-								Vector3 friction_applied;
-								tentacletech::project_friction(p, cn[c], depth,
-										mu_s, mu_k, friction_applied);
-								if (cf != nullptr) {
-									cf[c] += friction_applied;
-								}
-							}
-						}
+		// 3. Type-4 environment collision: per-particle nearest-surface
+		// projection (slice 4D). Each particle has at most one contact
+		// (point/normal) sourced from a sphere query at probe time. Layer
+		// §4.3 friction (slice 4B) on top in the same iteration. Slice 4C
+		// ordering: collision runs BEFORE distance so the soft
+		// `contact_stiffness` path applies starting iteration 1.
+		if (env_contact_active.size() == n &&
+				env_contact_points.size() == n &&
+				env_contact_normals.size() == n) {
+			const uint8_t *act = env_contact_active.ptr();
+			const Vector3 *cp = env_contact_points.ptr();
+			const Vector3 *cn = env_contact_normals.ptr();
+			Vector3 *cf = (env_contact_friction_applied.size() == n)
+					? env_contact_friction_applied.ptrw()
+					: nullptr;
+			float mu_s = friction_static;
+			float mu_k = friction_static * friction_kinetic_ratio;
+			for (int i = 0; i < n; i++) {
+				if (act[i] == 0) continue;
+				TentacleParticle &p = particles[i];
+				if (p.inv_mass <= 0.0f) continue;
+				float radius = collision_radius * p.girth_scale;
+				if (radius < 1e-5f) continue;
+				// Flag as in-contact whenever the probe reported nearby
+				// surface — even tangent contacts engage contact_stiffness
+				// softening. The projection still requires depth > 0 to
+				// actually push the particle out.
+				p.in_contact_this_tick = true;
+				float depth = radius - (p.position - cp[i]).dot(cn[i]);
+				if (depth <= 0.0f) continue;
+				p.position += cn[i] * depth;
+				if (mu_s > 0.0f) {
+					Vector3 friction_applied;
+					tentacletech::project_friction(p, cn[i], depth,
+							mu_s, mu_k, friction_applied);
+					if (cf != nullptr) {
+						cf[i] += friction_applied;
 					}
 				}
 			}
@@ -626,34 +627,40 @@ void PBDSolver::set_uniform_rest_length(float p_length) {
 
 // -- Environment collision --------------------------------------------------
 
-void PBDSolver::set_environment_contacts(const PackedVector3Array &p_points,
-		const PackedVector3Array &p_normals) {
+void PBDSolver::set_environment_contacts_per_particle(
+		const PackedVector3Array &p_points,
+		const PackedVector3Array &p_normals,
+		const PackedByteArray &p_active) {
 	int np = p_points.size();
 	int nn = p_normals.size();
-	int n = np < nn ? np : nn;
+	int na = p_active.size();
+	int n = (int)particles.size();
+	if (np != n || nn != n || na != n) {
+		// Mismatched lengths — clear and bail out rather than reading past
+		// caller-owned arrays. The Tentacle is responsible for sizing these
+		// to match the solver's particle count.
+		clear_environment_contacts();
+		return;
+	}
 	env_contact_points.resize(n);
 	env_contact_normals.resize(n);
+	env_contact_active.resize(n);
 	env_contact_friction_applied.resize(n);
-	// Friction accumulator zeroed each tick when contacts are written.
-	if (n > 0) {
-		Vector3 *dst_f = env_contact_friction_applied.ptrw();
-		for (int i = 0; i < n; i++) {
-			dst_f[i] = Vector3();
-		}
-	}
 	if (n == 0) {
 		return;
 	}
 	const Vector3 *src_p = p_points.ptr();
 	const Vector3 *src_n = p_normals.ptr();
+	const uint8_t *src_a = p_active.ptr();
 	Vector3 *dst_p = env_contact_points.ptrw();
 	Vector3 *dst_n = env_contact_normals.ptrw();
+	uint8_t *dst_a = env_contact_active.ptrw();
+	Vector3 *dst_f = env_contact_friction_applied.ptrw();
 	for (int i = 0; i < n; i++) {
 		dst_p[i] = src_p[i];
-		// Defensive normalization — a degenerate (zero) normal would otherwise
-		// turn `(p - cp) · n` into 0 and the projection would push every
-		// particle out by `radius` along the zero vector (no-op) every iter.
-		// Cheap to fix at write time, keeps the iteration loop branch-free.
+		// Defensive normalization — physics server normals are typically
+		// already unit-length, but a malformed mesh could yield a zero
+		// normal which would silently no-op the projection.
 		Vector3 nrm = src_n[i];
 		float l2 = nrm.length_squared();
 		if (l2 > 1e-10f) {
@@ -662,17 +669,26 @@ void PBDSolver::set_environment_contacts(const PackedVector3Array &p_points,
 			nrm = Vector3();
 		}
 		dst_n[i] = nrm;
+		dst_a[i] = src_a[i];
+		dst_f[i] = Vector3(); // friction accumulator zeroed each tick.
 	}
 }
 
 void PBDSolver::clear_environment_contacts() {
 	env_contact_points.clear();
 	env_contact_normals.clear();
+	env_contact_active.clear();
 	env_contact_friction_applied.clear();
 }
 
 int PBDSolver::get_environment_contact_count() const {
-	return env_contact_points.size();
+	int total = 0;
+	int n = env_contact_active.size();
+	const uint8_t *src = env_contact_active.ptr();
+	for (int i = 0; i < n; i++) {
+		if (src[i] != 0) total++;
+	}
+	return total;
 }
 
 PackedVector3Array PBDSolver::get_environment_friction_applied() const {
@@ -778,8 +794,8 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_rest_length", "segment_index"), &PBDSolver::get_rest_length);
 	ClassDB::bind_method(D_METHOD("set_uniform_rest_length", "length"), &PBDSolver::set_uniform_rest_length);
 
-	ClassDB::bind_method(D_METHOD("set_environment_contacts", "points", "normals"),
-			&PBDSolver::set_environment_contacts);
+	ClassDB::bind_method(D_METHOD("set_environment_contacts_per_particle", "points", "normals", "active"),
+			&PBDSolver::set_environment_contacts_per_particle);
 	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
 	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
 	ClassDB::bind_method(D_METHOD("get_environment_friction_applied"),

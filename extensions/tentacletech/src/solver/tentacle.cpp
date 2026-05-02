@@ -98,46 +98,52 @@ void Tentacle::_run_environment_probe() {
 	if (env_position_scratch.size() != n) {
 		env_position_scratch.resize(n);
 	}
+	if (env_girth_scratch.size() != n) {
+		env_girth_scratch.resize(n);
+	}
 	{
-		Vector3 *dst = env_position_scratch.ptrw();
+		Vector3 *pos_dst = env_position_scratch.ptrw();
+		float *girth_dst = env_girth_scratch.ptrw();
 		for (int i = 0; i < n; i++) {
-			dst[i] = solver->get_particle_position(i);
+			pos_dst[i] = solver->get_particle_position(i);
+			girth_dst[i] = solver->get_particle_girth_scale(i);
 		}
 	}
 
-	Vector3 grav = solver->get_gravity();
-	if (grav.length_squared() < 1e-8f) {
-		grav = Vector3(0.0f, -1.0f, 0.0f);
-	}
-
-	environment_probe.probe(this, env_position_scratch, grav,
-			environment_probe_distance,
+	environment_probe.probe(this, env_position_scratch, env_girth_scratch,
+			particle_collision_radius,
 			(uint32_t)environment_collision_layer_mask);
 
+	// Slice 4D: probe returns one EnvironmentContact per particle. Pack into
+	// the per-particle parallel arrays the solver consumes.
+	if (env_contact_points_scratch.size() != n) {
+		env_contact_points_scratch.resize(n);
+	}
+	if (env_contact_normals_scratch.size() != n) {
+		env_contact_normals_scratch.resize(n);
+	}
+	if (env_contact_active_scratch.size() != n) {
+		env_contact_active_scratch.resize(n);
+	}
 	const auto &contacts = environment_probe.get_contacts();
-	int hit_count = 0;
-	for (uint32_t i = 0; i < contacts.size(); i++) {
-		if (contacts[i].hit) hit_count++;
-	}
-	if (env_contact_points_scratch.size() != hit_count) {
-		env_contact_points_scratch.resize(hit_count);
-	}
-	if (env_contact_normals_scratch.size() != hit_count) {
-		env_contact_normals_scratch.resize(hit_count);
-	}
-	if (hit_count > 0) {
+	{
 		Vector3 *cp = env_contact_points_scratch.ptrw();
 		Vector3 *cn = env_contact_normals_scratch.ptrw();
-		int k = 0;
-		for (uint32_t i = 0; i < contacts.size(); i++) {
-			if (!contacts[i].hit) continue;
-			cp[k] = contacts[i].hit_point;
-			cn[k] = contacts[i].hit_normal;
-			k++;
+		uint8_t *ca = env_contact_active_scratch.ptrw();
+		for (int i = 0; i < n; i++) {
+			if (i < (int)contacts.size() && contacts[i].hit) {
+				cp[i] = contacts[i].hit_point;
+				cn[i] = contacts[i].hit_normal;
+				ca[i] = 1;
+			} else {
+				cp[i] = Vector3();
+				cn[i] = Vector3();
+				ca[i] = 0;
+			}
 		}
 	}
-	solver->set_environment_contacts(env_contact_points_scratch,
-			env_contact_normals_scratch);
+	solver->set_environment_contacts_per_particle(env_contact_points_scratch,
+			env_contact_normals_scratch, env_contact_active_scratch);
 }
 
 void Tentacle::_notification(int p_what) {
@@ -468,32 +474,30 @@ void Tentacle::set_contact_stiffness(float p_v) {
 float Tentacle::get_contact_stiffness() const { return contact_stiffness; }
 
 Array Tentacle::get_environment_contacts_snapshot() const {
+	// Slice 4D: one entry per particle. `hit=false` entries are valid (the
+	// gizmo skips them), kept so the snapshot index lines up with particle
+	// index for downstream consumers.
 	Array out;
 	const auto &contacts = environment_probe.get_contacts();
 	int n = (int)contacts.size();
 	out.resize(n);
-	// Friction-applied buffer is sized the same as the solver's contact list,
-	// which is rebuilt from `contacts` each tick — but only entries with
-	// hit==true become solver contacts, so the buffer is shorter than `n`.
-	// Walk the two in lock-step over hit entries to align indices.
 	PackedVector3Array friction_applied;
 	if (solver.is_valid()) {
 		friction_applied = solver->get_environment_friction_applied();
 	}
-	int hit_cursor = 0;
 	for (int i = 0; i < n; i++) {
 		const tentacletech::EnvironmentContact &c = contacts[i];
 		Dictionary d;
-		d["ray_origin"] = c.ray_origin;
-		d["ray_direction"] = c.ray_direction;
+		d["particle_index"] = c.particle_index;
+		d["query_origin"] = c.query_origin;
 		d["hit"] = c.hit;
 		d["hit_point"] = c.hit_point;
 		d["hit_normal"] = c.hit_normal;
 		d["hit_object_id"] = (int64_t)c.hit_object_id;
+		d["hit_linear_velocity"] = c.hit_linear_velocity;
 		Vector3 fa;
-		if (c.hit && hit_cursor < friction_applied.size()) {
-			fa = friction_applied[hit_cursor];
-			hit_cursor++;
+		if (c.hit && i < friction_applied.size()) {
+			fa = friction_applied[i];
 		}
 		d["friction_applied"] = fa;
 		out[i] = d;

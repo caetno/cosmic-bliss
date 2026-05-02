@@ -148,26 +148,28 @@ public:
 	// full rebuild_chain would cause.
 	void set_uniform_rest_length(float p_length);
 
-	// Type-4 collision (§4.2). The Tentacle issues raycasts before tick() and
-	// hands the hits in as half-space planes; the solver projects particles
-	// out of any plane they're within `collision_radius * girth_scale` of,
-	// after distance constraints, every iteration. Slice 4A: normal-only
-	// projection. Friction (§4.3) lands in slice 4B.
+	// Type-4 collision (§4.2). Slice 4D: contacts are now per-particle
+	// (one nearest-surface contact per particle, from a sphere shape query
+	// in the physics space). Replaces slice 4A's 3-ray half-space pattern.
+	// All buffers are size N (= particle count); entries with active=0 are
+	// no-contact and ignored by the iteration loop.
 	//
-	// `p_points` and `p_normals` must be the same length; one entry per
-	// active contact. Setting empty arrays disables environment collision
-	// for the next tick. Buffers are copied; the solver does not retain
-	// references to caller-owned storage.
-	void set_environment_contacts(const godot::PackedVector3Array &p_points,
-			const godot::PackedVector3Array &p_normals);
+	// Spec divergence: §4.2 / §4.5 specify raycasts + ragdoll snapshot.
+	// Per-particle sphere queries cover both at once (the physics server
+	// already routes ragdoll-bone transforms to us during the query) at
+	// modest extra cost. See update doc 2026-05-02.
+	void set_environment_contacts_per_particle(
+			const godot::PackedVector3Array &p_points,
+			const godot::PackedVector3Array &p_normals,
+			const godot::PackedByteArray &p_active);
 	void clear_environment_contacts();
 	int get_environment_contact_count() const;
 
-	// Slice 4B: tangential displacement actually canceled per contact this
-	// tick, summed across particles and iterations. Same length as the
-	// contact arrays; entry i pairs with `env_contact_points[i]`. Tentacle
-	// reads this when building the §15.2 environment-contacts snapshot so the
-	// gizmo overlay can draw friction arrows.
+	// Slice 4B: tangential displacement actually canceled per particle this
+	// tick, summed across iterations. Size N (= particle count); index pairs
+	// with `env_contact_points`. Tentacle reads this when building the
+	// §15.2 environment-contacts snapshot so the gizmo overlay can draw
+	// friction arrows.
 	godot::PackedVector3Array get_environment_friction_applied() const;
 
 	// Per-tentacle base collision radius. Each particle's effective collision
@@ -235,11 +237,12 @@ private:
 	// Type-4 environment contacts as half-space planes. Same lifetime model
 	// as pose_targets: Tentacle rebuilds them each tick, solver reads from
 	// the flat list during iteration. Slice 4A: normal projection only.
+	// Slice 4D: per-particle contact data. Index i corresponds to particle i.
+	// `active` byte gates whether iterate() reads points/normals for that
+	// particle this tick. friction_applied accumulates across iterations.
 	godot::PackedVector3Array env_contact_points;
 	godot::PackedVector3Array env_contact_normals;
-	// Slice 4B: per-contact friction accumulator, reset alongside the contact
-	// arrays. Sized identically to env_contact_points; iterate() sums the
-	// `friction_applied` returned by each project_friction call into entry [c].
+	godot::PackedByteArray env_contact_active;
 	godot::PackedVector3Array env_contact_friction_applied;
 	float collision_radius = 0.05f;
 	float friction_static = 0.0f;

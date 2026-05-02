@@ -38,7 +38,7 @@ func _run_tests() -> void:
 	var failed: int = 0
 
 	for test_name in [
-		"test_probe_emits_three_contacts",
+		"test_probe_emits_per_particle_contacts",
 		"test_chain_settles_above_floor",
 		"test_no_floor_no_collision",
 		"test_disable_probe_clears_contacts",
@@ -48,6 +48,8 @@ func _run_tests() -> void:
 		"test_in_contact_flag_set_under_floor",
 		"test_in_contact_flag_clears_when_lifted",
 		"test_contact_stiffness_allows_segment_stretch",
+		"test_sphere_below_anchor_blocks_tip",
+		"test_obstacle_in_chain_path_pushed_aside",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -117,16 +119,19 @@ func _step(p_tentacles: Array, p_frames: int) -> void:
 			t.tick(DT)
 
 
-# Three rays go out per tick regardless of whether they hit; the snapshot
-# always returns 3 entries. Verify count + that at least one hits the floor
-# directly below the tentacle.
-func test_probe_emits_three_contacts() -> bool:
-	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 8, 0.05)
+# Slice 4D: one snapshot entry per particle (sphere query at each particle's
+# position, returning nearest surface contact via PhysicsDirectSpaceState3D).
+# Verify the snapshot length matches particle_count and at least one entry
+# reports a hit when the chain has settled onto a floor.
+func test_probe_emits_per_particle_contacts() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
 	_make_floor(0.0)
-	_step([t], 2)
+	# Settle long enough for the chain to drape onto the floor; tangent
+	# contacts at rest are detected via the QUERY_BIAS in environment_probe.
+	_step([t], 120)
 	var snap: Array = t.get_environment_contacts_snapshot()
-	if snap.size() != 3:
-		push_error("expected 3 ray entries, got %d" % snap.size())
+	if snap.size() != t.particle_count:
+		push_error("expected %d snapshot entries (one per particle), got %d" % [t.particle_count, snap.size()])
 		return false
 	var any_hit: bool = false
 	for entry in snap:
@@ -134,7 +139,7 @@ func test_probe_emits_three_contacts() -> bool:
 			any_hit = true
 			break
 	if not any_hit:
-		push_error("no rays hit the floor")
+		push_error("no particle reported a hit on the floor after settle")
 		return false
 	return true
 
@@ -332,12 +337,80 @@ func test_contact_stiffness_allows_segment_stretch() -> bool:
 	return true
 
 
+# Slice 4D — sphere directly under the chain. The slice 4A 3-ray probe would
+# have caught this (rays cast in gravity direction below the chain), but
+# verify the per-particle pipeline still handles it correctly: tip drapes
+# over the sphere instead of tunneling. Asserts no particle ends up below
+# the sphere's bottom (would be a tunneling failure).
+func test_sphere_below_anchor_blocks_tip() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.7, 0), 14, 0.05)
+	t.bending_stiffness = 0.3
+	# Chain length 14*0.05 = 0.7m; tip would naturally settle at y=0 if
+	# unobstructed. Sphere at y=0.2 radius 0.15 catches it.
+	_make_sphere(Vector3(0, 0.2, 0), 0.15)
+	_step([t], SETTLE_FRAMES)
+	var positions: PackedVector3Array = t.get_particle_positions()
+	var min_y: float = INF
+	for p in positions:
+		if p.y < min_y:
+			min_y = p.y
+	# Sphere bottom at y=0.05; with the projection radius the chain can
+	# settle no lower than ~y=0.01 (tangent to sphere bottom + collision_radius).
+	# Tunneling failure would put particles at y<0 (the unobstructed rest pose).
+	if min_y < 0.0:
+		push_error("chain tunneled past sphere; min_y=%f (sphere bottom is y=0.05)" % min_y)
+		return false
+	# Sanity: at least one particle should be in the sphere's vicinity (else
+	# we're not actually testing collision).
+	if min_y > 0.4:
+		push_error("chain didn't reach the sphere; min_y=%f" % min_y)
+		return false
+	return true
+
+
+# Slice 4D — primary regression scenario the user reported: an obstacle in
+# the chain's settle path. Slice 4A's 3-ray gravity-only probe missed any
+# obstacle laterally offset from the chain; particles tunneled through
+# silently. With per-particle sphere queries, the body is detected and the
+# chain bends around it. Sphere offset slightly from the YZ plane so the
+# chain has to deflect in X to reach equilibrium.
+func test_obstacle_in_chain_path_pushed_aside() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	t.bending_stiffness = 0.3
+	# Sphere at (0, 0.3, 0) — directly on the chain's settled path at chain
+	# midpoint. Chain particles at y≈0.3 must end up displaced from x=0.
+	# (Body center coincident with particle center → contact normal
+	# direction is determined by physics server tie-breaking; either +X or
+	# -X is acceptable, we just check magnitude.)
+	_make_sphere(Vector3(0.05, 0.3, 0), 0.12)
+	_step([t], SETTLE_FRAMES)
+
+	var positions: PackedVector3Array = t.get_particle_positions()
+	# Find the particle nearest the obstacle in Y; check its X displacement.
+	var max_abs_x_near_obstacle: float = 0.0
+	for p in positions:
+		if absf(p.y - 0.3) < 0.15: # within obstacle vertical extent
+			max_abs_x_near_obstacle = maxf(max_abs_x_near_obstacle, absf(p.x))
+	# Expect at least 0.02m displacement; with the legacy 3-ray gravity probe,
+	# this would be ~0 because no rays pointed at the lateral sphere.
+	if max_abs_x_near_obstacle < 0.02:
+		push_error("expected obstacle to push chain aside, max_abs_x_near=%f" % max_abs_x_near_obstacle)
+		return false
+	# No particle should be inside the obstacle's surface.
+	for p in positions:
+		var d: float = (p - Vector3(0.05, 0.3, 0)).length()
+		if d < 0.10:
+			push_error("particle inside obstacle: pos=%s d=%f" % [p, d])
+			return false
+	return true
+
+
 # Setting environment_probe_enabled = false clears the solver's contact list
 # AND clears the snapshot, so the gizmo doesn't draw stale rays.
 func test_disable_probe_clears_contacts() -> bool:
-	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 8, 0.05)
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
 	_make_floor(0.0)
-	_step([t], 5)
+	_step([t], 120)
 	var hit_before: int = 0
 	for entry in t.get_environment_contacts_snapshot():
 		if entry.get("hit", false):
