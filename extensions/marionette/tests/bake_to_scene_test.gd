@@ -117,6 +117,7 @@ func _init() -> void:
 	var capsule_colliders: int = 0
 	var hull_colliders: int = 0
 	var hull_points_total: int = 0
+	var leaked_overlays: int = 0
 	for child: Node in reloaded_sim.get_children():
 		var pb: PhysicalBone3D = child as PhysicalBone3D
 		if pb == null:
@@ -127,18 +128,22 @@ func _init() -> void:
 			bone_count += 1
 		else:
 			continue
-		# Walk for the CollisionShape3D; verify the shape resource is
-		# present (not just the node — the points need to round-trip too).
+		# Walk for the CollisionShape3D + verify the overlay MeshInstance3D
+		# was *not* baked (editor-only debug viz; spawned without owner so
+		# it never persists into the saved .tscn).
 		for c: Node in pb.get_children():
-			if not (c is CollisionShape3D):
-				continue
-			var shape: Shape3D = (c as CollisionShape3D).shape
-			if shape is ConvexPolygonShape3D:
-				hull_colliders += 1
-				hull_points_total += (shape as ConvexPolygonShape3D).points.size()
-			elif shape is CapsuleShape3D:
-				capsule_colliders += 1
-			break
+			if c is CollisionShape3D:
+				var shape: Shape3D = (c as CollisionShape3D).shape
+				if shape is ConvexPolygonShape3D:
+					hull_colliders += 1
+					hull_points_total += (shape as ConvexPolygonShape3D).points.size()
+				elif shape is CapsuleShape3D:
+					capsule_colliders += 1
+			elif c is MeshInstance3D and c.name == "_CollisionOverlay":
+				leaked_overlays += 1
+	if leaked_overlays > 0:
+		push_error("Collision overlays leaked into the saved scene (%d). They should be editor-only debug viz, not owner-set." % leaked_overlays)
+		failures += 1
 
 	print("Reloaded: %d MarionetteBones, %d JiggleBones, %d hulls, %d capsules, %d total hull points"
 			% [bone_count, jiggle_count, hull_colliders, capsule_colliders, hull_points_total])

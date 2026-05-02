@@ -17,7 +17,11 @@ extends Node3D
 ## Gizmos that read off this node:
 ##   * MarionetteAuthoringGizmo  — muscle frame + per-bone solver tripods
 ##   * MarionetteJointLimitGizmo — per-bone ROM arcs in joint-local space
-##   * MarionetteColliderGizmo   — convex-hull / capsule wireframes
+##
+## Convex-hull / capsule wireframes render via permanent MeshInstance3D
+## children of each bone (see _attach_collision_overlay) — bypasses the
+## gizmo system's MessageQueue-deferred redraw, so wireframes refresh on
+## every editor frame without viewport input.
 
 const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
@@ -136,15 +140,26 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 
 ## Show PhysicalBone3D children in the editor (capsule wireframes + the
 ## built-in 6DOF joint gizmo). Off by default because ~80 bones is
-## cluttery. The MarionetteColliderGizmo on the Marionette node draws
-## hulls regardless. Toggling rewrites visibility on already-built
-## bones — no rebuild needed.
+## cluttery. Toggling rewrites visibility on already-built bones — no
+## rebuild needed.
 @export var show_physics_bones_in_editor: bool = false:
 	set(value):
 		if show_physics_bones_in_editor == value:
 			return
 		show_physics_bones_in_editor = value
 		_apply_physics_bone_visibility()
+
+## Show convex-hull / capsule wireframes alongside each bone, drawn via
+## permanent MeshInstance3D children of the bones (not the gizmo
+## system). Updates immediately on Build Ragdoll / Calibrate / profile
+## swap — no viewport-input dependency. Toggling rewrites visibility on
+## already-built overlays — no rebuild needed.
+@export var show_collision_overlay: bool = true:
+	set(value):
+		if show_collision_overlay == value:
+			return
+		show_collision_overlay = value
+		_apply_collision_overlay_visibility()
 
 
 # --- 5. Tune & Test -------------------------------------------------------
@@ -297,6 +312,7 @@ func build_ragdoll() -> void:
 		var collider: CollisionShape3D = _build_collider_for_bone(bone, skel, i)
 		bone.add_child(collider)
 		_set_owner_for_editor(collider)
+		_attach_collision_overlay(bone, collider)
 		_apply_joint_constraints(bone, entry)
 		bones_by_skel_index[i] = bone
 		if state != BoneStateProfile.State.KINEMATIC:
@@ -325,6 +341,7 @@ func build_ragdoll() -> void:
 			var collider: CollisionShape3D = _build_collider_for_bone(jb, skel, skel_idx)
 			jb.add_child(collider)
 			_set_owner_for_editor(collider)
+			_attach_collision_overlay(jb, collider)
 			# Cache skel + indices on the bone so _integrate_forces avoids
 			# string lookups per tick. Host idx ≥ 0 is guaranteed for any
 			# bone with a parent; jiggle bones at the root would be weird
@@ -828,6 +845,77 @@ func _apply_physics_bone_visibility() -> void:
 			(child as PhysicalBone3D).visible = show_physics_bones_in_editor
 
 
+# --- Collision overlay (replaces the old EditorNode3DGizmoPlugin path) -----
+# Permanent MeshInstance3D children of each bone, drawn through the regular
+# Node3D pipeline so wireframes refresh on every editor frame regardless of
+# viewport input. The gizmo plugin's _redraw was MessageQueue-deferred and
+# only flushed on viewport interaction (memory:reference_godot_tool_gizmo_redraw),
+# which made hulls invisible until the user clicked.
+#
+# Owner is intentionally NOT set on the overlay nodes — they're editor-only
+# debug visualization, regenerated every Build Ragdoll, never baked into
+# the .tscn (avoids a few hundred KB of debug-mesh duplication on top of
+# the colliders themselves).
+
+const _OVERLAY_NAME: StringName = &"_CollisionOverlay"
+const _OVERLAY_COLOR: Color = Color(0.35, 0.85, 0.9, 0.35)
+static var _overlay_material_cache: StandardMaterial3D = null
+
+
+# Spawns a MeshInstance3D under `bone` at the same local transform as the
+# collider, with the collider shape's debug mesh and the soft-cyan material.
+# No-op when the collider has no shape (degenerate hull etc.).
+func _attach_collision_overlay(bone: PhysicalBone3D, collider: CollisionShape3D) -> void:
+	if collider == null or collider.shape == null:
+		return
+	var debug_mesh: ArrayMesh = collider.shape.get_debug_mesh()
+	if debug_mesh == null:
+		return
+	var mi := MeshInstance3D.new()
+	mi.name = String(_OVERLAY_NAME)
+	mi.mesh = debug_mesh
+	mi.material_override = _collision_overlay_material()
+	mi.transform = collider.transform
+	mi.visible = show_collision_overlay
+	bone.add_child(mi)
+	# Owner deliberately not set — overlay is editor-only debug, not
+	# persisted into the scene.
+
+
+# Walks the active simulator and toggles every overlay's `visible` flag.
+# Called from the show_collision_overlay setter so the toggle works
+# without rebuilding the ragdoll.
+func _apply_collision_overlay_visibility() -> void:
+	var sim: PhysicalBoneSimulator3D = _find_simulator()
+	if sim == null:
+		return
+	for bone: Node in sim.get_children():
+		if not (bone is MarionetteBone or bone is JiggleBone):
+			continue
+		for child: Node in bone.get_children():
+			if child is MeshInstance3D and StringName(child.name) == _OVERLAY_NAME:
+				(child as MeshInstance3D).visible = show_collision_overlay
+
+
+# Single shared material for all overlays — soft cyan, semi-transparent,
+# not on-top so the body mesh occludes back-side hull edges. Cached because
+# the same material reference works for every overlay (CLAUDE.md "Per-frame
+# ShaderMaterial allocation" — built once, reused).
+static func _collision_overlay_material() -> StandardMaterial3D:
+	if _overlay_material_cache != null:
+		return _overlay_material_cache
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = _OVERLAY_COLOR
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Render as wireframe lines — the debug_mesh from get_debug_mesh()
+	# is already line topology, so this is just material-side bookkeeping.
+	mat.no_depth_test = false
+	_overlay_material_cache = mat
+	return mat
+
+
 # Sets dynamic 6DOF joint properties. Splitting this out keeps _build_bone
 # focused on per-bone shape + state and the joint-baking logic isolated.
 #
@@ -1094,10 +1182,14 @@ func _rebuild_colliders_on_live_simulator() -> void:
 		if skel_index < 0:
 			continue
 		# Collect first, free after — mutating children during iteration
-		# invalidates the iterator.
+		# invalidates the iterator. Sweep both colliders and overlay
+		# wireframes since the new collider's debug mesh differs from
+		# the old.
 		var stale: Array[Node] = []
 		for c: Node in bone.get_children():
 			if c is CollisionShape3D:
+				stale.append(c)
+			elif c is MeshInstance3D and StringName(c.name) == _OVERLAY_NAME:
 				stale.append(c)
 		for c: Node in stale:
 			bone.remove_child(c)
@@ -1107,6 +1199,7 @@ func _rebuild_colliders_on_live_simulator() -> void:
 		# Both shape kinds bake into the scene now (slice 6); the bloat
 		# concern is accepted in exchange for explicit Build = persist.
 		_set_owner_for_editor(collider)
+		_attach_collision_overlay(bone, collider)
 
 
 # Bone length = distance to first listed child bone in the skeleton, else a

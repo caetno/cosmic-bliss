@@ -3,7 +3,6 @@ extends EditorPlugin
 
 var _authoring_gizmo: MarionetteAuthoringGizmo
 var _joint_limit_gizmo: MarionetteJointLimitGizmo
-var _collider_gizmo: MarionetteColliderGizmo
 var _bone_profile_inspector: MarionetteBoneProfileInspector
 var _bone_inspector: MarionetteBoneInspector
 var _marionette_inspector: MarionetteInspectorPlugin
@@ -15,11 +14,11 @@ func _enter_tree() -> void:
 	add_node_3d_gizmo_plugin(_authoring_gizmo)
 	_joint_limit_gizmo = MarionetteJointLimitGizmo.new()
 	add_node_3d_gizmo_plugin(_joint_limit_gizmo)
-	# View → Gizmos shows this as "Marionette Colliders" — toggle on to see
-	# capsule wireframes without the 6DOF joint clutter that comes with
-	# `show_physics_bones_in_editor`.
-	_collider_gizmo = MarionetteColliderGizmo.new()
-	add_node_3d_gizmo_plugin(_collider_gizmo)
+	# Collider wireframes are now permanent MeshInstance3D children of
+	# the bones (Marionette._attach_collision_overlay), toggled via the
+	# inspector's `show_collision_overlay` export. The old gizmo plugin
+	# was removed because EditorNode3DGizmoPlugin._redraw doesn't flush
+	# without viewport input — hulls only appeared after deselect/reselect.
 	_bone_profile_inspector = MarionetteBoneProfileInspector.new()
 	add_inspector_plugin(_bone_profile_inspector)
 	_bone_inspector = MarionetteBoneInspector.new()
@@ -39,9 +38,6 @@ func _exit_tree() -> void:
 	if _joint_limit_gizmo != null:
 		remove_node_3d_gizmo_plugin(_joint_limit_gizmo)
 		_joint_limit_gizmo = null
-	if _collider_gizmo != null:
-		remove_node_3d_gizmo_plugin(_collider_gizmo)
-		_collider_gizmo = null
 	if _bone_profile_inspector != null:
 		remove_inspector_plugin(_bone_profile_inspector)
 		_bone_profile_inspector = null
