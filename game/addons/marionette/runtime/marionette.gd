@@ -300,16 +300,14 @@ func build_ragdoll() -> void:
 		var bone := _build_bone(skel, i, skel_bone_name, entry, fallback_mass)
 		sim.add_child(bone)
 		_set_owner_for_editor(bone)
-		# Collider as a separate child so its owner can be set after the bone
-		# is parented (capsule fallback path). Convex-hull shapes are kept
-		# runtime-only — owner stays unset so the (potentially-thousands-of-
-		# points) PackedVector3Array isn't inlined into the .tscn; the
-		# self-heal path in _ensure_runtime_colliders reconstructs them on
-		# every load from `bone_collision_profile`.
+		# Collider added as a separate child so the owner can be set after
+		# the bone is parented. Both shape kinds (capsule fallback +
+		# convex hull) get owner-set so they bake into the .tscn. ~60 KB
+		# of hull-point data per kasumi-class scene; accepted in slice 6
+		# in exchange for "Build = persist" instead of runtime self-heal.
 		var collider: CollisionShape3D = _build_collider_for_bone(bone, skel, i)
 		bone.add_child(collider)
-		if collider.shape is CapsuleShape3D:
-			_set_owner_for_editor(collider)
+		_set_owner_for_editor(collider)
 		_apply_joint_constraints(bone, entry)
 		bones_by_skel_index[i] = bone
 		if state != BoneStateProfile.State.KINEMATIC:
@@ -337,8 +335,7 @@ func build_ragdoll() -> void:
 			_set_owner_for_editor(jb)
 			var collider: CollisionShape3D = _build_collider_for_bone(jb, skel, skel_idx)
 			jb.add_child(collider)
-			# Hull colliders stay runtime-only for the same reason as the
-			# regular bones (PackedVector3Array bloat in the .tscn).
+			_set_owner_for_editor(collider)
 			# Cache skel + indices on the bone so _integrate_forces avoids
 			# string lookups per tick. Host idx ≥ 0 is guaranteed for any
 			# bone with a parent; jiggle bones at the root would be weird
@@ -402,13 +399,11 @@ func start_simulation() -> void:
 	if skel == null:
 		push_error("Marionette.start_simulation: skeleton not resolvable from %s" % skeleton)
 		return
-	# Self-heal runtime-only state on every start. Capsule colliders and
-	# pair-wise collision exclusions are both unserializable — the colliders
-	# can be persisted now (post owner-bug fix) but old scenes built before
-	# the fix have none, and exclusions never persist. Both passes are
-	# idempotent: existing colliders are skipped, exceptions are no-ops on
-	# repeat calls.
-	_ensure_runtime_colliders(sim, skel)
+	# Apply collision exception pairs at sim start. add_collision_exception_with
+	# writes runtime-only state on PhysicsBody3D (not serializable), so it
+	# can't be baked into the scene like the colliders are — must run on
+	# every start. Idempotent: repeat calls add the same pairs without
+	# effect.
 	_apply_collision_exclusions(sim, skel)
 
 	# Pick which bones go dynamic. `_dynamic_bone_names` is populated by
@@ -424,45 +419,6 @@ func start_simulation() -> void:
 		sim.physical_bones_start_simulation()
 	else:
 		sim.physical_bones_start_simulation(dynamic)
-
-
-# Walks `sim` for MarionetteBones whose CollisionShape3D doesn't match
-# the current `bone_collision_profile`, swapping in the right shape:
-#   * No existing shape  → build one (hull when profile has it, capsule
-#                          fallback otherwise).
-#   * Existing capsule, profile now has hull → replace.
-#   * Existing hull, profile cleared / bone removed → replace with capsule.
-#   * Existing matches what the profile wants → leave alone.
-# Cheap (~80 bones) and idempotent. Covers scenes saved before the
-# owner-bug fix and scenes where the profile changed since last save.
-func _ensure_runtime_colliders(sim: PhysicalBoneSimulator3D, skel: Skeleton3D) -> void:
-	for child: Node in sim.get_children():
-		if not (child is MarionetteBone or child is JiggleBone):
-			continue
-		var bone: PhysicalBone3D = child
-		var skel_index: int = skel.find_bone(bone.bone_name)
-		if skel_index < 0:
-			continue
-		var existing: CollisionShape3D = _find_collision_shape_child(bone)
-		var wants_hull: bool = _profile_has_hull_for_bone(bone)
-		var has_hull: bool = existing != null and existing.shape is ConvexPolygonShape3D
-		var has_capsule: bool = existing != null and existing.shape is CapsuleShape3D
-		# Already-correct cases — bail without churn.
-		if wants_hull and has_hull:
-			continue
-		if not wants_hull and has_capsule:
-			continue
-		if existing != null:
-			bone.remove_child(existing)
-			existing.free()
-		bone.add_child(_build_collider_for_bone(bone, skel, skel_index))
-
-
-static func _find_collision_shape_child(node: Node) -> CollisionShape3D:
-	for child: Node in node.get_children():
-		if child is CollisionShape3D:
-			return child
-	return null
 
 
 # True if the bone has a usable hull in the active `bone_collision_profile`.
@@ -941,8 +897,8 @@ static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> 
 
 # Capsule sized to bone length, oriented along bone-local +Y (the ARP /
 # Blender convention; Godot's CapsuleShape3D defaults to local Y). Pulled
-# out of `_build_bone` so the same shape is constructed identically by
-# build-time persistence and runtime self-heal (`_ensure_runtime_colliders`).
+# out of `_build_bone` so build_ragdoll and the live-rebuild path
+# (_rebuild_colliders_on_live_simulator) construct the same shape.
 #
 # Sizing rationale:
 #   radius coefficient 0.12 — makes upper-arm/leg capsules ~3.5 cm radius
@@ -971,9 +927,9 @@ static func _make_capsule_collider(bone_length: float) -> CollisionShape3D:
 
 # Returns the right collider for `bone`: a ConvexPolygonShape3D from
 # `bone_collision_profile` when the profile has a hull for this bone,
-# else a capsule fallback. Used by both build_ragdoll and the runtime
-# self-heal so authored scenes and freshly-built ragdolls converge to
-# the same shape choice.
+# else a capsule fallback. Used by build_ragdoll and the live-rebuild
+# path triggered by setting `bone_collision_profile` on a Marionette
+# whose simulator already exists.
 func _build_collider_for_bone(
 		bone: PhysicalBone3D,
 		skel: Skeleton3D,
@@ -1133,11 +1089,9 @@ func _rebuild_colliders_on_live_simulator() -> void:
 			c.free()
 		var collider: CollisionShape3D = _build_collider_for_bone(bone, skel, skel_index)
 		bone.add_child(collider)
-		# Capsules persist into the .tscn so a build-less scene reload still
-		# has colliders; hulls regenerate from the .tres on every load and
-		# stay scene-runtime-only to keep the .tscn small.
-		if collider.shape is CapsuleShape3D:
-			_set_owner_for_editor(collider)
+		# Both shape kinds bake into the scene now (slice 6); the bloat
+		# concern is accepted in exchange for explicit Build = persist.
+		_set_owner_for_editor(collider)
 
 
 # Bone length = distance to first listed child bone in the skeleton, else a
@@ -1156,14 +1110,24 @@ static func _bone_length(skel: Skeleton3D, skel_index: int) -> float:
 
 
 func _set_owner_for_editor(node: Node) -> void:
-	if not Engine.is_editor_hint():
-		return
 	var tree: SceneTree = get_tree()
 	if tree == null:
 		return
-	var edited_root: Node = tree.edited_scene_root
-	if edited_root != null and is_ancestor_of_or_equal(edited_root, self):
-		node.owner = edited_root
+	# Editor: edited_scene_root is the .tscn currently open. Setting owner
+	# there packs the node into the saved scene on Ctrl+S.
+	# Test / packed-instantiate context: edited_scene_root is null. Fall
+	# back to this Marionette's own scene root via its owner — that's
+	# whatever node packed *us* into the scene we live in. PackedScene.pack
+	# captures any descendant whose owner is the packed node, so this
+	# fallback makes test-driven Build → save → reload round-trip work
+	# exactly the way the editor flow does.
+	var owner_node: Node = tree.edited_scene_root
+	var ok: bool = owner_node != null and is_ancestor_of_or_equal(owner_node, self)
+	if not ok:
+		owner_node = self.owner
+		ok = owner_node != null and is_ancestor_of_or_equal(owner_node, self)
+	if ok:
+		node.owner = owner_node
 
 
 # True if `ancestor` equals `self` or is an ancestor of `self` in the scene tree.
