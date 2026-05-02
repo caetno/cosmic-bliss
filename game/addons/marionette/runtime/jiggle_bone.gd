@@ -1,6 +1,6 @@
 @tool
 class_name JiggleBone
-extends MarionetteBone
+extends PhysicalBone3D
 
 # Translation-driven soft-tissue body — breast, glute, belly, etc. — spawned
 # alongside the regular MarionetteBones at ragdoll build time. CLAUDE.md §15.
@@ -11,8 +11,11 @@ extends MarionetteBone
 # budget on each axis — physics offsets the body's position from its
 # skin-driven rest, with translation-only SPD spring-damping it back.
 #
-# `bone_entry` is intentionally null on jiggle bones — they don't carry
-# anatomical-frame metadata. Code that branches on it must null-check.
+# Sibling class to MarionetteBone (both extend PhysicalBone3D directly).
+# JiggleBones don't carry a BoneEntry — their physics is purely a
+# translation spring, no anatomical-frame metadata is needed. Code that
+# iterates the simulator's bones must accept either subclass; helpers
+# parameterized as PhysicalBone3D handle both.
 
 # Skeleton bone whose pose drives this jiggle body's rest position. For ARP
 # breast bones, this is the bone's actual skeleton parent (UpperChest); for

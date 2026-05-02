@@ -104,10 +104,7 @@ func _init() -> void:
 			push_error("JiggleBone %s has wrong shape (%s)"
 					% [bn, collider.shape.get_class() if collider.shape != null else "null"])
 			failures += 1
-		# bone_entry should be null (jiggle bones don't carry anatomical metadata).
-		if jb.bone_entry != null:
-			push_error("JiggleBone %s shouldn't carry a bone_entry" % bn)
-			failures += 1
+		# JiggleBone is its own class — no inherited bone_entry to verify.
 
 	# 4. Jiggle bones MUST be in the dynamic list — without it the simulator
 	#    leaves them kinematic and _integrate_forces never fires (so no

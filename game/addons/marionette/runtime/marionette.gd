@@ -392,9 +392,9 @@ func start_simulation() -> void:
 # owner-bug fix and scenes where the profile changed since last save.
 func _ensure_runtime_colliders(sim: PhysicalBoneSimulator3D, skel: Skeleton3D) -> void:
 	for child: Node in sim.get_children():
-		if not (child is MarionetteBone):
+		if not (child is MarionetteBone or child is JiggleBone):
 			continue
-		var bone: MarionetteBone = child
+		var bone: PhysicalBone3D = child
 		var skel_index: int = skel.find_bone(bone.bone_name)
 		if skel_index < 0:
 			continue
@@ -424,7 +424,7 @@ static func _find_collision_shape_child(node: Node) -> CollisionShape3D:
 # Resolves the bone's skeleton name to a profile key the same way
 # build_ragdoll does (BoneMap reverse, then direct), so the same name
 # convention works in both directions.
-func _profile_has_hull_for_bone(bone: MarionetteBone) -> bool:
+func _profile_has_hull_for_bone(bone: PhysicalBone3D) -> bool:
 	if bone_collision_profile == null:
 		return false
 	var skel_bone_name: StringName = StringName(bone.bone_name)
@@ -443,18 +443,21 @@ func _apply_collision_exclusions(sim: PhysicalBoneSimulator3D, skel: Skeleton3D)
 	var exclusions: CollisionExclusionProfile = collision_exclusion_profile
 	if exclusions == null:
 		exclusions = CollisionExclusionProfile.parent_child_defaults(skel)
-	# Index MarionetteBones by skeleton bone index so we can resolve the
-	# profile's Vector2i pairs in one pass.
-	var by_skel_index: Dictionary[int, MarionetteBone] = {}
+	# Index every simulator-managed bone by skeleton bone index so we can
+	# resolve the profile's Vector2i pairs in one pass. Both MarionetteBone
+	# and JiggleBone participate — jiggle hulls touch their UpperChest host's
+	# hull and would fight without an explicit exception (auto_exclusions
+	# already covers the breast↔chest pair via AABB overlap at build time).
+	var by_skel_index: Dictionary[int, PhysicalBone3D] = {}
 	for child: Node in sim.get_children():
-		if child is MarionetteBone:
-			var idx: int = skel.find_bone((child as MarionetteBone).bone_name)
+		if child is MarionetteBone or child is JiggleBone:
+			var idx: int = skel.find_bone((child as PhysicalBone3D).bone_name)
 			if idx >= 0:
 				by_skel_index[idx] = child
 	# Profile-driven pairs first.
 	for pair: Vector2i in exclusions.excluded_pairs:
-		var a: MarionetteBone = by_skel_index.get(pair.x)
-		var b: MarionetteBone = by_skel_index.get(pair.y)
+		var a: PhysicalBone3D = by_skel_index.get(pair.x)
+		var b: PhysicalBone3D = by_skel_index.get(pair.y)
 		if a != null and b != null:
 			a.add_collision_exception_with(b)
 	# Hull-overlap pairs from BoneCollisionProfile (Vector2i indices into
@@ -464,8 +467,8 @@ func _apply_collision_exclusions(sim: PhysicalBoneSimulator3D, skel: Skeleton3D)
 	# at the bind seams and the chain explodes.
 	if bone_collision_profile != null:
 		for pair: Vector2i in bone_collision_profile.auto_exclusions:
-			var a_h: MarionetteBone = by_skel_index.get(pair.x)
-			var b_h: MarionetteBone = by_skel_index.get(pair.y)
+			var a_h: PhysicalBone3D = by_skel_index.get(pair.x)
+			var b_h: PhysicalBone3D = by_skel_index.get(pair.y)
 			if a_h != null and b_h != null:
 				a_h.add_collision_exception_with(b_h)
 	# Always-applied digit-sibling pairs. Adjacent fingers / toes touch
@@ -474,8 +477,8 @@ func _apply_collision_exclusions(sim: PhysicalBoneSimulator3D, skel: Skeleton3D)
 	# total) and never wrong for a humanoid rig — there is no use case for
 	# leaving them out, so this isn't a profile flag.
 	for pair: Vector2i in CollisionExclusionProfile.digit_sibling_exclusions(skel):
-		var a: MarionetteBone = by_skel_index.get(pair.x)
-		var b: MarionetteBone = by_skel_index.get(pair.y)
+		var a: PhysicalBone3D = by_skel_index.get(pair.x)
+		var b: PhysicalBone3D = by_skel_index.get(pair.y)
 		if a != null and b != null:
 			a.add_collision_exception_with(b)
 
@@ -489,6 +492,11 @@ func _derive_dynamic_bone_names(sim: PhysicalBoneSimulator3D) -> Array[StringNam
 		states = BoneStateProfile.default_for_skeleton_profile(bone_profile.skeleton_profile)
 	var dynamic: Array[StringName] = []
 	for child: Node in sim.get_children():
+		# JiggleBones are always dynamic — their spring physics is the only
+		# motion they have. No state lookup, no archetype check.
+		if child is JiggleBone:
+			dynamic.append(StringName((child as JiggleBone).bone_name))
+			continue
 		if not (child is MarionetteBone):
 			continue
 		var bone: MarionetteBone = child
@@ -783,16 +791,17 @@ func _estimate_jiggle_mass(skel_bone_name: StringName) -> float:
 	return max(volume * 1000.0, 0.1)
 
 
-# Walks the active simulator's MarionetteBone children and pushes the current
-# `show_physics_bones_in_editor` value into their `visible` flag. Called from
-# the export's setter so the toggle works without a rebuild.
+# Walks the active simulator's bone children (MarionetteBone + JiggleBone)
+# and pushes the current `show_physics_bones_in_editor` value into their
+# `visible` flag. Called from the export's setter so the toggle works
+# without a rebuild.
 func _apply_physics_bone_visibility() -> void:
 	var sim: PhysicalBoneSimulator3D = _find_simulator()
 	if sim == null:
 		return
 	for child in sim.get_children():
-		if child is MarionetteBone:
-			(child as MarionetteBone).visible = show_physics_bones_in_editor
+		if child is MarionetteBone or child is JiggleBone:
+			(child as PhysicalBone3D).visible = show_physics_bones_in_editor
 
 
 # Sets dynamic 6DOF joint properties. Splitting this out keeps _build_bone
@@ -867,7 +876,7 @@ static func _make_capsule_collider(bone_length: float) -> CollisionShape3D:
 # self-heal so authored scenes and freshly-built ragdolls converge to
 # the same shape choice.
 func _build_collider_for_bone(
-		bone: MarionetteBone,
+		bone: PhysicalBone3D,
 		skel: Skeleton3D,
 		skel_index: int) -> CollisionShape3D:
 	if bone_collision_profile != null:
@@ -1008,9 +1017,9 @@ func _rebuild_colliders_on_live_simulator() -> void:
 	if skel == null:
 		return
 	for child: Node in sim.get_children():
-		if not (child is MarionetteBone):
+		if not (child is MarionetteBone or child is JiggleBone):
 			continue
-		var bone: MarionetteBone = child
+		var bone: PhysicalBone3D = child
 		var skel_index: int = skel.find_bone(bone.bone_name)
 		if skel_index < 0:
 			continue
