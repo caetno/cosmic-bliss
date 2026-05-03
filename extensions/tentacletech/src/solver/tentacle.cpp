@@ -37,6 +37,9 @@ Tentacle::Tentacle() {
 	solver->set_friction(base_static_friction * (1.0f - tentacle_lubricity),
 			kinetic_friction_ratio);
 	solver->set_contact_stiffness(contact_stiffness);
+	solver->set_target_softness_when_blocked(target_softness_when_blocked);
+	solver->set_sor_factor(sor_factor);
+	solver->set_max_depenetration(max_depenetration);
 	solver->set_contact_velocity_damping(contact_velocity_damping);
 	solver->set_support_in_contact(support_in_contact);
 	render_spline.instantiate();
@@ -77,6 +80,19 @@ void Tentacle::tick(float p_delta) {
 	if (solver.is_null()) {
 		return;
 	}
+	// Slice 4M-pre.1 — dt clamp. First-frame hiccups (scene load, alt-tab,
+	// long stalls) can deliver dt > 50 ms, which spikes the Verlet gravity
+	// step (gravity × dt²) and target-pull catch-up enough to teleport
+	// through whatever is in front of the chain. Floor stays small so tests
+	// that explicitly tick at sub-millisecond steps still run; ceiling caps
+	// at 1/40 s (25 ms ≈ 40 Hz) — anything slower than that, the integrator
+	// can't be trusted to keep collisions consistent.
+	if (p_delta < 1e-4f) {
+		return;
+	}
+	if (p_delta > 1.0f / 40.0f) {
+		p_delta = 1.0f / 40.0f;
+	}
 	if (!anchor_override) {
 		solver->set_anchor(0, get_global_transform());
 	}
@@ -95,14 +111,13 @@ void Tentacle::_apply_collision_reciprocals(float p_delta) {
 	// drag direction. Static bodies receive the impulse but the physics
 	// server treats it as a no-op.
 	//
-	// Per-particle sphere queries (slice 4D) have already given us the
-	// contact's RID. PhysicsServer3D::body_apply_impulse routes by RID
-	// directly so we don't need to upcast through Object/Node3D — the
-	// slight cost is that we need the body's center-of-mass-relative
-	// position. Use the contact's hit_point relative to the colliding
-	// body's get_global_position via the Object lookup; that gives the
-	// position argument the same "offset from origin in global coords"
-	// semantic the high-level apply_impulse() uses.
+	// Slice 4M.5: per-contact friction. The solver writes one
+	// friction_applied vector per slot (size = particle_count *
+	// MAX_CONTACTS_PER_PARTICLE), so each body receives an impulse
+	// proportional to the friction work attributed to its specific
+	// contact. Bodies attached to two different chain particles (or one
+	// particle's two contacts on different bodies) are handled cleanly
+	// regardless of which is static and which is dynamic.
 	if (solver.is_null() || p_delta <= 0.0f) {
 		return;
 	}
@@ -111,7 +126,8 @@ void Tentacle::_apply_collision_reciprocals(float p_delta) {
 		return;
 	}
 	PackedVector3Array friction_applied = solver->get_environment_friction_applied();
-	if (friction_applied.size() != (int)contacts.size()) {
+	int expected = (int)contacts.size() * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	if (friction_applied.size() != expected) {
 		return;
 	}
 	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
@@ -120,33 +136,34 @@ void Tentacle::_apply_collision_reciprocals(float p_delta) {
 	}
 	for (uint32_t i = 0; i < contacts.size(); i++) {
 		const auto &c = contacts[i];
-		if (!c.hit) continue;
-		if (c.hit_object_id == 0) continue;
-		Vector3 fa = friction_applied[i];
-		if (fa.length_squared() < 1e-10f) continue;
+		if (c.contact_count == 0) continue;
 
 		float inv_mass = solver->get_particle_inv_mass(c.particle_index);
 		if (inv_mass <= 0.0f) continue;
 		float eff_mass = 1.0f / inv_mass;
 
-		// Effective particle mass mapped through the spec's J = m × Δx / dt.
-		// Scaled by `body_impulse_scale` (slice 4F) — PBD friction in the
-		// kinetic regime cancels ~full tangential motion regardless of μ,
-		// which over-states the impulse on light dynamic bodies. The
-		// scale knob is the pragmatic cap.
-		Vector3 impulse = fa * (eff_mass * body_impulse_scale / p_delta);
-		if (impulse.length_squared() < 1e-12f) continue;
+		for (int k = 0; k < c.contact_count; k++) {
+			if (c.hit_object_id[k] == 0) continue;
+			int slot = (int)i * tentacletech::MAX_CONTACTS_PER_PARTICLE + k;
+			Vector3 fa = friction_applied[slot];
+			if (fa.length_squared() < 1e-10f) continue;
 
-		// Offset = contact point - body global origin. Need the body Node3D
-		// to read its origin. ObjectDB::get_instance returns the typed
-		// Object pointer if the ID is still alive.
-		Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)c.hit_object_id));
-		Node3D *body_node = Object::cast_to<Node3D>(obj);
-		Vector3 offset = c.hit_point;
-		if (body_node != nullptr) {
-			offset = c.hit_point - body_node->get_global_position();
+			// Effective particle mass mapped through the spec's
+			// J = m × Δx / dt. Scaled by `body_impulse_scale` (slice 4F).
+			Vector3 impulse = fa * (eff_mass * body_impulse_scale / p_delta);
+			if (impulse.length_squared() < 1e-12f) continue;
+
+			// Offset = contact point - body global origin. Need the body
+			// Node3D to read its origin. ObjectDB::get_instance returns
+			// the typed Object pointer if the ID is still alive.
+			Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)c.hit_object_id[k]));
+			Node3D *body_node = Object::cast_to<Node3D>(obj);
+			Vector3 offset = c.hit_point[k];
+			if (body_node != nullptr) {
+				offset = c.hit_point[k] - body_node->get_global_position();
+			}
+			ps->body_apply_impulse(c.hit_rid[k], impulse, offset);
 		}
-		ps->body_apply_impulse(c.hit_rid, impulse, offset);
 	}
 }
 
@@ -185,45 +202,75 @@ void Tentacle::_run_environment_probe() {
 			particle_collision_radius,
 			(uint32_t)environment_collision_layer_mask);
 
-	// Slice 4D: probe returns one EnvironmentContact per particle. Pack into
-	// the per-particle parallel arrays the solver consumes.
-	if (env_contact_points_scratch.size() != n) {
-		env_contact_points_scratch.resize(n);
+	// Slice 4M: probe returns up to MAX_CONTACTS_PER_PARTICLE contacts per
+	// particle. Pack into 2N flat arrays for the solver, plus an N-byte
+	// count array (replaces slice 4D's `active` flag — count == 0 is
+	// equivalent to active == 0).
+	int slot_count = n * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	if (env_contact_points_scratch.size() != slot_count) {
+		env_contact_points_scratch.resize(slot_count);
 	}
-	if (env_contact_normals_scratch.size() != n) {
-		env_contact_normals_scratch.resize(n);
+	if (env_contact_normals_scratch.size() != slot_count) {
+		env_contact_normals_scratch.resize(slot_count);
 	}
-	if (env_contact_active_scratch.size() != n) {
-		env_contact_active_scratch.resize(n);
+	if (env_contact_count_scratch.size() != n) {
+		env_contact_count_scratch.resize(n);
 	}
 	const auto &contacts = environment_probe.get_contacts();
 	{
 		Vector3 *cp = env_contact_points_scratch.ptrw();
 		Vector3 *cn = env_contact_normals_scratch.ptrw();
-		uint8_t *ca = env_contact_active_scratch.ptrw();
+		uint8_t *cc = env_contact_count_scratch.ptrw();
 		for (int i = 0; i < n; i++) {
-			if (i < (int)contacts.size() && contacts[i].hit) {
-				cp[i] = contacts[i].hit_point;
-				cn[i] = contacts[i].hit_normal;
-				ca[i] = 1;
+			int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+			if (i < (int)contacts.size()) {
+				const tentacletech::EnvironmentContact &c = contacts[i];
+				cc[i] = (uint8_t)c.contact_count;
+				for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
+					if (k < c.contact_count) {
+						cp[base + k] = c.hit_point[k];
+						cn[base + k] = c.hit_normal[k];
+					} else {
+						cp[base + k] = Vector3();
+						cn[base + k] = Vector3();
+					}
+				}
 			} else {
-				cp[i] = Vector3();
-				cn[i] = Vector3();
-				ca[i] = 0;
+				cc[i] = 0;
+				for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
+					cp[base + k] = Vector3();
+					cn[base + k] = Vector3();
+				}
 			}
 		}
 	}
-	solver->set_environment_contacts_per_particle(env_contact_points_scratch,
-			env_contact_normals_scratch, env_contact_active_scratch);
+	solver->set_environment_contacts_multi(env_contact_points_scratch,
+			env_contact_normals_scratch, env_contact_count_scratch);
 }
 
 void Tentacle::_notification(int p_what) {
-	// Editor-only: when the user moves the node in the viewport, snap the
-	// chain to the new rest pose. Runtime uses _physics_process for this.
-	if (p_what == NOTIFICATION_TRANSFORM_CHANGED &&
-			Engine::get_singleton()->is_editor_hint() &&
-			is_inside_tree()) {
-		rebuild_chain();
+	// Editor-only: rebuild the chain at every plausible moment so the static
+	// rest-pose visual reflects the current node transform. GDExtension's
+	// _ready timing at edit time isn't fully reliable (the child overlay's
+	// _ready can fire before the parent's get_global_transform() resolves
+	// to the cascaded value), so we also rebuild on ENTER_TREE and on every
+	// transform change. Runtime uses tick()/set_anchor() each physics step
+	// instead, so these notifications are explicitly editor-gated.
+	if (!Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
+	switch (p_what) {
+		case NOTIFICATION_ENTER_TREE:
+			set_notify_transform(true);
+			rebuild_chain();
+			break;
+		case NOTIFICATION_TRANSFORM_CHANGED:
+			if (is_inside_tree()) {
+				rebuild_chain();
+			}
+			break;
+		default:
+			break;
 	}
 }
 
@@ -544,6 +591,37 @@ void Tentacle::set_contact_stiffness(float p_v) {
 }
 float Tentacle::get_contact_stiffness() const { return contact_stiffness; }
 
+void Tentacle::set_target_softness_when_blocked(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	target_softness_when_blocked = p_v;
+	if (solver.is_valid()) {
+		solver->set_target_softness_when_blocked(p_v);
+	}
+}
+float Tentacle::get_target_softness_when_blocked() const {
+	return target_softness_when_blocked;
+}
+
+void Tentacle::set_sor_factor(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 4.0f) p_v = 4.0f;
+	sor_factor = p_v;
+	if (solver.is_valid()) {
+		solver->set_sor_factor(p_v);
+	}
+}
+float Tentacle::get_sor_factor() const { return sor_factor; }
+
+void Tentacle::set_max_depenetration(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	max_depenetration = p_v;
+	if (solver.is_valid()) {
+		solver->set_max_depenetration(p_v);
+	}
+}
+float Tentacle::get_max_depenetration() const { return max_depenetration; }
+
 void Tentacle::set_contact_velocity_damping(float p_v) {
 	if (p_v < 0.0f) p_v = 0.0f;
 	if (p_v > 1.0f) p_v = 1.0f;
@@ -572,6 +650,13 @@ Array Tentacle::get_environment_contacts_snapshot() const {
 	// Slice 4D: one entry per particle. `hit=false` entries are valid (the
 	// gizmo skips them), kept so the snapshot index lines up with particle
 	// index for downstream consumers.
+	//
+	// Slice 4M: each entry now exposes a per-slot view via `contacts` (an
+	// Array of dictionaries) and `contact_count`. The legacy flat
+	// `hit_point`/`hit_normal`/`hit_object_id`/`hit_linear_velocity`/
+	// `friction_applied` keys keep mirroring slot 0 (the deepest contact),
+	// so the gizmo overlay and tests written against the slice-4D
+	// dictionary format keep working unchanged.
 	Array out;
 	const auto &contacts = environment_probe.get_contacts();
 	int n = (int)contacts.size();
@@ -580,21 +665,46 @@ Array Tentacle::get_environment_contacts_snapshot() const {
 	if (solver.is_valid()) {
 		friction_applied = solver->get_environment_friction_applied();
 	}
+	int expected_friction = n * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	bool friction_per_slot = (friction_applied.size() == expected_friction);
 	for (int i = 0; i < n; i++) {
 		const tentacletech::EnvironmentContact &c = contacts[i];
 		Dictionary d;
 		d["particle_index"] = c.particle_index;
 		d["query_origin"] = c.query_origin;
 		d["hit"] = c.hit;
-		d["hit_point"] = c.hit_point;
-		d["hit_normal"] = c.hit_normal;
-		d["hit_object_id"] = (int64_t)c.hit_object_id;
-		d["hit_linear_velocity"] = c.hit_linear_velocity;
-		Vector3 fa;
-		if (c.hit && i < friction_applied.size()) {
-			fa = friction_applied[i];
+		d["contact_count"] = c.contact_count;
+		// Legacy flat keys mirror slot 0.
+		d["hit_point"] = c.hit_point[0];
+		d["hit_normal"] = c.hit_normal[0];
+		d["hit_object_id"] = (int64_t)c.hit_object_id[0];
+		d["hit_linear_velocity"] = c.hit_linear_velocity[0];
+		Vector3 fa0;
+		int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+		if (c.hit && friction_per_slot) {
+			fa0 = friction_applied[base + 0];
 		}
-		d["friction_applied"] = fa;
+		d["friction_applied"] = fa0;
+
+		// New per-slot view: `contacts[k]` for each populated slot.
+		Array per_slot;
+		per_slot.resize(c.contact_count);
+		for (int k = 0; k < c.contact_count; k++) {
+			Dictionary slot;
+			slot["hit_point"] = c.hit_point[k];
+			slot["hit_normal"] = c.hit_normal[k];
+			slot["hit_depth"] = c.hit_depth[k];
+			slot["hit_object_id"] = (int64_t)c.hit_object_id[k];
+			slot["hit_linear_velocity"] = c.hit_linear_velocity[k];
+			Vector3 fa;
+			if (friction_per_slot) {
+				fa = friction_applied[base + k];
+			}
+			slot["friction_applied"] = fa;
+			per_slot[k] = slot;
+		}
+		d["contacts"] = per_slot;
+
 		out[i] = d;
 	}
 	return out;
@@ -823,6 +933,16 @@ bool Tentacle::get_draw_gizmo() const { return draw_gizmo; }
 
 void Tentacle::_spawn_debug_overlay() {
 	if (debug_overlay != nullptr) return;
+	// Edit-time visualization is owned by the EditorNode3DGizmoPlugin
+	// (`gdscript/gizmo_plugin/tentacle_gizmo.gd`), which converts world→local
+	// correctly. The runtime overlay (top_level world-space mesh) duplicates
+	// the editor gizmo when both run, so it is gated to runtime only. At
+	// runtime the editor plugin doesn't render, so the overlay takes over —
+	// it also covers the env-contact / friction layers that the editor
+	// gizmo doesn't draw.
+	if (Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
 	const String path = "res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd";
 	ResourceLoader *rl = ResourceLoader::get_singleton();
 	if (rl == nullptr || !rl->exists(path)) {
@@ -1127,6 +1247,18 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_contact_stiffness);
 	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
 			&Tentacle::get_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("set_target_softness_when_blocked", "value"),
+			&Tentacle::set_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("get_target_softness_when_blocked"),
+			&Tentacle::get_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("set_sor_factor", "value"),
+			&Tentacle::set_sor_factor);
+	ClassDB::bind_method(D_METHOD("get_sor_factor"),
+			&Tentacle::get_sor_factor);
+	ClassDB::bind_method(D_METHOD("set_max_depenetration", "value"),
+			&Tentacle::set_max_depenetration);
+	ClassDB::bind_method(D_METHOD("get_max_depenetration"),
+			&Tentacle::get_max_depenetration);
 	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "value"),
 			&Tentacle::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
@@ -1224,6 +1356,15 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_stiffness",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_contact_stiffness", "get_contact_stiffness");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "target_softness_when_blocked",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
+			"set_target_softness_when_blocked", "get_target_softness_when_blocked");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sor_factor",
+					 PROPERTY_HINT_RANGE, "0.0,4.0,0.05"),
+			"set_sor_factor", "get_sor_factor");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_depenetration",
+					 PROPERTY_HINT_RANGE, "0.0,10.0,0.05"),
+			"set_max_depenetration", "get_max_depenetration");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_velocity_damping",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_contact_velocity_damping", "get_contact_velocity_damping");

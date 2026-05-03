@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/classes/physics_direct_space_state3d.hpp>
 #include <godot_cpp/classes/world3d.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 
@@ -65,15 +66,25 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 
 	Transform3D xform; // identity rotation + per-particle origin
 
+	// Reused per-particle exclude list — RIDs of bodies already-found this
+	// particle's slots. Cleared at the top of each particle loop. Out here
+	// to avoid Array reallocation per particle (godot::Array grows by ref).
+	Array exclude_list;
+
 	for (int i = 0; i < n; i++) {
 		EnvironmentContact &c = contacts[i];
 		c.particle_index = i;
 		c.query_origin = src[i];
+		c.contact_count = 0;
 		c.hit = false;
-		c.hit_point = Vector3();
-		c.hit_normal = Vector3();
-		c.hit_object_id = 0;
-		c.hit_linear_velocity = Vector3();
+		for (int k = 0; k < MAX_CONTACTS_PER_PARTICLE; k++) {
+			c.hit_point[k] = Vector3();
+			c.hit_normal[k] = Vector3();
+			c.hit_depth[k] = 0.0f;
+			c.hit_object_id[k] = 0;
+			c.hit_rid[k] = RID();
+			c.hit_linear_velocity[k] = Vector3();
+		}
 
 		float radius = p_radius_base * (gs ? gs[i] : 1.0f);
 		if (radius < 1e-5f) {
@@ -91,23 +102,59 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 		xform.origin = src[i];
 		shape_query->set_transform(xform);
 
-		Dictionary result = space->get_rest_info(shape_query);
-		if (result.is_empty()) {
-			continue;
+		// Slice 4M: iterate get_rest_info up to MAX_CONTACTS_PER_PARTICLE
+		// times, excluding bodies already found so each pass returns the
+		// next-best contact. Two passes suffice for the 2-contact wedge
+		// case: pass 1 finds the closest body, pass 2 (with the first
+		// excluded) finds the next-closest. Empty result terminates early.
+		exclude_list.clear();
+		for (int k = 0; k < MAX_CONTACTS_PER_PARTICLE; k++) {
+			shape_query->set_exclude(exclude_list);
+			Dictionary result = space->get_rest_info(shape_query);
+			if (result.is_empty()) {
+				break;
+			}
+			Vector3 hit_point = result["point"];
+			Vector3 hit_normal = result["normal"];
+			// PBD penetration depth: how far the unbiased sphere overlaps
+			// the surface along its outward normal. The query used a
+			// biased sphere; recompute against `radius` so the depth is
+			// what the solver's projection step will see.
+			float depth = radius - (src[i] - hit_point).dot(hit_normal);
+			c.hit_point[k] = hit_point;
+			c.hit_normal[k] = hit_normal;
+			c.hit_depth[k] = depth;
+			Variant cid = result["collider_id"];
+			c.hit_object_id[k] = (uint64_t)(int64_t)cid;
+			RID rid;
+			if (result.has("rid")) {
+				rid = result["rid"];
+			}
+			c.hit_rid[k] = rid;
+			if (result.has("linear_velocity")) {
+				c.hit_linear_velocity[k] = result["linear_velocity"];
+			}
+			c.contact_count++;
+			// Add this body to the exclude list so the next get_rest_info
+			// pass returns a different body. Empty RID is unusual but
+			// guarded: append it anyway — the physics server treats it as
+			// a no-op exclude.
+			exclude_list.push_back(rid);
 		}
-		c.hit = true;
-		c.hit_point = result["point"];
-		c.hit_normal = result["normal"];
-		// `collider_id` is the colliding body's instance ID. Cast through
-		// int64 since Variant stores it that way and Godot's API exposes it
-		// as a signed int.
-		Variant cid = result["collider_id"];
-		c.hit_object_id = (uint64_t)(int64_t)cid;
-		if (result.has("rid")) {
-			c.hit_rid = result["rid"];
-		}
-		if (result.has("linear_velocity")) {
-			c.hit_linear_velocity = result["linear_velocity"];
+		c.hit = (c.contact_count > 0);
+
+		// Sort slots by depth descending (slot 0 deepest). For
+		// MAX_CONTACTS_PER_PARTICLE = 2 this is a single compare-and-swap.
+		// Downstream code relies on this ordering: the friction-bisector
+		// fallback uses slot 0 as "deepest"; the snapshot dictionary
+		// keys (legacy single-contact API) read slot 0 too.
+		if (c.contact_count == 2 && c.hit_depth[0] < c.hit_depth[1]) {
+			Vector3 tp = c.hit_point[0]; c.hit_point[0] = c.hit_point[1]; c.hit_point[1] = tp;
+			Vector3 tn = c.hit_normal[0]; c.hit_normal[0] = c.hit_normal[1]; c.hit_normal[1] = tn;
+			float td = c.hit_depth[0]; c.hit_depth[0] = c.hit_depth[1]; c.hit_depth[1] = td;
+			uint64_t to = c.hit_object_id[0]; c.hit_object_id[0] = c.hit_object_id[1]; c.hit_object_id[1] = to;
+			RID tr = c.hit_rid[0]; c.hit_rid[0] = c.hit_rid[1]; c.hit_rid[1] = tr;
+			Vector3 tv = c.hit_linear_velocity[0]; c.hit_linear_velocity[0] = c.hit_linear_velocity[1]; c.hit_linear_velocity[1] = tv;
 		}
 	}
 }

@@ -20,32 +20,53 @@
 // uniformly for static bodies, moving rigid bodies, animatable bodies, and
 // PhysicalBone3D (ragdoll) shapes.
 //
-// One contact entry per particle. Buffers are reused across ticks; the only
-// allocation happens when the chain length changes. The PhysicsShape and
-// PhysicsShapeQueryParameters refs are instantiated once and mutated in
-// place per call.
+// Slice 4M (2026-05-03): up to MAX_CONTACTS_PER_PARTICLE simultaneous
+// contacts per particle. The probe iterates get_rest_info with a growing
+// exclude list, picking up the next-closest body each pass; results are
+// sorted by penetration depth so slot 0 is the deepest. The per-slot data
+// (point/normal/rid/etc.) is held in fixed-size arrays inside
+// EnvironmentContact. The single-contact API (`get_hit_point()` accessors
+// returning slot 0) is preserved for the snapshot dictionary builder so
+// the gizmo overlay and external GDScript callers keep working.
 //
 // Spec divergence: TentacleTech_Architecture.md §4.2 specifies "raycasts" as
 // the type-4 collision primitive. Per-particle sphere queries are strictly
 // more accurate (motion-aware, no tunneling at typical chain speeds, native
 // support for moving / kinematic / ragdoll bodies) at modest extra cost
-// (~12-30 queries/tentacle/tick). The §4.5 ragdoll-snapshot path becomes
-// unnecessary because get_rest_info already returns the colliding body — a
-// PhysicalBone3D's transform is read by the physics server during the query
-// and routed back to us as `point`/`normal`/`collider_id`. See
-// docs/Cosmic_Bliss_Update_2026-05-02_phase4_per_particle_probe.md.
+// (~12-30 queries/tentacle/tick × 1.3-1.5× for the 4M iteration). The §4.5
+// ragdoll-snapshot path becomes unnecessary because get_rest_info already
+// returns the colliding body — a PhysicalBone3D's transform is read by the
+// physics server during the query and routed back to us as
+// `point`/`normal`/`collider_id`. See
+// docs/Cosmic_Bliss_Update_2026-05-02_phase4_per_particle_probe.md and
+// docs/Cosmic_Bliss_Update_2026-05-03_phase4_wedge_robustness.md.
 
 namespace tentacletech {
+
+// Slice 4M: max simultaneous contacts retained per particle. Wedge cases
+// (tentacle pinched between two solid colliders) need 2 contacts to prevent
+// the cached "nearest" contact from flipping per-tick. Bumping past 4 starts
+// to cost real per-particle memory and cache; raise only if Phase 5 orifice
+// scenarios surface a need.
+constexpr int MAX_CONTACTS_PER_PARTICLE = 2;
 
 struct EnvironmentContact {
 	int particle_index = -1;
 	godot::Vector3 query_origin; // particle position at probe time
-	bool hit = false;
-	godot::Vector3 hit_point;
-	godot::Vector3 hit_normal;
-	uint64_t hit_object_id = 0; // 0 if no hit
-	godot::RID hit_rid; // body RID — used by slice 4E to apply impulses
-	godot::Vector3 hit_linear_velocity; // velocity of contacted body at hit point
+	int contact_count = 0;       // 0..MAX_CONTACTS_PER_PARTICLE
+	bool hit = false;            // == (contact_count > 0); preserved for snapshot compat
+
+	// Per-slot contact data. Slot 0 holds the deepest contact (largest
+	// penetration depth at probe time); slot 1 the next-deepest. The probe
+	// fills slots in sorted order — downstream code (snapshot dictionaries
+	// keeping the legacy single-contact API, friction bisector fallback)
+	// relies on this contract.
+	godot::Vector3 hit_point[MAX_CONTACTS_PER_PARTICLE];
+	godot::Vector3 hit_normal[MAX_CONTACTS_PER_PARTICLE];
+	float hit_depth[MAX_CONTACTS_PER_PARTICLE] = {0.0f, 0.0f};
+	uint64_t hit_object_id[MAX_CONTACTS_PER_PARTICLE] = {0, 0};
+	godot::RID hit_rid[MAX_CONTACTS_PER_PARTICLE];
+	godot::Vector3 hit_linear_velocity[MAX_CONTACTS_PER_PARTICLE];
 };
 
 class EnvironmentProbe {

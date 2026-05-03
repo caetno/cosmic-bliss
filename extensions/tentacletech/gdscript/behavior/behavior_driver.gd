@@ -141,12 +141,20 @@ extends Node3D
 ## Per-particle pose-target stiffness. Higher = pinned to the wave;
 ## lower = laggy / smeary. 0.10–0.20 reads "muscular but loose".
 @export_range(0.0, 1.0) var pose_stiffness: float = 0.15
-## Multiplier on [member pose_stiffness] for particles whose
-## [code]in_contact_this_tick[/code] flag is set. Below 1 lets the chain
-## *give* to obstacles instead of fighting them — addresses the "tentacle
-## jitters between legs" failure mode where pose pulls fight collision
-## push-out at full strength.
-@export_range(0.0, 1.0) var pose_softness_when_blocked: float = 0.3
+## Multiplier on target/pose-pull stiffness for particles flagged
+## [code]in_contact_this_tick[/code]. Below 1 lets the chain *give* to
+## obstacles instead of fighting them — addresses the "tentacle jitters
+## between legs" failure mode. Slice 4M-pre.2: forwarded to
+## [code]Tentacle.target_softness_when_blocked[/code], where the solver
+## applies it uniformly to BOTH the singleton tip target and every
+## distributed pose-target. AI drivers writing tip targets via
+## [code]Tentacle.set_target[/code] now get the same softening as drivers
+## using pose targets.
+@export_range(0.0, 1.0) var pose_softness_when_blocked: float = 0.3 :
+	set(v):
+		pose_softness_when_blocked = v
+		if _tentacle != null:
+			_tentacle.target_softness_when_blocked = v
 
 # --- Easing ----------------------------------------------------------------
 #
@@ -281,6 +289,12 @@ func _ready() -> void:
 	_resolve_tentacle()
 	_resolve_attractor()
 	_apply_mass_from_girth()
+	# Slice 4M-pre.2: with the Tentacle now resolved, push the
+	# pose-softness value down to the solver. Covers users who edit the
+	# @export directly (no TentacleMood resource); _apply_mood already
+	# handles the mood-driven path.
+	if _tentacle != null:
+		_tentacle.target_softness_when_blocked = pose_softness_when_blocked
 
 
 func _physics_process(p_delta: float) -> void:
@@ -400,20 +414,10 @@ func _physics_process(p_delta: float) -> void:
 
 	var xform: Transform3D = _tentacle.global_transform
 
-	# --- In-contact snapshot for soft-pose-on-contact (slice 4F) ---------
-	# Pulled before the per-particle synthesis so we can reduce pose
-	# stiffness for particles flagged in_contact_this_tick — the chain
-	# gives way to obstacles instead of fighting them. Snapshot reflects
-	# either the current tick (if Tentacle's _physics_process ran first)
-	# or the previous tick (if the driver ran first); both are fine for
-	# this purpose since contact state changes slowly relative to 60Hz.
-	var in_contact: PackedByteArray = PackedByteArray()
-	if pose_softness_when_blocked < 1.0 - 1e-4:
-		var solver = _tentacle.get_solver()
-		if solver != null:
-			in_contact = solver.get_particle_in_contact_snapshot()
-	var blocked_stiffness: float = pose_stiffness * pose_softness_when_blocked
-	var has_contact_softening: bool = in_contact.size() == n
+	# Slice 4M-pre.2: contact-softening of pose stiffness now lives in the
+	# solver (`target_softness_when_blocked`), applied uniformly to BOTH the
+	# singleton tip target and every pose-target entry. The driver no longer
+	# fetches the contact snapshot to soften per-particle stiffness here.
 
 	# --- Resolved attractor world pos (one-shot per tick) ----------------
 
@@ -474,10 +478,7 @@ func _physics_process(p_delta: float) -> void:
 
 		_pose_indices[k - 1] = k
 		_pose_world_positions[k - 1] = target_world
-		var s: float = pose_stiffness
-		if has_contact_softening and in_contact[k] != 0:
-			s = blocked_stiffness
-		_pose_stiffnesses[k - 1] = s
+		_pose_stiffnesses[k - 1] = pose_stiffness
 
 	_tentacle.set_pose_targets(_pose_indices, _pose_world_positions, _pose_stiffnesses)
 
@@ -527,6 +528,8 @@ func refresh_wiring() -> void:
 	_resolve_tentacle()
 	_resolve_attractor()
 	_apply_mass_from_girth()
+	if _tentacle != null:
+		_tentacle.target_softness_when_blocked = pose_softness_when_blocked
 
 
 # --- Mood (preset) helpers -------------------------------------------------
@@ -579,6 +582,10 @@ func _apply_mood() -> void:
 		_tentacle.damping = mood.damping
 		_tentacle.contact_stiffness = mood.contact_stiffness
 		_tentacle.contact_velocity_damping = mood.contact_velocity_damping
+		# Slice 4M-pre.2: forward to the solver via the Tentacle node so both
+		# the singleton tip target and the distributed pose-targets honour
+		# the same softening factor.
+		_tentacle.target_softness_when_blocked = mood.pose_softness_when_blocked
 
 
 # Pulled out of `_ready` and exposed via the property setters so

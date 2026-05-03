@@ -4,7 +4,23 @@
 #include <godot_cpp/core/math.hpp>
 
 #include "constraints.h"
-#include "../collision/friction_projection.h"
+#include "../collision/environment_probe.h" // MAX_CONTACTS_PER_PARTICLE
+
+namespace {
+constexpr int MAX_CONTACTS = tentacletech::MAX_CONTACTS_PER_PARTICLE;
+
+// Slice 4M-XPBD — public 0..1 stiffness knob mapped to physical XPBD
+// compliance. Log-spaced so stiffness=1 reads near-rigid (compliance 1e-9)
+// and stiffness=0 reads very soft (compliance 1e-3). Compliance 0 is
+// equivalent to infinite stiffness — XPBD then reduces to plain PBD without
+// lambda damping. We avoid exact 0 to keep the formulas stable.
+inline float stiffness_to_compliance(float s) {
+	if (s < 0.0f) s = 0.0f;
+	if (s > 1.0f) s = 1.0f;
+	float log_compliance = -9.0f + 6.0f * (1.0f - s);
+	return godot::Math::pow(10.0f, log_compliance);
+}
+}
 
 using namespace godot;
 
@@ -28,6 +44,21 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 	smooth_girth_buffer.assign((size_t)p_n, 1.0f);
 	smooth_asym_buffer.assign((size_t)p_n, Vector2());
 
+	// Slice 4M Jacobi accumulator buffers — sized once here; per-step apply
+	// zeroes them as deltas drain.
+	position_delta_scratch.assign((size_t)p_n, Vector3());
+	position_delta_count.assign((size_t)p_n, 0);
+
+	// Slice 4M-XPBD distance lambdas — one per segment, reset per tick.
+	distance_lambdas.assign((size_t)(p_n - 1), 0.0f);
+
+	// Slice 4M per-slot contact lambdas. Sized to N×MAX_CONTACTS so
+	// set_environment_contacts_multi can write them in lockstep with
+	// env_contact_points/normals/etc. Reset each time fresh probe data lands.
+	int slot_total = p_n * MAX_CONTACTS;
+	env_contact_normal_lambda.assign((size_t)slot_total, 0.0f);
+	env_contact_tangent_lambda.assign((size_t)slot_total, Vector3());
+
 	for (int i = 0; i < p_n; i++) {
 		Vector3 pos(0.0f, 0.0f, -p_segment_length * (float)i);
 		particles[i].position = pos;
@@ -49,7 +80,7 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 
 	env_contact_points.clear();
 	env_contact_normals.clear();
-	env_contact_active.clear();
+	env_contact_count.clear();
 	env_contact_friction_applied.clear();
 }
 
@@ -68,7 +99,7 @@ void PBDSolver::tick(float p_dt) {
 		return;
 	}
 	predict(p_dt);
-	iterate();
+	iterate(p_dt);
 	apply_base_angular_clamp(p_dt);
 	finalize(p_dt);
 }
@@ -76,13 +107,28 @@ void PBDSolver::tick(float p_dt) {
 void PBDSolver::predict(float p_dt) {
 	float dt2 = p_dt * p_dt;
 	int n = (int)particles.size();
+	// Slice 4M-XPBD — distance constraint Lagrange multipliers reset each
+	// tick (per-substep once 4O lands). Forgetting this reset = compounding
+	// across ticks → diverging oscillation; `test_distance_xpbd_does_not_
+	// explode_without_lambda_reset` is the canary that catches it.
+	if ((int)distance_lambdas.size() != n - 1) {
+		distance_lambdas.assign((size_t)(n - 1), 0.0f);
+	} else {
+		for (int i = 0; i < n - 1; i++) {
+			distance_lambdas[i] = 0.0f;
+		}
+	}
 	// Slice 4K: gravity-support preconditions. Probe runs before solver.tick(),
-	// so env_contact_active / env_contact_normals reflect THIS tick's contacts
-	// already. We use them to project the per-particle gravity step onto the
-	// contact tangent plane.
-	bool have_contact_data = (env_contact_active.size() == n &&
-			env_contact_normals.size() == n);
-	const uint8_t *act = have_contact_data ? env_contact_active.ptr() : nullptr;
+	// so env_contact_count / env_contact_normals reflect THIS tick's contacts
+	// already. Slice 4M: with multi-contact, project gravity onto the
+	// tangent plane of the deepest contact (slot 0). Two-contact wedge:
+	// the bisector argument applies to friction, but for gravity support
+	// the deepest contact carries the load and the second contact's
+	// projection in iterate step 3 will absorb the residual normal
+	// component if needed.
+	bool have_contact_data = (env_contact_count.size() == n &&
+			env_contact_normals.size() == n * MAX_CONTACTS);
+	const uint8_t *cnt = have_contact_data ? env_contact_count.ptr() : nullptr;
 	const Vector3 *cn_arr = have_contact_data ? env_contact_normals.ptr() : nullptr;
 	for (int i = 0; i < n; i++) {
 		TentacleParticle &p = particles[i];
@@ -98,14 +144,15 @@ void PBDSolver::predict(float p_dt) {
 		p.prev_position = p.position;
 		Vector3 velocity = (p.position - temp_prev) * damping;
 		Vector3 gravity_step = gravity * dt2;
-		if (support_in_contact && have_contact_data && act[i] != 0) {
-			// In contact: project gravity onto the contact tangent plane.
-			// The contact supports the normal-direction gravity component;
-			// only tangent component (slope-driven sliding) acts on the
-			// particle. Eliminates the per-tick "gravity sinks particle
-			// into surface, iter loop pushes back out" cycle which seeds
-			// the tick-rate jitter the user reported (slice 4K).
-			Vector3 cn = cn_arr[i];
+		if (support_in_contact && have_contact_data && cnt[i] != 0) {
+			// In contact: project gravity onto the deepest contact's tangent
+			// plane. The contact supports the normal-direction gravity
+			// component; only tangent component (slope-driven sliding)
+			// acts on the particle. Eliminates the per-tick "gravity sinks
+			// particle into surface, iter loop pushes back out" cycle
+			// which seeds the tick-rate jitter the user reported (slice
+			// 4K). Slot 0 is the deepest contact (slice 4M.2 ordering).
+			Vector3 cn = cn_arr[i * MAX_CONTACTS + 0];
 			if (cn.length_squared() > 1e-10f) {
 				gravity_step -= cn * gravity_step.dot(cn);
 			}
@@ -114,28 +161,89 @@ void PBDSolver::predict(float p_dt) {
 	}
 }
 
-void PBDSolver::iterate() {
+void PBDSolver::iterate(float p_dt) {
 	int n = (int)particles.size();
+	bool have_contacts = (env_contact_count.size() == n &&
+			env_contact_points.size() == n * MAX_CONTACTS &&
+			env_contact_normals.size() == n * MAX_CONTACTS);
+
+	// Slice 4M — Jacobi-with-atomic-deltas-and-SOR + per-contact persistent
+	// lambda accumulators. Each constraint step accumulates per-particle
+	// position deltas via add_position_delta; once-per-step apply averages
+	// the deltas (sor_factor / count) and writes to position. Within a step,
+	// multiple constraints touching the same particle (most importantly: 2+
+	// collision contacts on a wedged particle) compose by Jacobi average
+	// rather than Gauss-Seidel "last writer wins" — that's the structural
+	// fix for the wedge-flicker the cluster targets.
+	//
+	// Per-segment XPBD distance lambdas (`distance_lambdas`, reset in
+	// predict()) accumulate across iters within the tick — this is what
+	// makes XPBD position-correct under repeated solves and removes the
+	// "stiffness × N_iters compounds" artifact of plain PBD distance.
+	//
+	// Per-contact normal/tangent lambdas (`env_contact_normal_lambda`,
+	// `env_contact_tangent_lambda`, reset by set_environment_contacts_multi)
+	// scale friction cones with the contact's actually-accumulated normal
+	// impulse, replacing slice 4L's `iter_dn_buffer` per-particle scratch.
+
+	const float compliance_distance_base = stiffness_to_compliance(distance_stiffness);
+	const float compliance_distance_contact = stiffness_to_compliance(contact_stiffness);
+	// XPBD compliance term scales as α/dt² (Macklin 2016).
+	const float dt2_inv = 1.0f / (p_dt * p_dt + 1e-20f);
+	const float max_dlambda_norm = max_depenetration * p_dt;
+
+	int total_slots = n * MAX_CONTACTS;
+	Vector3 *cf_out = (env_contact_friction_applied.size() == total_slots)
+			? env_contact_friction_applied.ptrw()
+			: nullptr;
+	float *nlambda_arr = ((int)env_contact_normal_lambda.size() == total_slots)
+			? env_contact_normal_lambda.data()
+			: nullptr;
+	Vector3 *tlambda_arr = ((int)env_contact_tangent_lambda.size() == total_slots)
+			? env_contact_tangent_lambda.data()
+			: nullptr;
+
 	for (int iter = 0; iter < iteration_count; iter++) {
-		// 1. Bending first (chord-length form, stable for low stiffness).
-		// High bending_stiffness pushes the chain back toward its rest
-		// curvature each iteration, so the pose-pulls below have to fight
-		// the bending term — which is what makes `bending_stiffness`
-		// visibly affect chain rigidity even when a behavior driver is
-		// writing pose targets every tick.
+		// 1. Bending — chord-length form. Each constraint mutates two
+		// particles (a, c). Particles touched by both bending(i-2,i-1,i)
+		// and bending(i,i+1,i+2) get their two corrections averaged via
+		// Jacobi+SOR.
 		for (int i = 0; i + 2 < n; i++) {
-			tentacletech::constraints::project_bending(
-					particles[i], particles[i + 1], particles[i + 2],
-					rest_bending_chord_lengths[i], bending_stiffness);
+			TentacleParticle &p_a = particles[i];
+			TentacleParticle &p_c = particles[i + 2];
+			float w_sum = p_a.inv_mass + p_c.inv_mass;
+			if (w_sum <= 0.0f) continue;
+			Vector3 d = p_c.position - p_a.position;
+			float dist = d.length();
+			if (dist < 1e-8f) continue;
+			float diff = dist - rest_bending_chord_lengths[i];
+			Vector3 dir = d / dist;
+			Vector3 corr = dir * (bending_stiffness * diff / w_sum);
+			if (p_a.inv_mass > 0.0f) {
+				add_position_delta(i, corr * p_a.inv_mass);
+			}
+			if (p_c.inv_mass > 0.0f) {
+				add_position_delta(i + 2, -corr * p_c.inv_mass);
+			}
 		}
-		// 2. Soft target-pulls — both the single AI/behavior tip target and
-		// the distributed multi-particle pose targets. Applied after
-		// bending so they have the last word on shape (modulated by their
-		// own stiffness), and before distance below so they can't violate
-		// segment-length integrity.
+		apply_position_deltas_all();
+
+		// 2. Soft target-pulls — singleton tip target + distributed pose
+		// targets. Lerp-style (soft-by-construction); each call adds a
+		// delta = (target - position) × stiffness. Slice 4M-pre.2 softening
+		// for in-contact particles applies to both paths.
 		if (target_active && target_particle_index >= 0 && target_particle_index < n) {
-			tentacletech::constraints::project_target_pull(
-					particles[target_particle_index], target_position, target_stiffness);
+			TentacleParticle &pp = particles[target_particle_index];
+			if (pp.inv_mass > 0.0f) {
+				float ts = target_stiffness;
+				if (pp.in_contact_this_tick) {
+					ts *= target_softness_when_blocked;
+				}
+				if (ts > 0.0f) {
+					Vector3 d = (target_position - pp.position) * ts;
+					add_position_delta(target_particle_index, d);
+				}
+			}
 		}
 		{
 			int pose_n = pose_target_indices.size();
@@ -145,106 +253,193 @@ void PBDSolver::iterate() {
 			for (int k = 0; k < pose_n; k++) {
 				int idx = pose_idx[k];
 				if (idx < 0 || idx >= n) continue;
-				tentacletech::constraints::project_target_pull(
-						particles[idx], pose_pos[k], pose_stf[k]);
+				TentacleParticle &pp = particles[idx];
+				if (pp.inv_mass <= 0.0f) continue;
+				float ps = pose_stf[k];
+				if (pp.in_contact_this_tick) {
+					ps *= target_softness_when_blocked;
+				}
+				if (ps <= 0.0f) continue;
+				Vector3 d = (pose_pos[k] - pp.position) * ps;
+				add_position_delta(idx, d);
 			}
 		}
-		// 3. Type-4 environment collision: per-particle nearest-surface
-		// projection (slice 4D). Each particle has at most one contact
-		// (point/normal) sourced from a sphere query at probe time. Layer
-		// §4.3 friction (slice 4B) on top in the same iteration. Slice 4C
-		// ordering: collision runs BEFORE distance so the soft
-		// `contact_stiffness` path applies starting iteration 1.
-		if (env_contact_active.size() == n &&
-				env_contact_points.size() == n &&
-				env_contact_normals.size() == n) {
-			const uint8_t *act = env_contact_active.ptr();
+		apply_position_deltas_all();
+
+		// 3. Type-4 environment collision — per-contact XPBD penetration
+		// constraint with persistent normal_lambda accumulator. Pattern
+		// from `pbd_research/Obi/Resources/Compute/ContactHandling.cginc::
+		// SolvePenetration` + `ColliderCollisionConstraints.compute::Project`.
+		//
+		// `dist` is the signed gap between the particle surface and the
+		// contact plane. dist < 0 means penetrating. dlambda is computed
+		// to push the particle to dist=0 (with the depenetration cap
+		// limiting per-iter velocity). new_lambda is clamped to ≥ 0 so
+		// contacts only push, never pull.
+		//
+		// Multi-contact wedge: each slot writes its own delta. The Jacobi
+		// apply averages the two corrections — for opposed normals the
+		// average is small (correctly: PBD has nothing to push against
+		// a pinch); for diverging normals the bisector emerges naturally.
+		// No special-case bisector heuristic, no per-particle dn budget.
+		if (have_contacts && nlambda_arr != nullptr) {
+			const uint8_t *cnt = env_contact_count.ptr();
 			const Vector3 *cp = env_contact_points.ptr();
 			const Vector3 *cn = env_contact_normals.ptr();
-			Vector3 *cf = (env_contact_friction_applied.size() == n)
-					? env_contact_friction_applied.ptrw()
-					: nullptr;
-			float mu_s = friction_static;
-			float mu_k = friction_static * friction_kinetic_ratio;
 			for (int i = 0; i < n; i++) {
-				if (act[i] == 0) continue;
+				int kn = cnt[i];
+				if (kn == 0) continue;
 				TentacleParticle &p = particles[i];
 				if (p.inv_mass <= 0.0f) continue;
 				float radius = collision_radius * p.girth_scale;
 				if (radius < 1e-5f) continue;
-				// Flag as in-contact whenever the probe reported nearby
-				// surface — even tangent contacts engage contact_stiffness
-				// softening. The projection still requires depth > 0 to
-				// actually push the particle out.
 				p.in_contact_this_tick = true;
-				float depth = radius - (p.position - cp[i]).dot(cn[i]);
-				if (depth <= 0.0f) continue;
-				p.position += cn[i] * depth;
-				if (mu_s > 0.0f) {
-					Vector3 friction_applied;
-					tentacletech::project_friction(p, cn[i], depth,
-							mu_s, mu_k, friction_applied);
-					if (cf != nullptr) {
-						cf[i] += friction_applied;
+				int base = i * MAX_CONTACTS;
+				for (int k = 0; k < kn; k++) {
+					int slot = base + k;
+					Vector3 cn_k = cn[slot];
+					if (cn_k.length_squared() < 1e-10f) continue;
+					// Signed distance from the particle surface to contact
+					// plane. < 0 → penetrating.
+					float dist = (p.position - cp[slot]).dot(cn_k) - radius;
+					float normal_mass = p.inv_mass; // collider treated as ∞ mass
+					if (normal_mass <= 0.0f) continue;
+					// Cap projection magnitude per iter to maxDepenetration·dt
+					// so deeply-penetrated particles eject over multiple
+					// ticks rather than one explosive frame.
+					float max_proj = -dist - max_dlambda_norm;
+					if (max_proj < 0.0f) max_proj = 0.0f;
+					float dlambda = -(dist + max_proj) / normal_mass;
+					float new_lambda = nlambda_arr[slot] + dlambda;
+					if (new_lambda < 0.0f) new_lambda = 0.0f; // contacts only push
+					float lambda_change = new_lambda - nlambda_arr[slot];
+					nlambda_arr[slot] = new_lambda;
+					if (lambda_change > 1e-8f || lambda_change < -1e-8f) {
+						add_position_delta(i, cn_k * (lambda_change * p.inv_mass));
 					}
 				}
 			}
+			apply_position_deltas_all();
 		}
-		// 4. Distance constraints (segment length). Slice 4C: when either
-		// endpoint is in active contact (flagged by the collision pass
-		// above this iteration), drop stiffness from `distance_stiffness`
-		// to `contact_stiffness` so the chain stretches temporarily over
-		// wrapped geometry instead of fighting the collision push-out.
-		// Free-segment stiffness stays at the user's `distance_stiffness`
-		// so non-contact behavior is unchanged.
+
+		// 4. Distance constraints — Slice 4M-XPBD canonical compliance form
+		// (`pbd_research/Obi/Resources/Compute/DistanceConstraints.compute`).
+		// Per-segment lambda accumulates across iters; compliance is
+		// stiffness_to_compliance(public_stiffness)/dt². When either
+		// endpoint is in active contact the segment uses
+		// `contact_stiffness` instead — same XPBD form, larger compliance,
+		// so wrapped geometry stretches over the surface instead of
+		// fighting the contact normal projection. The slice 4M-pre.3
+		// "wedge factor" is gone — XPBD's lambda damping already handles
+		// the both-endpoints-wedged case without a special-case knob.
 		for (int i = 0; i + 1 < n; i++) {
-			float seg_stiffness = (particles[i].in_contact_this_tick ||
-					particles[i + 1].in_contact_this_tick)
+			TentacleParticle &p_a = particles[i];
+			TentacleParticle &p_b = particles[i + 1];
+			float w_sum = p_a.inv_mass + p_b.inv_mass;
+			if (w_sum <= 0.0f) continue;
+			// Public knob stiffness=0 means "disable this constraint" —
+			// preserves the PBD semantics test_volume_preservation relies on.
+			// Without this early exit, stiffness=0 maps to compliance 1e-3
+			// which still applies a small correction per iter.
+			float effective_stiffness = (p_a.in_contact_this_tick || p_b.in_contact_this_tick)
 					? contact_stiffness
 					: distance_stiffness;
-			tentacletech::constraints::project_distance(
-					particles[i], particles[i + 1],
-					rest_lengths[i], seg_stiffness);
+			if (effective_stiffness <= 0.0f) continue;
+			Vector3 d = p_a.position - p_b.position;
+			float dist = d.length();
+			if (dist < 1e-8f) continue;
+			float constraint = dist - rest_lengths[i];
+			float compliance = (p_a.in_contact_this_tick || p_b.in_contact_this_tick)
+					? compliance_distance_contact
+					: compliance_distance_base;
+			compliance *= dt2_inv;
+			float &lambda = distance_lambdas[i];
+			float dlambda = (-constraint - compliance * lambda) /
+					(w_sum + compliance + 1e-8f);
+			lambda += dlambda;
+			Vector3 delta = (d / dist) * dlambda;
+			if (p_a.inv_mass > 0.0f) {
+				add_position_delta(i, delta * p_a.inv_mass);
+			}
+			if (p_b.inv_mass > 0.0f) {
+				add_position_delta(i + 1, -delta * p_b.inv_mass);
+			}
 		}
-		// 5. Anchor last so it overrides any earlier violation.
+		apply_position_deltas_all();
+
+		// 5. Friction (§4.3) — per-contact lambda-bounded cone. Cone scales
+		// with that contact's accumulated normal_lambda (Obi
+		// `ContactHandling.cginc::SolveFriction` adapted to a 1D cone). The
+		// per-iter tangent motion is `dx_tangent = (position − prev_position)
+		// projected onto the contact tangent plane`; static cone fully
+		// cancels it, kinetic cone caps the cancellation at μ_k × λ_n.
+		// Multi-contact: each slot runs its own friction projection. The
+		// Jacobi+SOR apply averages the slots' position deltas (a particle
+		// rubbing against two surfaces gets the sum-of-frictions in
+		// reciprocal-impulse space but only the average in position space).
+		// `friction_applied` per-slot accumulates across iters for the
+		// type-1 reciprocal pass in Tentacle::_apply_collision_reciprocals.
+		if (have_contacts && friction_static > 0.0f && nlambda_arr != nullptr &&
+				tlambda_arr != nullptr && cf_out != nullptr) {
+			const uint8_t *cnt = env_contact_count.ptr();
+			const Vector3 *cn = env_contact_normals.ptr();
+			float mu_s = friction_static;
+			float mu_k = friction_static * friction_kinetic_ratio;
+			for (int i = 0; i < n; i++) {
+				int kn = cnt[i];
+				if (kn == 0) continue;
+				TentacleParticle &p = particles[i];
+				if (p.inv_mass <= 0.0f) continue;
+				int base = i * MAX_CONTACTS;
+				Vector3 dx = p.position - p.prev_position;
+				for (int k = 0; k < kn; k++) {
+					int slot = base + k;
+					float lam_n = nlambda_arr[slot];
+					if (lam_n <= 0.0f) continue; // contact not pressing
+					Vector3 cn_k = cn[slot];
+					if (cn_k.length_squared() < 1e-10f) continue;
+					Vector3 dx_tan = dx - cn_k * dx.dot(cn_k);
+					float tan_mag = dx_tan.length();
+					if (tan_mag < 1e-8f) continue;
+					Vector3 dx_tan_dir = dx_tan / tan_mag;
+					float static_cone = mu_s * lam_n;
+					float kinetic_cone = mu_k * lam_n;
+					// `tan_mag × mass` (m·kg) compared against cone (m·kg).
+					// inv_mass = 0/1 in our codebase, so divide-by-inv_mass
+					// is just identity — the formula reduces to
+					// "if tan_mag <= static_cone, fully cancel; else clamp at
+					// kinetic_cone" in length units.
+					float inv_m = (p.inv_mass > 1e-8f) ? p.inv_mass : 1e-8f;
+					float tan_mag_kgm = tan_mag / inv_m;
+					float lambda_t_delta;
+					if (tan_mag_kgm <= static_cone) {
+						lambda_t_delta = -tan_mag_kgm; // full static-cone cancel
+					} else {
+						lambda_t_delta = -kinetic_cone; // kinetic cap
+					}
+					Vector3 friction_delta = dx_tan_dir * (lambda_t_delta * p.inv_mass);
+					add_position_delta(i, friction_delta);
+					tlambda_arr[slot] += dx_tan_dir * lambda_t_delta;
+					cf_out[slot] -= friction_delta;
+				}
+			}
+			apply_position_deltas_all();
+		}
+
+		// 6. Anchor last — direct write so it overrides any earlier
+		// violation. Anchors are not lambda-form constraints; no Jacobi
+		// average makes sense for a hard pin.
 		if (anchor_active && anchor_particle_index >= 0 && anchor_particle_index < n) {
 			tentacletech::constraints::project_anchor(
 					particles[anchor_particle_index], anchor_xform);
 		}
 	}
 
-	// Slice 4J — final collision cleanup. Distance constraints in step 4
-	// run AFTER collision and can pull a contacting particle back into the
-	// obstacle that step 3 just pushed it out of. The within-iter cycle
-	// can't fully resolve this in finite iterations: even at convergence,
-	// the LAST step the particle sees per iter is the distance pull, so
-	// end-of-tick position can be inside the obstacle.
-	//
-	// Tick-to-tick variation in "how far inside" (driven by the per-tick
-	// gravity step, neighbor motion, pose-target advance) becomes visible
-	// jitter — and not a velocity-carried jitter, so the slice 4I damping
-	// can't address it. Fix is one normal-only push-out pass after the
-	// iter loop completes. No friction (already applied within the iter
-	// loop), no flag mutation (already correct). Light cost: one pass over
-	// active contacts at the end of the tick.
-	if (env_contact_active.size() == n &&
-			env_contact_points.size() == n &&
-			env_contact_normals.size() == n) {
-		const uint8_t *act = env_contact_active.ptr();
-		const Vector3 *cp = env_contact_points.ptr();
-		const Vector3 *cn = env_contact_normals.ptr();
-		for (int i = 0; i < n; i++) {
-			if (act[i] == 0) continue;
-			TentacleParticle &p = particles[i];
-			if (p.inv_mass <= 0.0f) continue;
-			float radius = collision_radius * p.girth_scale;
-			if (radius < 1e-5f) continue;
-			float depth = radius - (p.position - cp[i]).dot(cn[i]);
-			if (depth > 0.0f) {
-				p.position += cn[i] * depth;
-			}
-		}
-	}
+	// No end-of-tick cleanup pass — under per-contact lambda accumulation,
+	// the iter loop converges within itself; residual penetration the
+	// previous slice 4J pass swept away no longer materializes. (4J +
+	// `iter_dn_buffer` were both patches for the missing lambda model,
+	// subsumed by 4M.)
 }
 
 void PBDSolver::apply_base_angular_clamp(float p_dt) {
@@ -703,66 +898,89 @@ void PBDSolver::set_uniform_rest_length(float p_length) {
 
 // -- Environment collision --------------------------------------------------
 
-void PBDSolver::set_environment_contacts_per_particle(
+void PBDSolver::set_environment_contacts_multi(
 		const PackedVector3Array &p_points,
 		const PackedVector3Array &p_normals,
-		const PackedByteArray &p_active) {
+		const PackedByteArray &p_counts) {
 	int np = p_points.size();
 	int nn = p_normals.size();
-	int na = p_active.size();
+	int nc = p_counts.size();
 	int n = (int)particles.size();
-	if (np != n || nn != n || na != n) {
+	int slot_total = n * MAX_CONTACTS;
+	if (np != slot_total || nn != slot_total || nc != n) {
 		// Mismatched lengths — clear and bail out rather than reading past
 		// caller-owned arrays. The Tentacle is responsible for sizing these
-		// to match the solver's particle count.
+		// (points/normals at N×MAX_CONTACTS_PER_PARTICLE, counts at N).
 		clear_environment_contacts();
 		return;
 	}
-	env_contact_points.resize(n);
-	env_contact_normals.resize(n);
-	env_contact_active.resize(n);
-	env_contact_friction_applied.resize(n);
+	env_contact_points.resize(slot_total);
+	env_contact_normals.resize(slot_total);
+	env_contact_count.resize(n);
+	env_contact_friction_applied.resize(slot_total);
+	if ((int)env_contact_normal_lambda.size() != slot_total) {
+		env_contact_normal_lambda.assign((size_t)slot_total, 0.0f);
+	}
+	if ((int)env_contact_tangent_lambda.size() != slot_total) {
+		env_contact_tangent_lambda.assign((size_t)slot_total, Vector3());
+	}
 	if (n == 0) {
 		return;
 	}
 	const Vector3 *src_p = p_points.ptr();
 	const Vector3 *src_n = p_normals.ptr();
-	const uint8_t *src_a = p_active.ptr();
+	const uint8_t *src_c = p_counts.ptr();
 	Vector3 *dst_p = env_contact_points.ptrw();
 	Vector3 *dst_n = env_contact_normals.ptrw();
-	uint8_t *dst_a = env_contact_active.ptrw();
+	uint8_t *dst_c = env_contact_count.ptrw();
 	Vector3 *dst_f = env_contact_friction_applied.ptrw();
 	for (int i = 0; i < n; i++) {
-		dst_p[i] = src_p[i];
-		// Defensive normalization — physics server normals are typically
-		// already unit-length, but a malformed mesh could yield a zero
-		// normal which would silently no-op the projection.
-		Vector3 nrm = src_n[i];
-		float l2 = nrm.length_squared();
-		if (l2 > 1e-10f) {
-			nrm = nrm / Math::sqrt(l2);
-		} else {
-			nrm = Vector3();
+		dst_c[i] = src_c[i];
+		int base = i * MAX_CONTACTS;
+		for (int k = 0; k < MAX_CONTACTS; k++) {
+			dst_p[base + k] = src_p[base + k];
+			// Defensive normalization — physics server normals are
+			// typically already unit-length, but a malformed mesh could
+			// yield a zero normal which would silently no-op the
+			// projection. Inactive slots (k >= count[i]) get zeroed.
+			Vector3 nrm = src_n[base + k];
+			float l2 = nrm.length_squared();
+			if (l2 > 1e-10f) {
+				nrm = nrm / Math::sqrt(l2);
+			} else {
+				nrm = Vector3();
+			}
+			dst_n[base + k] = nrm;
+			dst_f[base + k] = Vector3(); // friction accumulator zeroed each tick.
+			// Slice 4M — per-contact lambdas reset per tick (per substep
+			// once 4O lands). Persisting across iters within a tick is
+			// what makes friction cones bounded by accumulated normal
+			// impulse instead of per-iter dn.
+			env_contact_normal_lambda[base + k] = 0.0f;
+			env_contact_tangent_lambda[base + k] = Vector3();
 		}
-		dst_n[i] = nrm;
-		dst_a[i] = src_a[i];
-		dst_f[i] = Vector3(); // friction accumulator zeroed each tick.
 	}
 }
 
 void PBDSolver::clear_environment_contacts() {
 	env_contact_points.clear();
 	env_contact_normals.clear();
-	env_contact_active.clear();
+	env_contact_count.clear();
 	env_contact_friction_applied.clear();
+	for (size_t i = 0; i < env_contact_normal_lambda.size(); i++) {
+		env_contact_normal_lambda[i] = 0.0f;
+	}
+	for (size_t i = 0; i < env_contact_tangent_lambda.size(); i++) {
+		env_contact_tangent_lambda[i] = Vector3();
+	}
 }
 
 int PBDSolver::get_environment_contact_count() const {
 	int total = 0;
-	int n = env_contact_active.size();
-	const uint8_t *src = env_contact_active.ptr();
+	int n = env_contact_count.size();
+	const uint8_t *src = env_contact_count.ptr();
 	for (int i = 0; i < n; i++) {
-		if (src[i] != 0) total++;
+		total += (int)src[i];
 	}
 	return total;
 }
@@ -796,6 +1014,28 @@ void PBDSolver::set_contact_stiffness(float p_v) {
 }
 float PBDSolver::get_contact_stiffness() const { return contact_stiffness; }
 
+void PBDSolver::set_target_softness_when_blocked(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	target_softness_when_blocked = p_v;
+}
+float PBDSolver::get_target_softness_when_blocked() const {
+	return target_softness_when_blocked;
+}
+
+void PBDSolver::set_sor_factor(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 4.0f) p_v = 4.0f; // soft upper bound; > 2 is exotic
+	sor_factor = p_v;
+}
+float PBDSolver::get_sor_factor() const { return sor_factor; }
+
+void PBDSolver::set_max_depenetration(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	max_depenetration = p_v;
+}
+float PBDSolver::get_max_depenetration() const { return max_depenetration; }
+
 void PBDSolver::set_contact_velocity_damping(float p_v) {
 	if (p_v < 0.0f) p_v = 0.0f;
 	if (p_v > 1.0f) p_v = 1.0f;
@@ -805,6 +1045,17 @@ float PBDSolver::get_contact_velocity_damping() const { return contact_velocity_
 
 void PBDSolver::set_support_in_contact(bool p_v) { support_in_contact = p_v; }
 bool PBDSolver::get_support_in_contact() const { return support_in_contact; }
+
+PackedFloat32Array PBDSolver::get_distance_lambdas_snapshot() const {
+	int n = (int)distance_lambdas.size();
+	PackedFloat32Array out;
+	out.resize(n);
+	float *dst = out.ptrw();
+	for (int i = 0; i < n; i++) {
+		dst[i] = distance_lambdas[i];
+	}
+	return out;
+}
 
 PackedByteArray PBDSolver::get_particle_in_contact_snapshot() const {
 	int n = (int)particles.size();
@@ -880,8 +1131,8 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_rest_length", "segment_index"), &PBDSolver::get_rest_length);
 	ClassDB::bind_method(D_METHOD("set_uniform_rest_length", "length"), &PBDSolver::set_uniform_rest_length);
 
-	ClassDB::bind_method(D_METHOD("set_environment_contacts_per_particle", "points", "normals", "active"),
-			&PBDSolver::set_environment_contacts_per_particle);
+	ClassDB::bind_method(D_METHOD("set_environment_contacts_multi", "points", "normals", "counts"),
+			&PBDSolver::set_environment_contacts_multi);
 	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
 	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
 	ClassDB::bind_method(D_METHOD("get_environment_friction_applied"),
@@ -897,6 +1148,17 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_contact_stiffness);
 	ClassDB::bind_method(D_METHOD("get_contact_stiffness"),
 			&PBDSolver::get_contact_stiffness);
+	ClassDB::bind_method(D_METHOD("set_target_softness_when_blocked", "softness"),
+			&PBDSolver::set_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("get_target_softness_when_blocked"),
+			&PBDSolver::get_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("set_sor_factor", "factor"),
+			&PBDSolver::set_sor_factor);
+	ClassDB::bind_method(D_METHOD("get_sor_factor"), &PBDSolver::get_sor_factor);
+	ClassDB::bind_method(D_METHOD("set_max_depenetration", "value"),
+			&PBDSolver::set_max_depenetration);
+	ClassDB::bind_method(D_METHOD("get_max_depenetration"),
+			&PBDSolver::get_max_depenetration);
 	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "damping"),
 			&PBDSolver::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
@@ -907,6 +1169,8 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::get_support_in_contact);
 	ClassDB::bind_method(D_METHOD("get_particle_in_contact_snapshot"),
 			&PBDSolver::get_particle_in_contact_snapshot);
+	ClassDB::bind_method(D_METHOD("get_distance_lambdas_snapshot"),
+			&PBDSolver::get_distance_lambdas_snapshot);
 
 	BIND_CONSTANT(DEFAULT_ITERATION_COUNT);
 	BIND_CONSTANT(MAX_ITERATION_COUNT);

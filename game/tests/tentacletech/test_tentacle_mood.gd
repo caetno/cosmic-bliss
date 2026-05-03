@@ -111,6 +111,10 @@ func test_assigning_mood_copies_values() -> bool:
 	m.pose_softness_when_blocked = 0.45
 	m.emit_changed()
 	if not _approx(d.pose_softness_when_blocked, 0.45): return false
+	# Slice 4M (2026-05-03): the prior wedge_distance_stiffness_factor field
+	# was retired together with the iter-loop wedge special case — XPBD
+	# distance compliance handles two-endpoints-in-contact without a special
+	# softening knob. Field removal verified by absence here.
 	return true
 
 
@@ -131,6 +135,10 @@ func test_mood_writes_solver_params_to_tentacle() -> bool:
 	m.bending_stiffness = 0.83
 	m.damping = 0.92
 	m.contact_stiffness = 0.27
+	# Slice 4M-pre.2: pose_softness_when_blocked reaches the Tentacle as
+	# `target_softness_when_blocked` so both target paths honour it. The
+	# wedge_distance_stiffness_factor field was retired in 4M+4M-XPBD.
+	m.pose_softness_when_blocked = 0.42
 	d.mood = m
 
 	if not _approx(t.bending_stiffness, 0.83):
@@ -141,6 +149,9 @@ func test_mood_writes_solver_params_to_tentacle() -> bool:
 		return false
 	if not _approx(t.contact_stiffness, 0.27):
 		push_error("contact_stiffness not forwarded to Tentacle")
+		return false
+	if not _approx(t.target_softness_when_blocked, 0.42):
+		push_error("pose_softness_when_blocked → target_softness_when_blocked not forwarded to Tentacle")
 		return false
 
 	# Cleanup so the next test gets a fresh root.

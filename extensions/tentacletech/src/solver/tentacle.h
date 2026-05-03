@@ -138,6 +138,26 @@ public:
 	// fighting collision push-out, then snap back when contact ends.
 	void set_contact_stiffness(float p_value);
 	float get_contact_stiffness() const;
+	// Slice 4M-pre.2 — multiplier on target-pull stiffness for in-contact
+	// particles. Forwarded to the solver, where it applies uniformly to
+	// both the singleton tip target and every distributed pose-target. The
+	// behavior driver no longer needs to fetch the contact snapshot itself
+	// to soften pose pulls — the solver handles it for both target paths,
+	// so AI drivers writing tip targets via `set_target` get the same
+	// correctness as drivers using pose targets.
+	void set_target_softness_when_blocked(float p_value);
+	float get_target_softness_when_blocked() const;
+	// Slice 4M — Jacobi successive-over-relaxation factor for the
+	// position-delta accumulator. 1.0 = strict average (Obi default for
+	// parallel mode); higher values converge faster but can overshoot.
+	// Forwarded to the solver.
+	void set_sor_factor(float p_value);
+	float get_sor_factor() const;
+	// Slice 4M / 4P — depenetration velocity cap (m/s) for collision
+	// projection. Higher values eject deeply-penetrated particles faster
+	// but at greater visual snap.
+	void set_max_depenetration(float p_value);
+	float get_max_depenetration() const;
 	// Slice 4I — implicit-velocity damping for in-contact particles. 0.5
 	// (default) halves the per-tick implicit velocity for any particle
 	// flagged in_contact_this_tick at end-of-tick, which kills tick-rate
@@ -331,14 +351,21 @@ private:
 	float tentacle_lubricity = 0.0f;
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
+	float target_softness_when_blocked = 0.3f;
+	float sor_factor = PBDSolver::DEFAULT_SOR_FACTOR;
+	float max_depenetration = PBDSolver::DEFAULT_MAX_DEPENETRATION;
 	float contact_velocity_damping = 0.5f;
 	bool support_in_contact = true;
 	float body_impulse_scale = 1.0f;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;
+	// Slice 4M: per-slot scratch buffers handed to PBDSolver. The point and
+	// normal arrays are sized to particle_count × MAX_CONTACTS_PER_PARTICLE;
+	// the count array is one byte per particle (0..MAX_CONTACTS_PER_PARTICLE).
+	// Reallocated only when the chain length changes.
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;
-	godot::PackedByteArray env_contact_active_scratch;
+	godot::PackedByteArray env_contact_count_scratch;
 
 	void _run_environment_probe();
 	// Slice 4E — apply equal-and-opposite friction impulses to dynamic

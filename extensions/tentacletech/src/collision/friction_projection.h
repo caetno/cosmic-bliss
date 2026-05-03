@@ -10,6 +10,12 @@
 // Spec: docs/architecture/TentacleTech_Architecture.md §4.3 +
 //       docs/Cosmic_Bliss_Update_2026-05-02_phase4_friction_correction.md
 //
+// **DEPRECATED 2026-05-03 (slice 4M).** No longer called from `pbd_solver.cpp` —
+// the friction step now uses per-contact lambda-bounded cones inlined in
+// `iterate()` (Obi `ContactHandling.cginc::SolveFriction` adapted to a 1D
+// cone). Header retained as a math reference; will be removed in a follow-up
+// once any external GDScript consumers are confirmed gone.
+//
 // One header-only function so type-4 (slice 4B) and type-1 (slice 4E) share
 // the cone math. The caller is responsible for:
 //   - Already having performed the normal correction (caller knows `dn`,
