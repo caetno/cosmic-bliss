@@ -1095,7 +1095,7 @@ Same SPD code Marionette already runs on the spine; copy with different paramete
 
 **Why not extend bulger eviction fade.** Bulgers are *displacement vectors* applied along the contact normal; freely 3D wobble (with inertia preserved across direction changes) requires a frame-of-reference (the parent bone), which a displacement vector lacks. Not a fade-time problem; a representation problem.
 
-**Authoring.** Jiggle bones are added by the same Blender script that authors orifice ring bones (`docs/architecture/TentacleTech_Architecture.md` §10.4 / §10.6), under a separate "soft regions" pass. Per-hero parameter overrides land on a `JiggleProfile` resource analogous to `OrificeProfile`.
+**Authoring.** Jiggle bones are added by the same Blender script that authors orifice rim anchors (`docs/architecture/TentacleTech_Architecture.md` §10.4 / §10.6, post-2026-05-03 amendment), under a separate "soft regions" pass. Per-hero parameter overrides land on a `JiggleProfile` resource analogous to `OrificeProfile`.
 
 **Acceptance.** Slap the gluteus with a tentacle and detach. Visible wobble persists ≥ 0.6 s after detachment, decaying smoothly.
 

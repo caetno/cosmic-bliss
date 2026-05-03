@@ -175,12 +175,14 @@ void Tentacle::_run_environment_probe() {
 	if (!environment_probe_enabled) {
 		environment_probe.clear();
 		solver->clear_environment_contacts();
+		_in_contact_this_tick_snapshot.clear();
 		return;
 	}
 	int n = solver->get_particle_count();
 	if (n < 2) {
 		environment_probe.clear();
 		solver->clear_environment_contacts();
+		_in_contact_this_tick_snapshot.clear();
 		return;
 	}
 	if (env_position_scratch.size() != n) {
@@ -246,6 +248,22 @@ void Tentacle::_run_environment_probe() {
 	}
 	solver->set_environment_contacts_multi(env_contact_points_scratch,
 			env_contact_normals_scratch, env_contact_count_scratch);
+
+	// Slice 4N — write the fresh-this-tick snapshot now (after the probe,
+	// before solver->tick). Behaviour drivers running their
+	// _physics_process AFTER the tentacle's pick up THIS tick's contacts;
+	// drivers running before fall back to last-tick semantics — same as
+	// the solver-side accessor.
+	if (_in_contact_this_tick_snapshot.size() != n) {
+		_in_contact_this_tick_snapshot.resize(n);
+	}
+	{
+		const uint8_t *src = env_contact_count_scratch.ptr();
+		uint8_t *dst = _in_contact_this_tick_snapshot.ptrw();
+		for (int i = 0; i < n; i++) {
+			dst[i] = (src[i] > 0) ? 1 : 0;
+		}
+	}
 }
 
 void Tentacle::_notification(int p_what) {
@@ -708,6 +726,14 @@ Array Tentacle::get_environment_contacts_snapshot() const {
 		out[i] = d;
 	}
 	return out;
+}
+
+PackedByteArray Tentacle::get_in_contact_this_tick_snapshot() const {
+	// Slice 4N — return the snapshot populated by `_run_environment_probe()`
+	// for THIS tick. By-copy so the caller can't mutate solver state. If the
+	// probe hasn't run yet (pre-_ready, or environment_probe_enabled toggled
+	// off this tick), the snapshot is empty.
+	return _in_contact_this_tick_snapshot;
 }
 
 Dictionary Tentacle::get_anchor_state() const {
@@ -1273,6 +1299,8 @@ void Tentacle::_bind_methods() {
 			&Tentacle::get_body_impulse_scale);
 	ClassDB::bind_method(D_METHOD("get_environment_contacts_snapshot"),
 			&Tentacle::get_environment_contacts_snapshot);
+	ClassDB::bind_method(D_METHOD("get_in_contact_this_tick_snapshot"),
+			&Tentacle::get_in_contact_this_tick_snapshot);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
 
 	ClassDB::bind_method(D_METHOD("set_tentacle_mesh", "mesh"), &Tentacle::set_tentacle_mesh);

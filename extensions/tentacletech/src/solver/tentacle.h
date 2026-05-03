@@ -199,6 +199,25 @@ public:
 	// gizmo overlay reads this every frame.
 	godot::Array get_environment_contacts_snapshot() const;
 
+	// Slice 4N — this-tick-fresh per-particle contact flags. Written by
+	// `_run_environment_probe()` after the probe runs and *before*
+	// `solver->tick()` iterates, so the snapshot reflects the contact
+	// manifold the iterate loop is about to see, not the previous tick's
+	// result.
+	//
+	// Returns one byte per particle: 1 if the probe found any contact this
+	// tick, 0 if the particle is free. PackedByteArray rather than bool[]
+	// so it crosses the GDScript boundary without a per-element Variant box.
+	//
+	// Process-order requirement: behaviour drivers consuming this snapshot
+	// must run their `_physics_process` *after* the Tentacle's. Godot's
+	// default parent-first ordering gives this for free when the driver is
+	// a child of the Tentacle (the bundled scenes already do this). If a
+	// project ever inverts the order (driver above the tentacle in the
+	// tree), the snapshot reads the previous tick's flags — same as the
+	// solver-side `get_particle_in_contact_snapshot()`, no regression.
+	godot::PackedByteArray get_in_contact_this_tick_snapshot() const;
+
 	// Phase 3 — render plumbing -------------------------------------------
 	//
 	// Tentacle owns one MeshInstance3D child (created internally) and one
@@ -366,6 +385,17 @@ private:
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;
 	godot::PackedByteArray env_contact_count_scratch;
+
+	// Slice 4N — fresh-this-tick contact flags. Written by
+	// `_run_environment_probe()` from `contact_count > 0` *before* the solver
+	// iterates, so behaviour drivers consuming
+	// `Tentacle::get_in_contact_this_tick_snapshot()` see this tick's contact
+	// state instead of the previous tick's iterate-loop result. One byte per
+	// particle: 1 if any contact was found, 0 if free. Falls back to
+	// last-tick semantics if a project inverts the parent-child process
+	// order (driver runs before its tentacle); same as the solver-side
+	// snapshot in that case.
+	godot::PackedByteArray _in_contact_this_tick_snapshot;
 
 	void _run_environment_probe();
 	// Slice 4E — apply equal-and-opposite friction impulses to dynamic

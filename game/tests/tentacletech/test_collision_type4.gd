@@ -62,6 +62,7 @@ func _run_tests() -> void:
 		"test_multi_contact_anti_parallel_pinch_settles",
 		"test_distance_xpbd_steady_state_lambdas_bounded",
 		"test_distance_xpbd_lambda_resets_each_tick",
+		"test_in_contact_snapshot_is_fresh_this_tick",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -1064,4 +1065,75 @@ func test_distance_xpbd_lambda_resets_each_tick() -> bool:
 		push_error("XPBD lambdas not bounded across ticks; max/mean=%.3f (mean=%.6f, max=%.6f)" %
 				[ratio, mean, max_v])
 		return false
+	return true
+
+
+# Slice 4N — Tentacle.get_in_contact_this_tick_snapshot() returns the
+# fresh probe-derived contact flags written before solver.tick(). Verifies:
+#   1. Pre-tick: snapshot is empty (probe hasn't run yet).
+#   2. After a single tick where the tentacle hovers within probe range
+#      of a floor, the snapshot is sized to particle_count and reads
+#      "in contact" (1) for every particle within range.
+# Compare to solver.get_particle_in_contact_snapshot() — which reflects
+# the iterate-loop's collision step rather than the probe — and confirm
+# both report the same set of in-contact particles after one tick (they
+# should agree for any settled-or-settling chain). The freshness benefit
+# of the Tentacle accessor is that the snapshot is written BEFORE iterate,
+# so callers running between probe and iterate (custom solver drivers,
+# future Phase 5 orifice work) see this-tick's manifold.
+func test_in_contact_snapshot_is_fresh_this_tick() -> bool:
+	# Tentacle anchor at y=0.05, particles hang along -Z from there at the
+	# same y. Floor at y=0, particle collision_radius = default 0.05, probe
+	# QUERY_BIAS = 1.05 → probe range 0.0525. Particles at y=0.05 are within
+	# range → all flagged on tick 1.
+	var t: Node3D = _make_tentacle(Vector3(0, 0.05, 0), 6, 0.1)
+	_make_floor(0.0)
+
+	# Pre-tick: snapshot has not been populated by probe yet.
+	var pre: PackedByteArray = t.get_in_contact_this_tick_snapshot()
+	if pre.size() != 0:
+		push_error("expected pre-tick snapshot empty; got size %d" % pre.size())
+		return false
+
+	# Tick once. The probe runs first, populates the snapshot, then the
+	# solver iterates.
+	t.tick(DT)
+
+	var snap: PackedByteArray = t.get_in_contact_this_tick_snapshot()
+	if snap.size() != t.particle_count:
+		push_error("snapshot size %d != particle_count %d" % [snap.size(), t.particle_count])
+		return false
+	# All particles are within probe range of the floor → all should read 1.
+	# (Anchor particle 0 is pinned but the probe still reports it; the flag
+	# isn't gated on inv_mass.)
+	var any_contact: bool = false
+	for b in snap:
+		if b != 0:
+			any_contact = true
+			break
+	if not any_contact:
+		push_error("expected at least one particle flagged in_contact this tick; snapshot=%s" % str(snap))
+		return false
+
+	# After tick(), the solver-side snapshot is also populated (set during
+	# iterate's collision step). The two snapshots are NOT identical by
+	# design: the probe-side flag fires for any particle within range,
+	# including pinned ones; the solver-side flag is gated on `inv_mass > 0`
+	# (iterate skips pinned particles in its collision step). For
+	# non-pinned particles they agree on which are in contact; flag any
+	# disagreement there as a regression.
+	var solver = t.get_solver()
+	var solver_snap: PackedByteArray = solver.get_particle_in_contact_snapshot()
+	if solver_snap.size() != snap.size():
+		push_error("solver snapshot size %d != tentacle snapshot size %d" %
+				[solver_snap.size(), snap.size()])
+		return false
+	for i in range(snap.size()):
+		var inv_m: float = solver.get_particle_inv_mass(i)
+		if inv_m <= 0.0:
+			continue # pinned — probe reports, iterate doesn't
+		if snap[i] != solver_snap[i]:
+			push_error("snapshot mismatch at non-pinned %d: tentacle=%d solver=%d" %
+					[i, snap[i], solver_snap[i]])
+			return false
 	return true

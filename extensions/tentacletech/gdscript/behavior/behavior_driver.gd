@@ -22,6 +22,15 @@ extends Node3D
 ## (which is what produced the legacy backward-corkscrew on retract).
 ## Every particle reads the same wave phase + perpendicular axes; only
 ## the spatial-phase offset along the arc differentiates them.
+##
+## Process-order requirement (slice 4N): drivers consuming
+## [method Tentacle.get_in_contact_this_tick_snapshot] must run
+## [code]_physics_process[/code] AFTER the [code]Tentacle[/code]'s. Godot's
+## default parent-first ordering gives this for free when the driver is a
+## direct child of the Tentacle (the recommended layout). If the driver is
+## placed above its tentacle in the tree, the snapshot reads last-tick
+## semantics — same as the solver-side
+## [method PBDSolver.get_particle_in_contact_snapshot].
 
 # --- Wiring ----------------------------------------------------------------
 

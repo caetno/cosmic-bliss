@@ -29,7 +29,7 @@ No UI meter. Player reads the hero's body.
 Scenario 8 exists physically. A ribbed tentacle pumping near the orifice ring's natural frequency produces resonance and amplified reaction.
 
 Cues the player can read:
-- Visible ring bone pulsing (existing spring-damper output, TentacleTech §6.4).
+- Visible rim pulsing (PBD rim particle loop driven by §6.3 constraints + per-loop target-area modulation per §6.4).
 - Hero vocal rhythm entrainment (Reverie vocal output rhythm tied to ring oscillation phase).
 
 Reward sustained resonance (e.g., ring amplitude > threshold for 2+ seconds): `PhenomenonAchieved(RibResonance, magnitude)` event, currency bonus, `Ecstatic` spike, optional vocal unlock for this tentacle type.
@@ -40,7 +40,7 @@ Scenario 3 already punishes oblique approaches with wedge lock and permanent ang
 
 No UI angle indicator. Feedback comes from:
 - Physical stuck behavior.
-- Asymmetric pressure on ring bones (visible skin deformation).
+- Asymmetric pressure on rim particles (visible skin deformation).
 - Reverie reaction (mildly painful, not pleasurable).
 
 A skilled player learns to read approach geometry and clears harder orifices faster. No dedicated mechanic — this is raw physics reading.

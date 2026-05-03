@@ -300,20 +300,20 @@ Bulbed tentacle enters easily, catches on retraction. Grip amplifies the catch.
 1. Shaft enters freely (shaft girth < rest_radius) (→ no contact)
 2. Bulb reaches entry plane at `engagement_depth` ≈ 0.85 (→ depth tracking)
 3. `girth_at_entry` samples bulb arc-length, returns 1.4 (→ §5.4 auto-baked profile)
-4. Nonlinear stretch ramps hard; pressure spike on ring bones (→ §6.3)
-5. Ring bones stretch to accommodate; skin around orifice distends; ragdoll gets inward impulse (→ §6.4 + reaction forces)
-6. Bulb passes entry plane; ring bones snap back toward rest; ragdoll gets brief outward impulse (→ §6.4 spring dynamics)
+4. Nonlinear stretch ramps hard; pressure spike on rim particles (→ §6.3)
+5. Rim particles stretch outward to accommodate; skin around orifice distends; ragdoll gets inward impulse (→ §6.4 + reaction forces)
+6. Bulb passes entry plane; rim particles snap back toward rest; ragdoll gets brief outward impulse (→ §6.4 rim particle dynamics)
 7. Shaft inside; tentacle settles at `engagement_depth = 0.95`
 8. AI transitions to Lock (→ §A4)
 9. Orifice detects stationarity; `grip_engagement` ramps from 0 to 1 over 0.8s (→ §6.2 persistent state)
-10. Ring bones actively contract below rest_radius onto thin shaft (→ §6 grip)
+10. Rim particles actively contract below rest radius onto thin shaft via reduced `target_enclosed_area` (→ §6 grip)
 11. AI transitions to Withdrawal; `axial_velocity_bias = -0.15`
 12. Shaft slides easily on retreat (thin, moderate friction) (→ §4.4)
 13. Bulb approaches entry from inside; compression returns (→ §5.4 profile sampling)
 14. Ring must re-stretch for bulb to exit — but grip is still engaged, actively pulling inward (→ §6.2)
 15. Static friction engages (normal force × μ × static multiplier). Tentacle held (→ §4.3)
 16. Accumulating target-pull force eventually exceeds static cone (→ §4.3)
-17. **Snap release.** `in_stick_phase` flips; bulb exits; ring whips back; ragdoll gets sharp outward impulse (→ §4.3 + §6.4)
+17. **Snap release.** `in_stick_phase` flips; bulb exits; rim whips back; ragdoll gets sharp outward impulse (→ §4.3 + §6.4)
 18. Tentacle retracts freely; `grip_engagement` decays (→ §6 grip)
 
 ### Outcome
@@ -336,17 +336,17 @@ Oblique thrust gets stuck. Harder = worse. AI repositions.
 2. Tip contacts rim; `center_offset` large; `approach_angle_cos ≈ 0.64` (→ §6.2)
 3. Wedge: `axial_reaction += radial_pressure × tan(50°) ≈ × 1.19` (→ wedge mechanics)
 4. High stiffness means tentacle doesn't bend to align; whole length resists
-5. Pressure accumulates at contact; asymmetric ring stretch (→ §6.3)
+5. Pressure accumulates at contact; asymmetric rim particle displacement (→ §6.3)
 6. Tentacle `asymmetry` grows — directional squeeze (→ §3.4)
 7. Ragdoll gets strong lateral push (→ §6 reaction forces)
 8. AI noise perturbs tip laterally but wedge geometry converts axial effort → lateral rim pressure
 9. **Deadlock:** higher axial effort → more wedge force → more rim pressure → no forward motion
-10. Ring bones on contact side cross `damage_threshold`; damage accumulates (→ §6 damage)
+10. Rim particles on contact side cross `damage_threshold`; damage accumulates (→ §6 damage)
 11. Tentacle asymmetry caps at 0.5 magnitude; visible flattening (→ §3.4 + §5.3 vertex shader)
 12. Hero struggle rises from continuous lateral force; scorer detects via ragdoll velocity (→ §A5)
 13. Scorer picks Withdrawal (pinned config scores worse over time)
-14. Tentacle retracts; ring whips back; damage persists (→ §6)
-15. Orifice's `effective_rest_radius_per_dir` is now larger on contact side than opposite (→ directional damage)
+14. Tentacle retracts; rim whips back; damage persists (→ §6)
+15. Orifice's per-rim-particle effective rest position is now larger on contact side than opposite (→ per-particle damage)
 16. Subsequent attempt from different angle finds asymmetric resistance — different feel
 
 ### Outcome
@@ -457,16 +457,16 @@ Too-large tentacle probes repeatedly at varying angles. Each attempt adds damage
 2. Compression immediate (oversized); nonlinear stretch makes resistance severe (→ §6.3)
 3. Scorer rolls Slow Insertion after First Contact establishes sustained contact
 4. Ramps axial force; ring stretches hard but not enough (→ compression geometry)
-5. Ring approaches `damage_threshold`; damage accumulates on contact-side directions (→ §6 damage)
+5. Rim approaches `damage_threshold`; damage accumulates on contact-side rim particles (→ §6 damage)
 6. Hero struggle / noise breaks contact; scorer picks Prowl (→ §A5)
-7. Tentacle retreats; ring recovers to rest; damage persists (→ §6 recovery_rate slow)
+7. Tentacle retreats; rim recovers to rest; damage persists (→ §6 recovery_rate slow)
 8. Prowl briefly; scorer picks Slow Insertion again; noise gives slightly different angle (→ §A2 target noise)
-9. New contact point rotated angularly; directional `effective_rest_radius_per_dir` slightly larger there from earlier damage (→ §6 per-direction damage)
-10. Resistance marginally lower in this direction
-11. Attempt fails again, adds damage in new direction
-12. Several attempts later, orifice `effective_rest_radius` is elevated across multiple directions (→ aggregate damage)
+9. New contact point rotated angularly; rim particles at the new contact location have slightly elevated rest positions from earlier damage (→ §6 per-particle damage)
+10. Resistance marginally lower at this rim location
+11. Attempt fails again, adds damage at new rim particles
+12. Several attempts later, orifice's effective rest configuration is elevated across multiple rim particles (→ aggregate damage)
 13. Eventually compression below force budget; tentacle passes through (→ §6.3)
-14. Ring stretches maximally but accepts; penetration occurs
+14. Rim stretches maximally but accepts; penetration occurs
 
 ### Outcome
 Scripted-looking "keeps trying until success" sequence with zero scripting. Damage accumulation + repeated scoring + noise-varied angles produce it naturally. Different every run.
@@ -479,24 +479,24 @@ Ribbed tentacle in rhythmic motion hits resonance with orifice ring. Whole syste
 
 ### Setup
 - Tentacle I: ribbed, `rib_frequency` several Hz/arc-length, `rib_depth = 0.15`
-- Orifice: `stretch_stiffness = 200`, `ring_damping = 0.3` (underdamped)
+- Orifice: `stretch_stiffness = 200`, low solver damping per loop (underdamped)
 - AI: Pumping with rib-pass frequency near ring natural frequency
 
 ### Beats
 1. Pumping drives axial velocity sinusoidally; ribs pass through ring region (→ §A4 Pumping preset)
 2. Rib friction coefficient modulates sinusoidally as ribs pass (→ §4.4 rib modulation)
-3. Friction spikes → axial force spikes → ring radial impulses (→ §4.3)
-4. Underdamped ring bones oscillate after each impulse (→ §6.4 spring-damper)
-5. Next rib timing may reinforce or cancel — depends on match between rib-pass freq and ring natural freq (→ physics resonance)
-6. If matched: resonance builds; ring amplitude grows per rib pass (→ driven oscillator)
-7. Ring bones pulse rhythmically far exceeding what girth alone would produce (→ emergent amplitude)
+3. Friction spikes → axial force spikes → rim particle radial impulses (→ §4.3)
+4. Underdamped rim particles oscillate after each impulse (→ §6.4 rim particle dynamics; tune via per-loop compliance + solver damping)
+5. Next rib timing may reinforce or cancel — depends on match between rib-pass freq and rim natural freq (→ physics resonance)
+6. If matched: resonance builds; rim amplitude grows per rib pass (→ driven oscillator)
+7. Rim particles pulse rhythmically far exceeding what girth alone would produce (→ emergent amplitude)
 8. Ragdoll gets increasingly strong rhythmic impulses (→ §4.3 reaction)
 9. AI has no concept of resonance; continues Pumping
 10. Eventually either noise perturbs frequency off resonance OR scorer picks new scenario
 11. Resonance decays (underdamped but damped) (→ §6.4)
 
 ### Outcome
-Physical resonance phenomenon. No code "knows" about it — it falls out of rib friction + ring spring dynamics. **Design risk:** tune `ring_damping` carefully or resonance can look ugly. Playtest ribbed tentacles early.
+Physical resonance phenomenon. No code "knows" about it — it falls out of rib friction + rim particle dynamics. **Design risk:** tune per-loop compliance + global solver damping carefully or resonance can look ugly. Playtest ribbed tentacles early.
 
 ---
 
@@ -518,7 +518,7 @@ One grip breaks; ragdoll moves; other tentacles' interaction geometry shifts mid
 7. K mid-Pumping; its target was at fixed world position; orifice just moved (→ target lag)
 8. K's PBD sees particles' positions no longer align with entry; tunnel constraint projects differently (→ §6.2 geometric state refresh)
 9. K's target pull still active at old position; creates conflict with new geometry; lateral force spike (→ constraint fight)
-10. K's ring bones get asymmetric stress (→ §6.3)
+10. K's rim particles get asymmetric stress (→ §6.3)
 11. K's scorer next tick: reads new actual state; updates target; interpolates to corrected target over 0.5s (→ §A5 current-state scoring)
 12. L's grip engagement was holding; relative velocity broke it briefly (→ §6 grip)
 13. L's disengagement produces release impulse; further perturbs torso (→ §4.3)

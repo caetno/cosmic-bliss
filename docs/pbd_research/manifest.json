@@ -1,0 +1,12 @@
+{
+  "fetched": {
+    "https://obi.virtualmethodstudio.com/manual/6.1/convergence.html": {
+      "content_type": "text/html",
+      "depth": 0,
+      "fetched": "2026-05-03T12:52:46+00:00",
+      "path": "scraped/obi.virtualmethodstudio.com/manual/6.1/convergence.md",
+      "sha1": "ad10d9474de0c5c32ed5b852dca946d7d59c839d"
+    }
+  },
+  "version": 1
+}

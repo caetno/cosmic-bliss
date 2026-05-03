@@ -26,7 +26,7 @@
 │  HeroCharacter (CharacterBody3D + Skeleton3D)                   │
 │  ┌──────────────────┐  ┌──────────────────────────────────┐    │
 │  │ Ragdoll bones    │  │ Orifices (N per character)       │    │
-│  │ + orifice rings  │  │ - ring bones (spring-damper)     │    │
+│  │ + orifice rims   │  │ - rim particle loops (XPBD)      │    │
 │  │ + tunnel markers │  │ - entry spline + tunnel spline   │    │
 │  └────────┬─────────┘  └──────────────┬───────────────────┘    │
 │           │                           │                         │
@@ -67,7 +67,7 @@
 Major subsystems:
 1. **PBD core** — particle solver, constraints, spline math
 2. **Collision** — 7 types, unified friction projection
-3. **Orifice** — directional ring bones, EntryInteraction, bilateral compliance, multi-tentacle
+3. **Orifice** — rim particle loops (XPBD distance + volume + spring-back), EntryInteraction, bilateral compliance, multi-tentacle, multi-loop per orifice
 4. **Rendering** — GPU spline skinning, bulger uniform array, spring-damper jiggle
 5. **Stimulus bus** — events, continuous channels, modulation (bidirectional)
 6. **Mechanical sound** — physics-driven audio events
@@ -180,9 +180,9 @@ for each particle i:
 **Asymmetry from orifice pressure** (computed during orifice tick, written to affected particles):
 ```
 for each particle near an active EntryInteraction:
-    for each ring r in orifice.rings with nonzero pressure_per_ring[r]:
+    for each loop l, for each rim particle k with nonzero pressure_per_loop_k[l][k]:
         direction_local = world_to_particle_frame(r.authored_radial_axis)
-        particle.asymmetry -= direction_local.xy × pressure_per_ring[r] × dt × responsiveness
+        particle.asymmetry -= direction_local.xy × pressure_per_loop_k[l][k] × dt × responsiveness
     
     // Elastic decay toward zero
     particle.asymmetry *= (1.0 - recovery_rate × dt)
@@ -268,7 +268,7 @@ All share the PBD projection pattern from §4.3. Different detection and differe
 | 6 | Tentacle surface vs grab target | Explicit attachment constraint with slip | Particle pinned to target with friction-limited slip | Yes |
 | 7 | Tip vs closed surface (probing) | Same as #1 until orifice boundary crossed | Same as #1 | Yes |
 
-**Type 2 (orifice rim) is not a simple particle-surface projection.** It operates through the `EntryInteraction` and directional ring model. See §6.
+**Type 2 (orifice rim) is not a simple particle-surface projection.** It operates through the `EntryInteraction` and rim particle loop model. See §6.
 
 **Type 6 (attachment) is how tentacles grab limbs.** Particle is pinned to a point on a target surface (ragdoll bone, static geometry, another tentacle). Attachment holds while tangential force is within static friction cone; breaks with slip accumulation.
 
@@ -335,7 +335,7 @@ for each distance constraint between particles a, b:
 
 **Length-redistribution / elastic-budget ("S-curve length storage")** is explicitly deferred. Re-evaluate only if soft stiffness alone produces visible slack.
 
-**Type-2 friction reciprocal routing.** The type-1 path above applies the friction displacement as an equal-and-opposite impulse on the contacted ragdoll bone. **Type-2 (particle vs orifice rim) is different.** The contact is with a kinematic ring, not a ragdoll bone — so the type-1 rule cannot be reused. Type-2 friction reciprocals are summed per ring direction onto `EI.tangential_friction_per_dir[d]` (§6.2) and routed to the orifice's `host_bone` by the §6.3 reaction-on-host-bone pass — not applied directly per-particle. This avoids double-routing and keeps the host-bone reaction self-consistent with the radial and axial-wedge components computed at the same place.
+**Type-2 friction reciprocal routing.** The type-1 path above applies the friction displacement as an equal-and-opposite impulse on the contacted ragdoll bone. **Type-2 (particle vs orifice rim) is different.** The contact is with a rim particle (PBD-driven, attached to host_bone via the orifice frame), not a ragdoll bone — so the type-1 rule cannot be reused. Type-2 friction reciprocals are summed per rim particle onto `EI.tangential_friction_per_loop_k[l][k]` (§6.2) and routed to the orifice's `host_bone` by the §6.3 reaction-on-host-bone pass — not applied directly per-particle. This avoids double-routing and keeps the host-bone reaction self-consistent with the radial and axial-wedge components computed at the same place.
 
 ```
 // Inside §4.3 friction projection, after computing friction_applied for
@@ -344,14 +344,14 @@ if contact_type == TYPE_2:
     // Project friction_applied onto the tentacle tangent at the ring,
     // accumulate scalar magnitude per direction. §6.3 takes it from there.
     t_hat = evaluate_tentacle_tangent(EI.tentacle, ring.arc_length)
-    EI.tangential_friction_per_dir[d] += dot(friction_applied, t_hat) * effective_mass / dt
+    EI.tangential_friction_per_loop_k[l][k] += dot(friction_applied, t_hat) * effective_mass / dt
     // Do NOT call bone.apply_impulse_at_position here — handled by §6.3.
 else if contact_type == TYPE_1:
     // Existing canonical behavior (above): route reciprocal to ragdoll bone directly.
     bone.apply_impulse_at_position(impulse_friction, contact_point)
 ```
 
-`tangential_friction_per_dir` is cleared at the start of each PBD tick alongside other per-tick `EntryInteraction` state.
+`tangential_friction_per_loop_k` is cleared at the start of each PBD tick alongside other per-tick `EntryInteraction` state.
 
 ### 4.4 Friction coefficient composition
 
@@ -571,31 +571,48 @@ Surface detail (ribbing, veins, scales) is mesh geometry — rides along with th
 
 ## 6. Orifice system
 
-### 6.1 Ring bone structure
+### 6.1 Rim structure
 
-Per orifice on the hero, the rim is an edge loop of the continuous hero mesh at the point where the surface invaginates. Ring bones are **authored in Blender** along this rim loop (not generated in Godot) and ship with the hero GLB. The rim is a single edge loop shared between the skin surface and the mucosa surface of the same mesh; skinning weights on that loop follow the ring bones, so ring-bone motion deforms skin and mucosa together at the rim.
+> **Amended 2026-05-03** (was: "Ring bone structure"). Replaced the
+> driven-kinematic 8-direction ring-bone model with a closed-loop
+> rim of N PBD particles per loop, multi-loop per orifice supported.
+> Rationale + full diff: `docs/Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md`.
+> See `docs/Cosmic_Bliss_Update_2026-05-03_obi_realism_and_orifice.md`
+> for the analytical context (Obi `VolumeConstraints.compute` +
+> `PinholeConstraints.compute` adoption).
+
+Per orifice on the hero, the rim is an edge loop of the continuous hero mesh at the point where the surface invaginates. **Rim anchor bones** are authored in Blender along this rim loop (not generated in Godot) and ship with the hero GLB. The rim is a single edge loop shared between the skin surface and the mucosa surface of the same mesh; skinning weights on that loop follow the rim anchors, so rim motion deforms skin and mucosa together at the rim.
 
 ```
 <host_deform_bone>                        (parent — pelvis/hip for pelvic orifices, jaw for oral)
 └── <Prefix>_Center                       (transform anchor; use_deform = False; no weights)
-    ├── <Prefix>_Ring_0                   (deform bones, arc-length-regular along rim)
-    ├── <Prefix>_Ring_1
+    ├── <Prefix>_RimAnchor_0              (deform bones; arc-length-regular along rim;
+    ├── <Prefix>_RimAnchor_1               authored rest positions for the rim particles)
     ...
-    └── <Prefix>_Ring_{N-1}
+    └── <Prefix>_RimAnchor_{N-1}
 ```
 
-**Per-orifice ring count is variable.** Currently 8 on the shipped orifices, but not fixed — logic must be N-agnostic. Never hard-code 8 (or any count) in runtime code or profile schemas.
+**Rim anchors are kinematic targets, not driven outputs.** Runtime does **not** write to anchor positions. Each orifice owns one or more **rim particle loops** (PBD-driven) whose particles' rest positions are the anchor offsets in Center frame; XPBD spring-back constraints pull particles toward those rest positions each tick. The visible mesh skin tracks the live rim particle positions (skin weights remain bound to anchor names; the skinning shader uses live particle positions in place of anchor world transforms — see §10.4 for the binding mechanism).
 
-**Placement is arc-length-regular along the rim loop, not angular-regular at `i × 360/N`.** Rim loops are rarely circular — a jaw opening, a vulva, a sphincter are all irregular — and even arc-length spacing keeps skin-deform quality uniform around the opening. Each ring's actual angular position is recorded implicitly by its authored head offset from `<Prefix>_Center`. Physics lookups select the rings that *bracket* a pressure angle θ (binary-search or linear sweep over sorted authored angles), never `ring[floor(θ × N / 2π)]`.
+**Per-loop particle count is variable.** N is per-loop, set by `OrificeProfile.rim_loops[i].particle_count`. Typical defaults: 8 for symmetrical openings, 12-16 for irregular shapes (slits, star profiles), 4-6 for tight openings (urethra, decorative pinholes). Logic must be N-agnostic.
 
-**Local frame**, consistent across every ring on every orifice (set by the Blender authoring script):
+**Placement is arc-length-regular along the rim loop, not angular-regular at `i × 360/N`.** Rim loops are rarely circular — a jaw opening, a vulva, a sphincter are all irregular — and even arc-length spacing keeps skin-deform quality uniform around the opening. Each anchor's authored offset from `<Prefix>_Center` is its rim particle's rest position in Center frame. Physics never assumes angular regularity.
+
+**Local frame**, consistent across every rim anchor on every orifice (set by the Blender authoring script):
 - **Y** — radial outward (from Center toward the rim).
 - **Z** — along the opening axis (outward from the cavity).
 - **X** — tangent along the rim loop.
 
-Runtime drives each ring via **local-space translation** on Y (radial delta in/out) and Z (axial funnel offset, §6.4). Ring bones are **driven, not simulated** — their positions are set directly by the orifice tick. No physics joints, no springs between bones; the spring-damper dynamics are on the target radius, not on the bone itself.
+Skin around the opening is weight-painted (also in Blender) to the rim anchors with angular interpolation between the two bracketing anchors and radial falloff outward. See §10.4 for the Godot-side import workflow and §10.6 for the full Blender → Godot authoring pipeline.
 
-Skin around the opening is weight-painted (also in Blender) to the ring bones with angular interpolation between the two bracketing rings and radial falloff outward. See §10.4 for the Godot-side import workflow and §10.6 for the full Blender → Godot authoring pipeline.
+**Multi-loop support.** An orifice can own multiple rim loops, each a fully independent particle loop with its own constraints. Loop 0 is the canonical "primary rim" used by EntryInteraction geometry checks (entry plane, tunnel projection); additional loops are visual / secondary contact surfaces. Common configurations:
+
+- **Single loop** (default): one rim loop, simple orifice.
+- **Outer + inner loop** (anatomical): an outer "lip" loop with low stiffness and a larger rest radius, an inner "opening" loop with higher stiffness and the actual passage radius. Inter-loop coupling springs (per-particle pairs, soft) make them deform somewhat together while preserving differential stiffness.
+- **Decorated rim** (jewelry, prosthetic): inner loop is the anatomical opening; outer loop is jewelry geometry with very high stiffness (rim deforms freely, jewelry barely moves).
+- **Compound openings** (ribbed canal, multiple sphincters along a single tunnel): a sequence of loops along the tunnel axis, each with its own rest radius and contraction modulation. Used for peristalsis (§6.7 through-path tunnels) — each loop is one contractile ring along the tunnel.
+
+Inter-loop coupling, when present, is a per-particle XPBD soft pull between corresponding particles in adjacent loops. Stiffness is authored per-pair; zero coupling means loops are visually adjacent but mechanically independent.
 
 ### 6.2 EntryInteraction and persistent state
 
@@ -618,19 +635,21 @@ struct EntryInteraction {
     float      penetration_depth;         // arc-length of tentacle inside
     float      axial_velocity;
 
-    // Per-ring state — sized to orifice.ring_count (N varies per orifice, §6.1).
-    // Indexed by authored ring index (Ring_0..Ring_{N-1}); angular position is looked
-    // up via the profile's sorted authored-angle table, never as i × 2π/N.
-    Vector<float>  orifice_radius_per_ring;
-    Vector<float>  orifice_radius_velocity;
+    // Per-rim-particle state. Indexed [loop_index][particle_index].
+    // Sized to orifice.rim_loops[l].particle_count per loop. Per-loop
+    // arrays of per-particle data — outer index is loop, inner is k.
+    // (Was `_per_ring[r]` indexed by ring direction in the pre-2026-05-03
+    // model; see Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md.)
+    Vector<Vector<float>>  orifice_radius_per_loop_k;
+    Vector<Vector<float>>  orifice_radius_velocity_per_loop_k;
 
     // Persistent state (hysteretic — reason the interaction object exists)
     float      grip_engagement;           // 0..1 ramps over time
     bool       in_stick_phase;            // friction state machine
-    Vector<float>  damage_accumulated_per_ring;
+    Vector<Vector<float>>  damage_accumulated_per_loop_k;
 
-    // Forces computed this tick
-    Vector<float>  radial_pressure_per_ring;
+    // Forces computed this tick — per rim particle, summed across loops
+    Vector<Vector<float>>  radial_pressure_per_loop_k;
     float      axial_friction_force;
     Vector3    reaction_on_ragdoll;
 
@@ -644,13 +663,16 @@ struct EntryInteraction {
     // application, and any other per-tunnel-particle pass.
     PackedInt32Array particles_in_tunnel;
 
-    // Per-direction tangential friction at the rim (added 2026-04-27 rev 2.1).
-    // Populated by §4.3 type-2 friction projection — summed per ring direction
-    // across all particles in type-2 contact at that direction this tick.
-    // Read by §6.3 reaction-on-host-bone, which routes the friction reciprocal
-    // to host_bone (NOT to a ragdoll bone — type-1 routing rule does not apply
-    // to type-2 contacts). Cleared at the start of each PBD tick.
-    float      tangential_friction_per_dir[8] = {0};
+    // Per-rim-particle tangential friction at the rim. (Was
+    // `tangential_friction_per_dir[8]` in the pre-2026-05-03 model;
+    // see orifice_rim_model amendment doc.) Indexed [loop_index][k].
+    // Populated by §4.3 type-2 friction projection — summed per rim
+    // particle across all tentacle particles in type-2 contact at that
+    // rim particle this tick. Read by §6.3 reaction-on-host-bone, which
+    // routes the friction reciprocal to host_bone (NOT to a ragdoll
+    // bone — type-1 routing rule does not apply to type-2 contacts).
+    // Cleared at the start of each PBD tick.
+    Vector<Vector<float>>  tangential_friction_per_loop_k;
 };
 ```
 
@@ -674,63 +696,85 @@ each tick:
         else → create new, grip_engagement = 0
     update geometric state for each
     compute forces (§6.3)
-    apply forces to tentacle particles, ring bones, ragdoll
+    apply forces to tentacle particles, rim particles, ragdoll
     if tentacle withdrew completely → mark for retirement after grace period
 ```
 
 ### 6.3 Bilateral compliance
 
-Tentacle-and-orifice deformation share pressure based on relative stiffness. Iteration is over the orifice's authored rings; the ring's direction vector is its authored radial axis in Center space (§6.1, local Y):
+> **Amended 2026-05-03**. Per-direction spring-damper allocation
+> replaced by XPBD constraints on the rim particle loop. Bilateral
+> compliance is now an emergent property of per-particle stiffness ×
+> volume constraint compliance × distance constraint compliance.
+
+Each orifice runs the following per tick, for each of its rim loops, after the tentacle PBD step has produced the per-rim-particle pressure values via type-2 collision projection (§4.2):
 
 ```
-for each ring r in orifice.rings:
-    dir_r = r.authored_radial_axis             // unit Y of ring's local basis in Center frame
-    // Aggregate demand if multi-tentacle (§6.5)
-    required_radius_r = compute_aggregate_demand(r)  // max over all tentacles
-    
-    gap = orifice.radius_per_ring[r] - required_radius_r
-    if gap >= 0:
-        // No contact at this ring
-        pressure_per_ring[r] = 0
-    else:
-        compression = -gap
-        // Nonlinear stretch (tissue-like stiffening above rest)
-        stretch = max(0, orifice.radius_per_ring[r] - r.effective_rest_radius)
-        effective_orifice_k = orifice.stretch_stiffness × pow(
-            1.0 + stretch / r.rest_radius,
-            orifice.stretch_nonlinearity - 1.0)
-        
-        // Springs in series
-        effective_k = 1.0 / (1.0/tentacle.girth_stiffness + 1.0/effective_orifice_k)
-        pressure_per_ring[r] = compression × effective_k
-        
-        // Allocate deformation by stiffness ratio
-        orifice_share = tentacle.girth_stiffness / (tentacle.girth_stiffness + effective_orifice_k)
-        
-        // Apply to orifice (target radius delta)
-        target_radius_per_ring[r] += pressure_per_ring[r] × orifice_share × dt
-        
-        // Apply to tentacle (asymmetry delta, §3.4) along dir_r
-        write_asymmetry_to_near_particles(dir_r, pressure_per_ring[r] × (1 - orifice_share))
+for each loop l in orifice.rim_loops:
+    rim = l.rim_particles
+    N = rim.length
+
+    // Per-particle pressure from tentacle-rim contact. Computed by
+    // type-2 collision projection during PBD iterations (§4.2);
+    // EntryInteraction reads the result.
+    for each rim particle k in [0..N-1]:
+        // Type-2 projection moves rim particle k away from any
+        // tentacle particle within collision radius. The XPBD lambda
+        // accumulated by that projection is the "pressure" — same
+        // units across radial / friction / wedge force terms.
+        pressure_per_loop_k[l][k] = max(0, type_2_projection_lambda[l][k])
+
+    // Volume constraint (Obi VolumeConstraints pattern). The enclosed
+    // polygon area is pulled toward target_enclosed_area each iteration.
+    // Active contraction modulates the target. This is the bulk
+    // anatomical-tissue-resists-displacement mechanism.
+    current_area = polygon_area_of_loop(rim, projected_to_perp_plane)
+    area_constraint = current_area - l.target_enclosed_area
+    apply_xpbd_volume_constraint(rim, area_constraint, l.area_compliance, dt)
+
+    // Distance constraints around the loop (closed). Standard XPBD
+    // distance per pair (rim[k], rim[(k+1) % N]).
+    for each pair (k, k+1) cyclic:
+        apply_xpbd_distance_constraint(
+            rim[k], rim[(k+1) % N],
+            l.rim_segment_rest_lengths[k], l.distance_compliance, dt)
+
+    // Per-particle spring-back to authored rest position in Center frame.
+    // Bilateral compliance is the per-particle stiffness distribution
+    // (front vs back, dorsal vs ventral, etc.).
+    for each rim particle k:
+        rest_world = orifice.Center.global_transform * rim[k].rest_position_in_center_frame
+        compliance = stiffness_to_compliance(l.rim_particle_rest_stiffness_per_k[k])
+        apply_xpbd_spring_constraint(rim[k], rest_world, compliance, dt)
+
+    // Inter-loop coupling (if any). Per-particle XPBD soft pull
+    // between rim[l][k] and rim[l_other][k_other], pairing authored
+    // in the loop's `coupling_pairs` table. Used for outer+inner
+    // anatomical loops and for jewelry-on-anatomical configurations.
+    for each (k1, l_other, k2, compliance) in l.coupling_pairs:
+        apply_xpbd_distance_constraint(
+            rim[k1], orifice.rim_loops[l_other].rim_particles[k2],
+            authored_rest, compliance, dt)
 ```
 
-A rigid tentacle against a soft orifice: orifice stretches a lot, tentacle barely compresses. Soft tentacle against rigid orifice: tentacle flattens, orifice barely stretches. Same equation.
+A rigid tentacle against a soft orifice: orifice stretches a lot (rim particles displace far from rest, volume constraint allows the area expansion via low compliance), tentacle barely compresses. Soft tentacle against rigid orifice: tentacle flattens (asymmetry write under §3.4), orifice barely stretches (rim particle stiffness clamps displacement). Same constraint set.
 
 **Reaction force on the orifice's host bone.** Each direction transmits its compression and friction back to the deform bone the orifice's `Center` is parented to. Without this step, a knot deforms the rim visually but does not transmit hero weight into the chain — i.e., suspension is not physically realized.
 
 Let `host_bone = orifice.Center.parent_ragdoll_bone` (per §6.1 hierarchy).
 
 ```
-for each ring direction d in [0..N-1]:                       // N = orifice.ring_count, §6.1
-    dir_d          = direction_vec[d]                          // outward in Center frame
-    ring_world_pos = orifice.Center.global × (dir_d × current_radius[d])
-    p              = pressure_per_dir[d]                       // ≥ 0 from bilateral compliance
-    s_intrinsic    = EI.arc_length_at_entry + r_offset_along_axis[d]
+for each loop l, for each rim particle k in [0..N_l-1]:
+    p              = pressure_per_loop_k[l][k]                 // ≥ 0 from §4.2 type-2 projection
+    if p == 0: continue
+    contact_pos    = rim[k].position
+    dir_outward    = normalize_in_perp_plane(rim[k].position - orifice.Center.position)
+    s_intrinsic    = EI.arc_length_at_entry + r_offset_along_axis_at_k
 
     // Radial reaction: rim pushes back along its own outward axis
-    radial_force_on_host = -dir_d * p
+    radial_force_on_host = -dir_outward * p
 
-    // Axial wedge — surface-normal tilt at this ring's arc-length.
+    // Axial wedge — surface-normal tilt at this rim particle's arc-length.
     // dr/ds is taken with respect to distance traveled along +entry_axis
     // (outward) at the contact, NOT along the tentacle's intrinsic arc-length.
     // The intrinsic gradient is converted by the sign of the tangent's
@@ -754,28 +798,29 @@ for each ring direction d in [0..N-1]:                       // N = orifice.ring
     //                      suspension-holding direction — host pulled toward
     //                      anchor side, transmitting hero weight up the chain.
 
-    // Friction-tangential along the tentacle axis at this ring.
-    // tangential_friction_per_dir[d] is populated by §4.3 type-2 routing
-    // (a scalar magnitude); convert to vector by multiplying by t_hat.
-    friction_force_on_host = -t_hat * EI.tangential_friction_per_dir[d]
+    // Friction-tangential along the tentacle axis at this rim particle.
+    // tangential_friction_per_loop_k[l][k] is populated by §4.3 type-2
+    // routing (a scalar magnitude); convert to vector by multiplying by
+    // t_hat.
+    friction_force_on_host = -t_hat * EI.tangential_friction_per_loop_k[l][k]
 
     total = radial_force_on_host + axial_force_on_host + friction_force_on_host
-    host_bone.apply_impulse_at_position(total * dt, ring_world_pos)
+    host_bone.apply_impulse_at_position(total * dt, contact_pos)
 
     EI.reaction_on_ragdoll += total
 ```
 
 **Why the normalized form, and why not `tan`.** The axial component of a normal force on a surface with axial gradient is `pressure × sin(θ)` where `tan(θ) = drds_outward`. The expression `-p × drds_outward / sqrt(1 + drds_outward²)` is exactly `-p × sin(θ)` — bounded by `p` at the limit (a vertical flange, where `sin → 1` while `tan → ∞`). Earlier drafts using `tan(local_taper)` blew up at the very geometry the system most needs to handle correctly. Earlier drafts using the unnormalized linearization `-p × drds_outward` are fine for shallow slopes (≤ ~30° taper) but degrade past that.
 
-**Where force returns to the tentacle (case-by-case).** §6.3's bilateral compliance writes `target_radius_per_dir[d]` and an asymmetry delta on near particles. The asymmetry write is a **shape-parameter modification** — it alters effective radius for subsequent collision queries, but does **not** push particles. Force feedback into the chain comes from elsewhere, and the path differs by case:
+**Where force returns to the tentacle (case-by-case).** §6.3's bilateral compliance writes per-rim-particle position deltas (via the XPBD constraint set) and an asymmetry delta on near tentacle particles. The asymmetry write is a **shape-parameter modification** — it alters effective radius for subsequent collision queries, but does **not** push particles. Force feedback into the chain comes from elsewhere, and the path differs by case:
 
-- **Knot inside rim** (`drds_outward < 0` at the rim contact, knot apex on the cavity-interior side): the chain receives force via **type-2 collision projection** during PBD iterations — knot particles geometrically inside the spring-damper-driven ring radius (§6.4) are projected back outside it (§4.2 type-2 path). Tangential motion is then capped by the friction projection (§4.3). Both are real position corrections. This is the canonical suspension-holding path.
+- **Knot inside rim** (`drds_outward < 0` at the rim contact, knot apex on the cavity-interior side): the chain receives force via **type-2 collision projection** during PBD iterations — knot particles geometrically inside the rim particle loop (§6.4) are projected back outside it (§4.2 type-2 path), and the loop pushes back via its XPBD constraint set. Tangential motion is then capped by the friction projection (§4.3). Both are real position corrections. This is the canonical suspension-holding path.
 - **Smooth shaft inside rim** (`drds_outward ≈ 0`, no knot, no taper): the wedge-axial term vanishes; radial projection is small, often within hysteresis. Hold is **purely friction at the rim** along the shaft direction (§4.3). Suspension on a smooth shaft is therefore friction-limited — see §14 gotcha and the "Smooth-shaft suspension fails" test.
 - **Knot mid-thrust into cavity** (`drds_outward > 0`, leading flange wedging the rim from outside): wedge axial force on the host is INTO CAVITY — the rim is dragged inward as the knot pushes through. This is engulfment-assist, not suspension. Friction direction depends on the tentacle's instantaneous axial velocity.
 
 The reaction-on-host-bone step closes the third-law loop on the **rim side**; the tentacle side is unchanged and runs through existing collision + friction projections.
 
-**Terminology.** All per-direction quantities use `_per_dir[d]` — canonical, established in §6.2. `pressure_per_ring[r]` and similar `_per_ring[r]` aliases used in earlier drafts are retired; do not reintroduce them.
+**Terminology.** All per-rim-particle quantities use `_per_loop_k[l][k]` — canonical, established in §6.2 after the 2026-05-03 amendment. `pressure_per_dir[d]`, `pressure_per_ring[r]`, and similar earlier-draft indexing schemes are retired; do not reintroduce them.
 
 **Damage degrades grip gradually.** Effective grip strength decays via `smoothstep` against accumulated damage:
 
@@ -794,46 +839,78 @@ Sustained suspension or prolonged grip raises damage; grip slips well before the
 
 Emit one-shot `GripBroke` when `effective_grip_strength` first crosses below `0.1`. **Hysteresis:** do not re-emit until `effective_grip_strength` has recovered above `0.2` and crossed `0.1` again. Prevents flutter at the threshold.
 
-### 6.4 Spring-damper ring dynamics
+### 6.4 Rim particle dynamics
 
-Ring bones are NOT assigned directly to target radii. Each authored ring has its own spring-damper on its radial extent, and the bone is driven purely in its local frame (§6.1: Y = radial, Z = axial, X = tangent):
+> **Amended 2026-05-03** (was: "Spring-damper ring dynamics"). The
+> separate spring-damper-on-target-radius layer is gone. Rim radial
+> extent now emerges from the XPBD constraint balance described in
+> §6.3 — distance constraints around the loop + volume constraint on
+> the enclosed area + per-particle spring-back to authored rest
+> position + type-2 collision projection. Pull-out jiggle, retention,
+> and wobble fall out of the same constraint set; tuning is per-loop
+> (compliance values + global solver damping) instead of per-orifice
+> ring spring/damping.
 
-```
-for each ring r in orifice.rings:
-    target_radius[r] = <from §6.3>
-    
-    // Spring toward target
-    spring_force  = (target_radius[r] - current_radius[r]) × ring_spring_k
-    damping_force = -current_radius_velocity[r] × ring_damping
-    
-    current_radius_velocity[r] += (spring_force + damping_force) × dt
-    current_radius[r]          += current_radius_velocity[r] × dt
-    
-    // Hard clamp (runaway protection)
-    current_radius[r] = clamp(current_radius[r], r.rest_radius × 0.3, r.max_radius × 1.2)
-    if at clamp: current_radius_velocity[r] = 0
-    
-    // Optional axial drag from high friction (creates funnel deformation)
-    axial_offset = compute_axial_drag(tentacle_friction_direction, drag_coupling)
-    
-    // Drive the bone in its LOCAL frame (Y radial, Z axial, X tangent).
-    // No orifice-axis math at the callsite — the authored bone basis encodes it.
-    bone_local_translation = Vector3(
-        0,                                          // X: tangent, never driven
-        current_radius[r] - r.rest_radius,          // Y: radial delta outward
-        axial_offset                                // Z: along opening axis
-    )
-    skeleton.set_bone_pose_position(r.bone_idx, bone_local_translation)
-```
+**Per-loop tunables:**
+- `area_compliance` (`1e-9..1e-3`): how rigidly the loop preserves
+  enclosed area. Low → near-incompressible (anatomical baseline).
+  High → loop can collapse / expand freely (jewelry-thin rim).
+- `distance_compliance` (`1e-9..1e-3`): how rigidly the rim
+  circumference is preserved. Low → rim can't stretch
+  circumferentially (taut). High → rim can stretch like a rubber
+  band.
+- `rim_particle_rest_stiffness_per_k[N]`: per-particle stiffness of
+  the spring-back to authored rest position. Bilateral compliance is
+  this distribution — front-of-mouth tighter than back-of-mouth, etc.
+- `target_enclosed_area`: active-contraction modulation channel. A
+  ContractionPulse (§6.10) writes a time-varying delta here.
+- Inter-loop coupling springs (multi-loop only): per-pair compliance
+  authored in `coupling_pairs`.
 
-**This is where pull-out jiggle, retention, and wobble come from for free:**
-- Fast retraction → target drops → spring lags → ring trails outward briefly → snaps back with damped oscillation
-- Thick bulge inside → target rises when bulge approaches entry → ring resists → friction + compression produce retention
+**Where pull-out jiggle, retention, and wobble come from:**
+- Fast retraction → tentacle particle no longer pushes the rim
+  particles → distance + volume + spring-back constraints pull the
+  loop back toward its rest configuration → loop overshoots slightly
+  due to integrated momentum → damped oscillation (governed by
+  global solver damping + compliance values). Same emergent visual,
+  no separate per-target spring-damper.
+- Thick bulge inside → bulge particles push rim particles outward
+  via type-2 projection → rim resists via volume + distance + spring-
+  back → §6.3 reaction-on-host-bone transmits hold force.
 
-**Per-orifice tunables:**
-- `ring_spring_k` (100–400 typical): return speed
-- `ring_damping` (5–20 typical): wobble vs stability
-- `drag_coupling` (0 default, 0.3–0.7 for dramatic orifices): axial funnel deformation amount
+**Three Phase 5 realism sub-slices** (approved 2026-05-03, lands
+alongside the rim model implementation; see
+`Cosmic_Bliss_Update_2026-05-03_obi_realism_and_orifice.md` §4 for
+the rationale and inventory of all ten realism properties):
+
+**4P-A — Anisotropic flesh stiffness.** Rim segment distance
+constraints become **one-sided XPBD** (Obi tether pattern from
+`pbd_research/Obi/Resources/Compute/TetherConstraints.compute`):
+they resist *compression* strongly (rim can't collapse below
+authored circumference) but allow modest *stretch* under load.
+The bulk anatomical "tissue is incompressible but compliant
+under tension" behavior emerges. Bulgers (§7) handle the
+displaced volume on the compressed side. Per-loop knob to
+disable for cases where two-sided distance is preferred (e.g.
+jewelry rim).
+
+**4P-B — Strain-stiffening (J-curve).** Real anatomical tissue
+has a J-curve stiffness response: easy to deform a little, much
+harder to deform a lot (collagen strain stiffening). The
+per-particle spring-back compliance becomes strain-dependent:
+`compliance(strain) = base_compliance / (1 + alpha × strain² +
+beta × strain⁴)`. Cheap once the rim is a particle loop —
+strain is `||rim[k].position - rest_pos||`, J-curve coefficients
+are per-loop tunables.
+
+**4P-C — Orifice memory (slow rest-position recovery).** Per-
+particle rest positions lerp slowly back to neutral after
+displacement: `rest_pos = lerp(rest_pos, neutral_pos,
+recovery_rate × dt)`. ~5 LOC in the orifice tick. Required for
+"orifice remembers" in Scenarios 3 and 7 (asymmetric stretch
+persists across attempts but recovers over seconds-to-minutes).
+Per-orifice `recovery_rate`; default 0.05/s (~20s recovery time
+constant).
 
 ### 6.5 Multi-tentacle support
 
@@ -870,7 +947,7 @@ grip_engagement_rate_effective = base_rate * (1.0 + knot_factor)
 
 **Source of the gradient.** Bake `d(girth)/ds` as a second channel of the girth texture (§5.4) at mesh import / procedural-generation time. The same texture sample serves both §6.3 (axial wedge) and §6.5 (knot factor). Avoids per-tick finite-differencing.
 
-**No `accept_penetration` flag, no `min_approach_angle_cos` gate.** Per §1: if soft physics can't refuse, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. Glancing-approach rejection waits for a connected curved-surface representation of the rim in type-2 collision (currently rings are 8 discrete radial bones; once they form a real surface, glancing approaches slide off naturally — see §14).
+**No `accept_penetration` flag, no `min_approach_angle_cos` gate.** Per §1: if soft physics can't refuse, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. Glancing-approach rejection emerges naturally from the rim particle loop (§6.1, 2026-05-03 amendment) — the loop *is* a connected curved surface in type-2 collision, so glancing tentacles slide off it.
 
 ### 6.6 Jaw special case
 
@@ -973,14 +1050,14 @@ girth(t, time) = rest_girth(t) × (1 + amp × sin((t − speed × time) × 2π �
 
 Beads in the low-girth phase of the wave experience asymmetric ring pressure producing a net axial force along the tunnel gradient — the same wedge mechanic as orifice-rim compression, applied tunnel-to-bead. Reverie can drive expulsion (amplitude high, speed positive along exit direction) or retention (amplitude low, or speed reversed to pull beads inward).
 
-**Mechanical scope.** Peristalsis is implemented as a time-varying contribution to `target_radius_per_dir[d]` — the same channel bilateral compliance writes. Concretely, for each ring direction at every active tunnel ring along the orifice's tunnel:
+**Mechanical scope.** Peristalsis is implemented as a time-varying contribution to per-loop `target_enclosed_area` (and, optionally, per-particle rest-position deltas for asymmetric peristaltic shapes) — the same channels bilateral compliance writes. Concretely, for each rim particle at every active tunnel loop along the orifice's tunnel:
 
 ```
 wave_phase = (arc_length_at_ring × peristalsis_wavelength
             - peristalsis_wave_speed × t) × 2π
 peristalsis_target_radius =
     rest_radius * (1.0 - peristalsis_amplitude * sin(wave_phase))
-target_radius_per_dir[d] = max(target_radius_per_dir[d], peristalsis_target_radius)
+target_enclosed_area_per_loop[l] = max(target_enclosed_area_per_loop[l], peristalsis_target_area)
 ```
 
 (Or, depending on whether peristalsis is constrictive or dilatory at the trough, blend or `min`/`max` per the authored intent.)
@@ -1235,7 +1312,7 @@ Internal cavity walls are surfaces of the same continuous hero mesh as skin (see
 
 Both fall out of one uniform loop. Falloff radius gates reach — a bulger with 6 cm falloff cannot deform organs 20 cm away through the torso, and this is the only gating mechanism needed in v1. No body-region layer masks.
 
-Cavity meshes do not get ring bones of their own. Ring bones at each orifice rim rig shared rim vertices (see §6.1); the rim is a single edge loop of the continuous mesh, and ring-bone motion deforms the rim visible from both sides.
+Cavity meshes do not get rim anchors of their own. Rim anchors at each orifice rim rig shared rim vertices (see §6.1); the rim is a single edge loop of the continuous mesh, and rim particle motion (per §6.4) deforms the rim visible from both sides.
 
 ---
 
@@ -1250,7 +1327,7 @@ Two data types, cleanly separated:
 enum StimulusEventType {
     PenetrationStart, PenetrationEnd,
     BulbPop, StickSlipBreak, GripEngaged, GripBroke,
-    RingOverstretched, HardStopBottomedOut, FluidSeparation,
+    RingOverstretched, HardStopBottomedOut, FluidSeparation, WetSeparation,
     Impact, TangentialSlap, SkinPressure,
     OrificeDamaged, TentacleTangled,
     EnvironmentalFlash, LoudSound, TemperatureDrop,  // external
@@ -1472,7 +1549,63 @@ Each tentacle and orifice has a `MechanicalSoundEmitter` component subscribing t
 
 Spatialized as `AudioStreamPlayer3D`. Priority-capped to prevent mixer saturation (impacts high, squelch capped at 2 concurrent per hero).
 
-Fluid strands: when a tentacle withdraws past the entry plane, spawn a `FluidStrand` (4–6 point spline between retreating tip and orifice center). Stretches with separation, breaks at threshold, snaps into two droplets. GPU-drawn triangle strip, ~50 lines of code.
+### Fluid system (slime / drool / wetness)
+
+> **Amended 2026-05-03** (was: a single paragraph on FluidStrand). Promoted
+> to a five-behavior subsystem per
+> `Cosmic_Bliss_Update_2026-05-03_obi_realism_and_orifice.md` §3 (approved
+> 2026-05-03). All five behaviors reuse existing TentacleTech PBD + the
+> `docs/Appearance.md` decal accumulator + the stimulus bus. ~200 LOC
+> GDScript total, no new C++. Phase 6 scope (lands alongside the bus).
+
+The fluid system covers visual cohesion of wetness without simulating SPH.
+Five behaviors:
+
+**1. Strand.** When a tentacle withdraws past the orifice entry plane (or
+separates from any wet surface above a wetness threshold), spawn a
+`FluidStrand` — a 4-6 particle PBD chain anchored at the retreating tip
+and the separation point on the surface. Driven by the existing
+TentacleTech PBD solver with distance constraints + breaking threshold:
+when any segment exceeds 4× rest length the constraint detaches; the two
+resulting halves continue under gravity for ~0.5s before fading.
+Render as GPU triangle strip with girth taper. ~50 LOC `fluid_strand.gd`.
+
+**2. Drip.** When a strand particle's velocity falls below threshold AND
+it's within `epsilon` of a downward-facing surface, convert the particle
+to a drip mark — spawn one decal at the contact point and remove the
+particle from the simulation. Decals accumulate via the
+`docs/Appearance.md` decal accumulator. Each drip = one entry in the
+surface accumulator with configurable lifetime (default 30s fade).
+
+**3. Smear.** When a tentacle particle is in surface contact AND tangent
+velocity exceeds `smear_threshold`, lay down a moisture decal at the
+contact point. Decals overlap to build up a trail. Bidirectional
+wetness coupling: high `wetness_per_surface_region` modulates μ_s
+(lower static friction on wet surfaces); dragging a dry tentacle across
+a wet surface raises tentacle wetness (transfer in both directions).
+Couples to §4.4 friction modulator stack via a new `surface_wetness`
+modulator.
+
+**4. Pool.** Surface decals on horizontal-ish faces (`abs(normal.y) >
+0.7`) accumulate into pools. Implemented as a per-region density
+counter: `pool_density[region] += smear_or_drip_event * dt;
+pool_density *= evaporation_rate`. Density crossings swap between
+"damp" / "wet" / "puddle" decal art. Default fade-to-dry over 60s.
+Lives in `WetnessAccumulator` GDScript class.
+
+**5. Peel-sting.** When a tentacle particle separates from a surface
+AND `surface_wetness` is above threshold AND separation velocity is
+above threshold, emit a `WetSeparation` event on the bus. Audio system
+plays a peel/sting sound (squelch, tch, suction-release) via the
+existing `MechanicalSoundEmitter`. Visual system spawns a brief
+micro-strand (1-2 PBD particles) at the separation point that snaps
+within 100ms. The audio + brief strand together read as adhesion-then-
+release.
+
+The wetness propagation in §4.6 is the source of `wetness_per_surface_region`
+and `wetness_per_orifice` — no change to that math; the fluid system reads
+those channels and drives decals + audio + strand spawn. Modulation of
+friction by wetness (smear → friction modulator) is added to §4.4.
 
 ---
 
@@ -1705,14 +1838,14 @@ Material assignment uses per-surface splits:
 
 Material boundaries are set at the rim edge loop or just inside it; the boundary doesn't have to align with the topological rim geometrically.
 
-**Blender pipeline.** Orifice ring bones and their skin weights are now authored in Blender (see §10.6 for the full pipeline and tooling). Summary:
+**Blender pipeline.** Orifice rim anchors and their skin weights are now authored in Blender (see §10.6 for the full pipeline and tooling). Summary:
 
 1. Model hero mesh with standard humanoid skeleton (Auto-Rig Pro base; see §10.6).
 2. Model cavities as invaginations of the same mesh — extrude inward at each orifice to form tunnel volumes terminating at closed ends or connecting to other orifices.
 3. Assign skin material to exterior faces, mucosa materials to cavity faces. Material boundaries near the rim are fine either inside or on the edge loop.
 4. Do NOT flip cavity normals. Normals should be outward-from-the-surface everywhere. Use "recalculate outside" with the mesh as a single closed topology.
 5. For each orifice, run the Blender authoring script (§10.6) on the selected rim edge loop. It places `<Prefix>_Center` (use_deform = False, parented to the appropriate host deform bone — pelvis/hip for pelvic orifices, jaw for oral) and N `<Prefix>_Ring_i` deform bones at arc-length-regular intervals along the loop, with the consistent local frame (Y radial, Z axial, X tangent) per §6.1. N is a parameter of the script (default 8).
-6. Paint rim and near-rim weights to the ring bones — also handled by the Blender authoring script (angular-bracket interpolation between nearest rings, radial falloff outward; innermost rim loop = full ring weight, no body bone).
+6. Paint rim and near-rim weights to the rim anchors — also handled by the Blender authoring script (angular-bracket interpolation between nearest anchors, radial falloff outward; innermost rim loop = full anchor weight, no body bone).
 7. Optional: place empty objects as `TunnelMarker`s along internal paths if auto-derived centerlines need correction.
 8. Export GLB with skeleton, the authored orifice bones, tunnel markers, and all material surfaces preserved. ARP export settings: Standard naming, toe breakdown on, "Rename bones for Godot" **off** (matches `docs/marionette/arp_mapping.md`).
 
@@ -1729,7 +1862,7 @@ Steps 3–5 are the only parts that derive new data; 1–2 just cache authored v
 > **Reimport reminder.** Subresource assignments on the `OrificeProfile` live in memory only until Reimport is clicked. If the AutoBaker runs, remember to Reimport the scene so the populated ring table and tunnel data persist to disk.
 
 **Manual override hooks** (for weird topology — non-manifold cavities, branching tunnels, cases where the authored bones are wrong or missing and you want to patch without re-exporting):
-- `OrificeProfile.manual_ring_bones: Array[NodePath]` — short-circuits step 1–2; supplies ring bones (and authored angles are still read from their rest offsets).
+- `OrificeProfile.manual_rim_anchors: Array[NodePath]` — short-circuits step 1–2; supplies rim anchors (and authored offsets are still read from their rest positions).
 - `OrificeProfile.manual_tunnel_spline: Resource` — short-circuits step 3 centerline derivation.
 - `OrificeProfile.manual_suppressed_bones: Array[String]` — short-circuits step 5 auto-suppression.
 
@@ -1772,7 +1905,7 @@ The hero asset is assembled in Blender across three rigging systems that each ow
 2. Walks the rim loop at arc-length-regular intervals, placing N `<Prefix>_Ring_i` deform bones (default N = 8; override per orifice). Placement is along the loop geometry itself — no assumption of circularity.
 3. Aligns each ring's local frame to the §6.1 convention: Y radial outward, Z along the opening axis (Center's authored +Z), X tangent along the rim.
 4. Paints rim + near-rim vertex weights: innermost loop = 100% ring weight, angular interpolation between the two bracketing rings, radial falloff outward to the host deform bone.
-5. Validates: no `*_twist` / `*_leaf` bones under Center, Center is non-deforming, ring bones are contiguous from 0 to N−1.
+5. Validates: no `*_twist` / `*_leaf` bones under Center, Center is non-deforming, rim anchors are contiguous from 0 to N−1.
 
 The script is canonical tooling for hero authoring — it will be pluginified (Blender addon) and committed under `tools/blender/` alongside its ARP/FaceIt integration notes. Until then, treat any ad-hoc ring placement as disposable; re-run the script rather than hand-editing.
 
@@ -2062,7 +2195,7 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 - **Suspension tentacles must be anchored to environment geometry, not to another character's ragdoll bone.** Hero gravity transmitted through a single Marionette joint (typically the lumbar) exceeds the active-ragdoll torque budget and produces visible jitter or collapse. Anchor to ceiling / wall / static level mesh. Unrelated to the tentacle chain itself, which transmits force fine through PBD distance + anchor constraints.
 - **Suspension requires a girth differential, not just compression.** A smooth shaft compressed past the rim transmits no radial reaction force into the chain — the rim is kinematic, contact projection only fires when a particle is geometrically inside the deformed rim. Suspensions must use a tentacle with a knot, bulb, ridge, or other girth differential straddling the rim. Author scenarios accordingly.
 - **No `accept_penetration`-style hard refusal levers exist.** If a scenario seems to need one, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. See §1.
-- **Glancing-approach rejection is not modeled.** Currently rings are 8 discrete radial bones; a glancing tentacle slides along whatever rim geometry that produces. A future revision that builds a connected ring-cylinder surface for type-2 collision will let glancing approaches slide off naturally; until then, accept and absorb glancing approaches via the soft-physics path.
+- **Glancing-approach rejection** is now modeled (resolved 2026-05-03 by the rim particle loop amendment in §6.1). The rim is a connected closed loop of N PBD particles; type-2 collision treats it as a real curved surface; glancing tentacles slide off it via the standard soft-physics friction path. The 8-discrete-radial-bone limitation that motivated this gotcha is gone.
 
 **What not to do:**
 - Don't use `MeshDataTool` in hot paths
@@ -2095,7 +2228,7 @@ Each phase that lands physics state also lands the snapshot accessors that gizmo
 | 2 — PBD core | `Tentacle.get_particle_positions()` → `PackedVector3Array`<br>`Tentacle.get_particle_inv_masses()` → `PackedFloat32Array`<br>`Tentacle.get_segment_stretch_ratios()` → `PackedFloat32Array`<br>`Tentacle.get_target_pull_state()` → `Dictionary { active, target, particle_index, force_dir }`<br>`Tentacle.get_anchor_state()` → `Dictionary { particle_index, world_xform }` |
 | 3 — Mesh | `CatmullSpline` is already a public class; overlay calls `evaluate_position` and `evaluate_frame` at sample t∈[0,1] |
 | 4 — Collision | `Tentacle.get_contact_snapshot()` → `Array[Dictionary]` per particle in contact: `{ point, normal, penetration_depth, friction_state ∈ STICK/SLIP/FREE, friction_displacement, surface_id }`<br>`Hero.get_ragdoll_capsules()` → `Array[Dictionary]` for wireframe rendering |
-| 5 — Orifice | `Orifice.get_ring_state()` → `Array[Dictionary]` per ring bone: `{ rest_radius, current_radius, spring_extension, pressure }`<br>`EntryInteraction.get_state()` → `Dictionary { tentacle_id, depth, ring_pressures, bilateral_phase }` |
+| 5 — Orifice | `Orifice.get_rim_loop_state(loop_index)` → `Array[Dictionary]` per rim particle: `{ rest_position, current_position, current_velocity, pressure, spring_lambda }`<br>`Orifice.get_rim_loop_count()` → `int`<br>`EntryInteraction.get_state()` → `Dictionary { tentacle_id, depth, rim_pressures_per_loop, bilateral_phase }` |
 | 6 — Stimulus bus | `StimulusBus.get_recent_events(time_window)` → `Array[StimulusEvent]` (already public for Reverie) — overlay draws timed-fade `Label3D` at event position |
 | 7 / 7.5 — Bulgers | `BulgerSystem.get_active_bulgers()` → `Array[Dictionary]` per bulger: `{ capsule_a, capsule_b, radius, squish, priority_tier, source_kind }` |
 
@@ -2140,7 +2273,7 @@ Two things to keep straight:
 | Phase | Editor gizmo for |
 |---|---|
 | 3 | `Tentacle` — particles + constraint segments + spline polyline + TBN frame at samples |
-| 5 | `Orifice` — ring bones, bilateral compliance state |
+| 5 | `Orifice` — rim particle loops (multi-loop), bilateral compliance state |
 | 7 / 7.5 | Bulger emitters at authoring time (cavity capsules in rest pose) |
 
 **Implementation rules:**
