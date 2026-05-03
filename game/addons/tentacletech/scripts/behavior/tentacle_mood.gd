@@ -100,6 +100,23 @@ extends Resource
 ## (~0.7) for a settled feel, probing wants lower (~0.3) for snappy
 ## response. Forwarded to [code]Tentacle.contact_velocity_damping[/code].
 @export_range(0.0, 1.0) var contact_velocity_damping: float = 0.5
+## Slice 4P sleep threshold (m/s). In-contact particles whose tick-rate
+## velocity falls below this are snapped back to prev_position at the end
+## of finalize, killing residual jitter from un-converged constraints.
+## 0 = disabled (legitimate slow drift survives — best for active /
+## probing moods that should never look "stuck"). ~0.005 m/s is a good
+## value for caressing / idle moods that hang at rest. Forwarded to
+## [code]Tentacle.sleep_threshold[/code].
+@export_range(0.0, 1.0, 0.0001) var sleep_threshold: float = 0.0
+## Slice 4O sub-step floor. Outer physics tick runs at least this many
+## substeps. Default 1 (no sub-stepping). Bump to 2-4 for thrust-heavy
+## moods so fast tip motion can't tunnel through colliders in one frame.
+## A displacement-driven heuristic in Tentacle::tick can also auto-bump
+## the count when a singleton tip target would drag a particle past
+## [code]0.5 × collision_radius[/code], so this floor is the minimum;
+## actual count may be higher per-tick. Hard-capped at 4. Forwarded to
+## [code]Tentacle.substep_count[/code].
+@export_range(1, 4) var substep_count: int = 1
 
 # --- Attractor -------------------------------------------------------------
 

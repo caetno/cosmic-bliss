@@ -158,6 +158,30 @@ public:
 	// but at greater visual snap.
 	void set_max_depenetration(float p_value);
 	float get_max_depenetration() const;
+	// Slice 4P — sleep threshold (m/s). In-contact particles whose tick-rate
+	// velocity falls below this threshold are snapped back to prev_position
+	// at end of finalize(), killing residual jitter from un-converged
+	// constraints. Default 0 = disabled. Recommended ~0.005 m/s for moods
+	// that hang at rest; "active" moods leave it at 0 so legitimate slow
+	// drift survives. Forwarded to the solver.
+	void set_sleep_threshold(float p_value);
+	float get_sleep_threshold() const;
+	// Slice 4O — sub-step count floor. Every outer physics tick runs at
+	// least this many substeps; on top, a displacement-driven heuristic
+	// can bump the count higher when a singleton tip target would otherwise
+	// drag a particle further than `0.5 × collision_radius` in one step
+	// (the canonical "thrust frame tunneling" failure mode). Default 1
+	// for backward compatibility with shipping moods; thrust-heavy moods
+	// should set 2-4. Hard-capped at MAX_SUBSTEPS (4) to bound the cost.
+	void set_substep_count(int p_count);
+	int get_substep_count() const;
+	// Read back the most recent outer tick's resolved sub-step count
+	// (after both the floor and the displacement heuristic have been
+	// applied). Useful for the gizmo overlay (color particles by sub-step
+	// count to find scenes paying for sub-stepping unnecessarily) and for
+	// the test suite to validate the heuristic actually fires.
+	int get_last_substep_count() const;
+	static constexpr int MAX_SUBSTEPS = 4;
 	// Slice 4I — implicit-velocity damping for in-contact particles. 0.5
 	// (default) halves the per-tick implicit velocity for any particle
 	// flagged in_contact_this_tick at end-of-tick, which kills tick-rate
@@ -373,9 +397,12 @@ private:
 	float target_softness_when_blocked = 0.3f;
 	float sor_factor = PBDSolver::DEFAULT_SOR_FACTOR;
 	float max_depenetration = PBDSolver::DEFAULT_MAX_DEPENETRATION;
+	float sleep_threshold = 0.0f;
 	float contact_velocity_damping = 0.5f;
 	bool support_in_contact = true;
 	float body_impulse_scale = 1.0f;
+	int substep_count = 1;
+	int last_substep_count = 1;
 	godot::PackedVector3Array env_position_scratch;
 	godot::PackedFloat32Array env_girth_scratch;
 	// Slice 4M: per-slot scratch buffers handed to PBDSolver. The point and

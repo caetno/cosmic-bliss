@@ -596,6 +596,29 @@ void PBDSolver::finalize(float p_dt) {
 			p.prev_position = p.prev_position.lerp(p.position, t);
 		}
 	}
+
+	// Slice 4P — sleep threshold. In-contact particles whose tick-rate
+	// velocity falls below `sleep_threshold` (m/s) have their position
+	// snapped to prev_position, killing residual implicit velocity from
+	// un-converged constraints. Default 0 = disabled. Pattern from
+	// `pbd_research/Obi/Resources/Compute/Solver.compute:204-217`. Free
+	// (out-of-contact) particles never sleep so a tentacle hanging in air
+	// keeps integrating gravity normally; only settled-against-surface
+	// particles get clamped. The check uses `(Δx)² ≤ (threshold·dt)²` so
+	// the comparison is a single multiply per particle.
+	if (sleep_threshold > 0.0f) {
+		float thr_dx = sleep_threshold * p_dt;
+		float thr_dx2 = thr_dx * thr_dx;
+		for (int i = 0; i < n; i++) {
+			TentacleParticle &p = particles[i];
+			if (!p.in_contact_this_tick) continue;
+			if (p.inv_mass <= 0.0f) continue;
+			Vector3 v = p.position - p.prev_position;
+			if (v.length_squared() <= thr_dx2) {
+				p.position = p.prev_position;
+			}
+		}
+	}
 }
 
 // -- Configuration ----------------------------------------------------------
@@ -933,7 +956,6 @@ void PBDSolver::set_environment_contacts_multi(
 	Vector3 *dst_p = env_contact_points.ptrw();
 	Vector3 *dst_n = env_contact_normals.ptrw();
 	uint8_t *dst_c = env_contact_count.ptrw();
-	Vector3 *dst_f = env_contact_friction_applied.ptrw();
 	for (int i = 0; i < n; i++) {
 		dst_c[i] = src_c[i];
 		int base = i * MAX_CONTACTS;
@@ -951,10 +973,17 @@ void PBDSolver::set_environment_contacts_multi(
 				nrm = Vector3();
 			}
 			dst_n[base + k] = nrm;
-			dst_f[base + k] = Vector3(); // friction accumulator zeroed each tick.
-			// Slice 4M — per-contact lambdas reset per tick (per substep
-			// once 4O lands). Persisting across iters within a tick is
-			// what makes friction cones bounded by accumulated normal
+			// Slice 4O — `friction_applied` is NOT zeroed here anymore.
+			// Tentacle::tick() calls reset_friction_applied() once at the
+			// start of an outer physics tick; the substep loop accumulates
+			// across substeps; the reciprocal pass reads the sum at end of
+			// frame. For substep_count = 1 the semantics match the previous
+			// "reset-per-set_environment_contacts_multi" form exactly.
+			//
+			// Slice 4M — per-contact normal/tangent lambdas DO reset every
+			// time fresh probe data lands (per tick today, per substep with
+			// 4O). Persisting across iters within a substep is what makes
+			// friction cones bounded by that substep's accumulated normal
 			// impulse instead of per-iter dn.
 			env_contact_normal_lambda[base + k] = 0.0f;
 			env_contact_tangent_lambda[base + k] = Vector3();
@@ -972,6 +1001,18 @@ void PBDSolver::clear_environment_contacts() {
 	}
 	for (size_t i = 0; i < env_contact_tangent_lambda.size(); i++) {
 		env_contact_tangent_lambda[i] = Vector3();
+	}
+}
+
+void PBDSolver::reset_friction_applied() {
+	// Slice 4O — zero the per-slot friction accumulator at the start of an
+	// outer physics tick. Substeps then accumulate into it; one reciprocal
+	// impulse per body is applied at end of frame from the sum.
+	int n = env_contact_friction_applied.size();
+	if (n == 0) return;
+	Vector3 *dst = env_contact_friction_applied.ptrw();
+	for (int i = 0; i < n; i++) {
+		dst[i] = Vector3();
 	}
 }
 
@@ -1035,6 +1076,12 @@ void PBDSolver::set_max_depenetration(float p_v) {
 	max_depenetration = p_v;
 }
 float PBDSolver::get_max_depenetration() const { return max_depenetration; }
+
+void PBDSolver::set_sleep_threshold(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	sleep_threshold = p_v;
+}
+float PBDSolver::get_sleep_threshold() const { return sleep_threshold; }
 
 void PBDSolver::set_contact_velocity_damping(float p_v) {
 	if (p_v < 0.0f) p_v = 0.0f;
@@ -1159,6 +1206,12 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_max_depenetration);
 	ClassDB::bind_method(D_METHOD("get_max_depenetration"),
 			&PBDSolver::get_max_depenetration);
+	ClassDB::bind_method(D_METHOD("set_sleep_threshold", "value"),
+			&PBDSolver::set_sleep_threshold);
+	ClassDB::bind_method(D_METHOD("get_sleep_threshold"),
+			&PBDSolver::get_sleep_threshold);
+	ClassDB::bind_method(D_METHOD("reset_friction_applied"),
+			&PBDSolver::reset_friction_applied);
 	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "damping"),
 			&PBDSolver::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),

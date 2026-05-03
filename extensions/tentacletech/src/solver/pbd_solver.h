@@ -251,6 +251,18 @@ public:
 	void set_max_depenetration(float p_v);
 	float get_max_depenetration() const;
 
+	// Slice 4P — sleep threshold (m/s). Particles whose tick-rate velocity
+	// (||position − prev_position|| / dt) falls below this threshold AND that
+	// are flagged in_contact_this_tick get their position snapped back to
+	// prev_position at the end of finalize(), zeroing the residual implicit
+	// velocity. Pattern from `pbd_research/Obi/Resources/Compute/Solver.compute`
+	// :204-217. Default 0.0 = disabled (preserves shipping behavior). ~0.005
+	// m/s is a sensible value for tentacles that hang at rest; "active" moods
+	// should leave it at 0 so legitimate slow drift isn't snapped away. Only
+	// in-contact particles are affected — free-falling tentacles never sleep.
+	void set_sleep_threshold(float p_v);
+	float get_sleep_threshold() const;
+
 	// Slice 4I — contact velocity damping. Lerp factor (0..1) applied at
 	// end of finalize() to bleed implicit per-tick velocity from particles
 	// flagged in_contact_this_tick. Addresses tick-rate jitter caused by
@@ -286,6 +298,15 @@ public:
 	// so tests can validate the reset is wired (steady chain settles to
 	// bounded lambda magnitudes; a missing reset would diverge).
 	godot::PackedFloat32Array get_distance_lambdas_snapshot() const;
+
+	// Slice 4O — friction reciprocal accumulator. Tentacle::tick() calls this
+	// once at the start of an outer physics tick; the substep loop then
+	// accumulates `friction_applied` across substeps (set_environment_contacts_
+	// multi no longer clobbers it between substeps). After the last substep,
+	// `_apply_collision_reciprocals` reads the summed value and applies one
+	// impulse per contact per body. Equivalent to the no-substep case for
+	// substep_count = 1 (one reset, one accumulate, one read).
+	void reset_friction_applied();
 
 protected:
 	static void _bind_methods();
@@ -367,6 +388,7 @@ private:
 	bool support_in_contact = true;
 	float sor_factor = DEFAULT_SOR_FACTOR;
 	float max_depenetration = DEFAULT_MAX_DEPENETRATION;
+	float sleep_threshold = 0.0f;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior

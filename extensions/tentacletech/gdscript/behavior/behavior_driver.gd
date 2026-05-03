@@ -595,6 +595,12 @@ func _apply_mood() -> void:
 		# the singleton tip target and the distributed pose-targets honour
 		# the same softening factor.
 		_tentacle.target_softness_when_blocked = mood.pose_softness_when_blocked
+		# Slice 4O / 4P — sub-step floor and sleep threshold. Both default to
+		# inert values (substep_count=1, sleep_threshold=0) so existing moods
+		# behave exactly as before; thrust-heavy moods opt in to substep_count
+		# 2-4, settled / hanging moods opt in to a small sleep_threshold.
+		_tentacle.substep_count = mood.substep_count
+		_tentacle.sleep_threshold = mood.sleep_threshold
 
 
 # Pulled out of `_ready` and exposed via the property setters so

@@ -40,6 +40,7 @@ Tentacle::Tentacle() {
 	solver->set_target_softness_when_blocked(target_softness_when_blocked);
 	solver->set_sor_factor(sor_factor);
 	solver->set_max_depenetration(max_depenetration);
+	solver->set_sleep_threshold(sleep_threshold);
 	solver->set_contact_velocity_damping(contact_velocity_damping);
 	solver->set_support_in_contact(support_in_contact);
 	render_spline.instantiate();
@@ -93,11 +94,68 @@ void Tentacle::tick(float p_delta) {
 	if (p_delta > 1.0f / 40.0f) {
 		p_delta = 1.0f / 40.0f;
 	}
+
+	// Anchor refresh runs once per outer tick — global_transform doesn't
+	// change within a physics frame, so calling set_anchor inside the
+	// substep loop would be pure waste. Pinned particles keep prev=position
+	// each predict() call, so velocity stays zero across substeps.
 	if (!anchor_override) {
 		solver->set_anchor(0, get_global_transform());
 	}
-	_run_environment_probe();
-	solver->tick(p_delta);
+
+	// Slice 4O — sub-step count: max(user floor, displacement heuristic),
+	// capped at MAX_SUBSTEPS. The displacement heuristic predicts the
+	// worst-case per-tick particle displacement (gravity × dt² + singleton
+	// target snap) and bumps the substep count when a single tick would
+	// otherwise move a particle further than `0.5 × collision_radius` —
+	// the canonical thrust-frame tunneling threshold. Pose-target driven
+	// thrust is NOT in the heuristic by spec design (would be conservative
+	// to add but would also bump substep count for every behavior frame);
+	// thrust-heavy moods set the floor manually instead.
+	float radius = solver->get_collision_radius();
+	float gravity_disp = solver->get_gravity().length() * p_delta * p_delta;
+	float max_disp = gravity_disp;
+	if (solver->has_target()) {
+		int ti = solver->get_target_particle_index();
+		int n_particles = solver->get_particle_count();
+		if (ti >= 0 && ti < n_particles) {
+			Vector3 from = solver->get_particle_position(ti);
+			float d = (solver->get_target_position() - from).length();
+			float target_disp = d * solver->get_target_stiffness();
+			if (target_disp > max_disp) max_disp = target_disp;
+		}
+	}
+	int sub_steps = substep_count;
+	if (sub_steps < 1) sub_steps = 1;
+	if (radius > 1e-5f && max_disp > 0.5f * radius) {
+		int auto_steps = (int)Math::ceil(max_disp / (0.5f * radius));
+		if (auto_steps > sub_steps) sub_steps = auto_steps;
+	}
+	if (sub_steps > MAX_SUBSTEPS) sub_steps = MAX_SUBSTEPS;
+	last_substep_count = sub_steps;
+
+	// Slice 4O — friction reciprocal accumulator: reset once at outer tick
+	// start, then the substep loop accumulates across substeps. The
+	// reciprocal pass after the loop reads the summed value and applies one
+	// impulse per body per outer tick. set_environment_contacts_multi no
+	// longer clobbers friction_applied between substeps (slice 4O change).
+	// Spec divergence: when a chain particle's contact body changes between
+	// substeps (rare — substep motion is sub-radius), the accumulated friction
+	// gets routed to the LAST substep's body. For stable manifolds (the
+	// common case) this matches the single-step result exactly.
+	solver->reset_friction_applied();
+
+	float sub_dt = p_delta / (float)sub_steps;
+	for (int s = 0; s < sub_steps; s++) {
+		_run_environment_probe();
+		solver->tick(sub_dt);
+	}
+
+	// Reciprocal impulse (§4.3 type-1) uses the OUTER tick dt — `m × Δx / dt`
+	// is "impulse per frame the user sees." Per-substep friction_applied
+	// values accumulated above sum to the full-frame Δx the no-substep case
+	// would have produced, so dividing by p_delta yields the correct
+	// per-frame impulse magnitude regardless of sub_steps.
 	_apply_collision_reciprocals(p_delta);
 	_update_spline_data_texture();
 }
@@ -639,6 +697,24 @@ void Tentacle::set_max_depenetration(float p_v) {
 	}
 }
 float Tentacle::get_max_depenetration() const { return max_depenetration; }
+
+void Tentacle::set_sleep_threshold(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	sleep_threshold = p_v;
+	if (solver.is_valid()) {
+		solver->set_sleep_threshold(p_v);
+	}
+}
+float Tentacle::get_sleep_threshold() const { return sleep_threshold; }
+
+void Tentacle::set_substep_count(int p_count) {
+	if (p_count < 1) p_count = 1;
+	if (p_count > MAX_SUBSTEPS) p_count = MAX_SUBSTEPS;
+	substep_count = p_count;
+}
+int Tentacle::get_substep_count() const { return substep_count; }
+
+int Tentacle::get_last_substep_count() const { return last_substep_count; }
 
 void Tentacle::set_contact_velocity_damping(float p_v) {
 	if (p_v < 0.0f) p_v = 0.0f;
@@ -1285,6 +1361,16 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_max_depenetration);
 	ClassDB::bind_method(D_METHOD("get_max_depenetration"),
 			&Tentacle::get_max_depenetration);
+	ClassDB::bind_method(D_METHOD("set_sleep_threshold", "value"),
+			&Tentacle::set_sleep_threshold);
+	ClassDB::bind_method(D_METHOD("get_sleep_threshold"),
+			&Tentacle::get_sleep_threshold);
+	ClassDB::bind_method(D_METHOD("set_substep_count", "count"),
+			&Tentacle::set_substep_count);
+	ClassDB::bind_method(D_METHOD("get_substep_count"),
+			&Tentacle::get_substep_count);
+	ClassDB::bind_method(D_METHOD("get_last_substep_count"),
+			&Tentacle::get_last_substep_count);
 	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "value"),
 			&Tentacle::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
@@ -1393,6 +1479,12 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_depenetration",
 					 PROPERTY_HINT_RANGE, "0.0,10.0,0.05"),
 			"set_max_depenetration", "get_max_depenetration");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sleep_threshold",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.0001"),
+			"set_sleep_threshold", "get_sleep_threshold");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "substep_count",
+					 PROPERTY_HINT_RANGE, "1,4,1"),
+			"set_substep_count", "get_substep_count");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_velocity_damping",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_contact_velocity_damping", "get_contact_velocity_damping");
