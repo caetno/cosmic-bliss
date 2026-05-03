@@ -17,16 +17,23 @@ extends RefCounted
 
 const _ZERO: Vector2 = Vector2.ZERO
 
-# Ball: shoulder. Generous flex, near-full rotation, near-full abduction.
-const _SHOULDER_FLEX: Vector2 = Vector2(0.0, 150.0)
+# Ball: shoulder. Canonical anatomical neutral = arms at sides; ROM is
+# measured from there. Flex = forward elevation (full overhead); negative =
+# extension behind the body. Abd = lateral elevation to overhead; negative =
+# adduction across midline (limited by torso). `_compute_rest_offset` shifts
+# these by ~+90° on Z for T-pose rigs so the joint-local limits land in the
+# correct rest-relative range.
+const _SHOULDER_FLEX: Vector2 = Vector2(-50.0, 180.0)
 const _SHOULDER_ROT: Vector2 = Vector2(-75.0, 75.0)
-const _SHOULDER_ABD: Vector2 = Vector2(0.0, 150.0)
+const _SHOULDER_ABD: Vector2 = Vector2(-50.0, 180.0)
 
 # Ball: hip. Less flex (no over-the-shoulder gesture), modest rotation,
-# narrow abduction.
-const _HIP_FLEX: Vector2 = Vector2(-15.0, 100.0)
+# adduction allows leg to cross midline ~25° before colliding with the
+# opposite leg. T-pose hip ≈ canonical (leg straight down) so rest_offset
+# stays near zero on these.
+const _HIP_FLEX: Vector2 = Vector2(-30.0, 120.0)
 const _HIP_ROT: Vector2 = Vector2(-45.0, 45.0)
-const _HIP_ABD: Vector2 = Vector2(0.0, 40.0)
+const _HIP_ABD: Vector2 = Vector2(-25.0, 45.0)
 
 # Hinge: elbow / knee. Flexion only; the small carrying-angle abduction is
 # folded into the resting joint_rotation, not into ROM.

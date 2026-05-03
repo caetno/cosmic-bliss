@@ -22,6 +22,8 @@ enabled=PackedStringArray("res://addons/marionette/plugin.cfg", "res://addons/te
 [physics]
 
 3d/physics_engine="Jolt Physics"
+jolt_physics_3d/limits/max_linear_velocity=10.0
+jolt_physics_3d/limits/max_angular_velocity=4.71238898038469
 
 [rendering]
 

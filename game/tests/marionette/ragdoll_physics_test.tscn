@@ -2,6 +2,11 @@
 
 [ext_resource type="PackedScene" uid="uid://ciceqo5588ffo" path="res://tests/marionette/kasumi/kasumi.tscn" id="1_kasumi"]
 [ext_resource type="Script" uid="uid://b8xfihw5b5ip5" path="res://tests/marionette/ragdoll_physics_test.gd" id="2_test"]
+[ext_resource type="PackedScene" uid="uid://hff1bdxe6arh" path="res://tests/tentacletech/scenes/test_tentacle_behaviour.tscn" id="3_i1d12"]
+[ext_resource type="Script" uid="uid://b4efdj0crogwg" path="res://addons/tentacletech/scripts/procedural/tentacle_feature.gd" id="4_1bsgq"]
+[ext_resource type="Script" uid="uid://exy0ckniefb4" path="res://addons/tentacletech/scripts/procedural/wart_cluster_feature.gd" id="5_g0q66"]
+[ext_resource type="Script" uid="uid://qsyfs86h8wms" path="res://addons/tentacletech/scripts/procedural/tentacle_mesh.gd" id="6_t83i1"]
+[ext_resource type="Resource" path="res://addons/tentacletech/scripts/presets/moods/curious.tres" id="7_g0q66"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_horizon_color = Color(0.65, 0.7, 0.78, 1)
@@ -27,6 +32,39 @@ roughness = 0.85
 [sub_resource type="BoxMesh" id="BoxMesh_floor"]
 size = Vector3(20, 0.4, 20)
 
+[sub_resource type="Resource" id="Resource_s3s2r"]
+script = ExtResource("5_g0q66")
+density = 2829.0
+size_min = 0.001
+size_max = 0.007
+height_factor = 0.7100000000000001
+smoothing = 3.14
+t_start = 0.695
+t_end = 1.0
+clustering_exponent = -0.6499999999999999
+seed = 2
+metadata/_custom_type_script = "uid://exy0ckniefb4"
+
+[sub_resource type="PrimitiveMesh" id="PrimitiveMesh_7w87m"]
+resource_local_to_scene = false
+resource_name = ""
+lightmap_size_hint = Vector2i(0, 0)
+custom_aabb = AABB(-1.995, -1.995, -1.995, 3.99, 3.99, 2.045)
+flip_faces = false
+add_uv2 = false
+uv2_padding = 2.0
+script = ExtResource("6_t83i1")
+length = 1.9449999999999998
+base_radius = 0.05
+tip_radius = 0.01
+radial_segments = 64
+length_segments = 128
+tip_cap_rings = 8
+tip_pointiness = 2.85
+seam_offset = 0.00041000000000002
+features = Array[ExtResource("4_1bsgq")]([SubResource("Resource_s3s2r")])
+metadata/_custom_type_script = "uid://qsyfs86h8wms"
+
 [node name="RagdollPhysicsTest" type="Node3D" unique_id=835304051]
 script = ExtResource("2_test")
 
@@ -38,227 +76,266 @@ transform = Transform3D(0.5, -0.7071, 0.5, 0, 0.7071, 0.7071, -0.866, -0.3535, 0
 shadow_enabled = true
 
 [node name="Floor" type="StaticBody3D" parent="." unique_id=642546906]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
-visible = false
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.385, 0)
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Floor" unique_id=794175312]
-visible = false
 shape = SubResource("BoxShape3D_floor")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Floor" unique_id=1293021073]
-visible = false
 material_override = SubResource("StandardMaterial3D_floor")
 mesh = SubResource("BoxMesh_floor")
 
 [node name="Kasumi" parent="." unique_id=1935670755 instance=ExtResource("1_kasumi")]
 
-[node name="LeftFoot" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="3" unique_id=614053338]
-joint_offset = Transform3D(0.99999803, 1.7910835e-07, 0.0019783154, -1.7881392e-07, 1, -1.4901154e-07, -0.0019783154, 1.4865749e-07, 0.99999803, 0, 0, 0)
-joint_rotation = Vector3(1.4901153e-07, 0.0019783168, -1.7881392e-07)
+[node name="LeftFoot" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="3" unique_id=885116585]
+joint_offset = Transform3D(0.99999803, 1.7910835e-07, 0.0019783154, -1.7881392e-07, 1, -1.4901121e-07, -0.0019783154, 1.4865716e-07, 0.99999803, 0, 0, 0)
+joint_rotation = Vector3(1.490112e-07, 0.0019783168, -1.7881392e-07)
 
-[node name="LeftToe5Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="4" unique_id=984896424]
-joint_offset = Transform3D(-0.9841967, 1.1438054e-07, -0.17707637, 8.940696e-08, 1, 1.4901151e-07, 0.17707637, 1.3082487e-07, -0.9841967, 0, 0, 0)
-joint_rotation = Vector3(-1.4901156e-07, -2.9635775, 8.9406996e-08)
+[node name="LeftToe5Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="4" unique_id=2020444343]
+transform = Transform3D(-0.90471697, 0.30352592, 0.2989302, 0.15893106, -0.41055784, 0.89787704, 0.3952571, 0.8598339, 0.32319894, 0.22375391, 0.025499173, 0.04139378)
+joint_offset = Transform3D(-0.98419535, 1.1438065e-07, -0.17707612, 8.940696e-08, 1, 1.4901124e-07, 0.17707612, 1.308248e-07, -0.98419535, 0, 0, 0)
+joint_rotation = Vector3(-1.4901151e-07, -2.9635775, 8.940712e-08)
+body_offset = Transform3D(1.0000004, 2.682209e-07, -8.940697e-08, -3.2782555e-07, 1.0000001, -1.1771917e-05, 7.4505806e-08, 1.1831522e-05, 1.0000001, 0, 0, 0)
+joint_constraints/x/angular_spring_stiffness = 0.23
+joint_constraints/y/angular_spring_enabled = true
+joint_constraints/y/angular_spring_stiffness = 0.93
 
-[node name="LeftToe5Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="6" unique_id=516252928]
-joint_offset = Transform3D(-0.9125422, -3.1161227e-07, -0.40898216, -3.548338e-07, 1, 2.9802322e-08, 0.40898216, 1.723166e-07, -0.9125422, 0, 0, 0)
+[node name="LeftToe5Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="6" unique_id=1877394671]
+transform = Transform3D(-0.90821266, 0.015540894, 0.41822028, 0.34004, -0.555152, 0.7590646, 0.24397235, 0.83160377, 0.4989116, 0.22773118, 0.017543666, 0.05634796)
+joint_offset = Transform3D(-0.91254234, -3.1161227e-07, -0.40898222, -3.5483382e-07, 1, 2.9802308e-08, 0.40898222, 1.7231659e-07, -0.91254234, 0, 0, 0)
+body_offset = Transform3D(1.0000005, 1.3411045e-07, -7.8231096e-07, -8.940697e-08, 1.0000002, 1.6093254e-06, 6.556511e-07, -1.6093254e-06, 1.0000001, 0, 0, 0)
 
-[node name="LeftToe4Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="7" unique_id=1129869116]
-joint_offset = Transform3D(-0.9769529, 2.518368e-06, -0.21345341, 2.4735934e-06, 1, 4.7683687e-07, 0.21345341, -6.214981e-08, -0.9769529, 0, 0, 0)
-joint_rotation = Vector3(-4.7683693e-07, -2.926484, 2.4735941e-06)
+[node name="LeftToe4Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="7" unique_id=1996189126]
+transform = Transform3D(-0.89695406, 0.29621828, 0.3282196, 0.19257203, -0.4065009, 0.8931255, 0.3979816, 0.86429846, 0.3075693, 0.21406662, 0.030089907, 0.04852609)
+joint_offset = Transform3D(-0.9769529, 2.518368e-06, -0.21345341, 2.4735934e-06, 1, 4.7683633e-07, 0.21345341, -6.215032e-08, -0.9769529, 0, 0, 0)
+joint_rotation = Vector3(-4.7683648e-07, -2.926484, 2.4735941e-06)
+body_offset = Transform3D(1.0000002, 4.7683716e-07, 1.4901161e-07, -6.2584877e-07, 0.9999999, 8.940697e-08, -1.6391277e-07, -5.9604645e-08, 1.0000001, 0, 0, 0)
 
-[node name="LeftToe4Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="8" unique_id=2091285309]
-joint_offset = Transform3D(-0.9784701, 1.0871373e-06, -0.20638874, 8.344652e-07, 1, 1.3113028e-06, 0.20638874, 1.1108464e-06, -0.9784701, 0, 0, 0)
-joint_rotation = Vector3(-1.3113029e-06, -2.9337099, 8.344652e-07)
+[node name="LeftToe4Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="8" unique_id=1927924295]
+joint_offset = Transform3D(-0.9784701, 1.0871374e-06, -0.20638874, 8.344652e-07, 1, 1.3113035e-06, 0.20638874, 1.110847e-06, -0.9784701, 0, 0, 0)
+joint_rotation = Vector3(-1.3113035e-06, -2.9337099, 8.344652e-07)
 
-[node name="LeftToe3Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="10" unique_id=1142122688]
-joint_offset = Transform3D(-0.99925274, 1.98095e-07, -0.038645323, 2.0861626e-07, 1, -2.6822087e-07, 0.038645323, -2.760826e-07, -0.99925274, 0, 0, 0)
-joint_rotation = Vector3(2.6822093e-07, -3.1029377, 2.0861631e-07)
+[node name="LeftToe3Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="10" unique_id=1146202693]
+joint_offset = Transform3D(-0.99925137, 1.9809528e-07, -0.038645267, 2.0861626e-07, 1, -2.6822045e-07, 0.038645267, -2.7608255e-07, -0.99925137, 0, 0, 0)
+joint_rotation = Vector3(2.6822087e-07, -3.1029377, 2.0861661e-07)
 
-[node name="LeftToe3Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="11" unique_id=1390441535]
-joint_offset = Transform3D(-0.998125, -1.3617436e-06, -0.0612085, -1.3113017e-06, 1, -8.6426763e-07, 0.0612085, -7.8238435e-07, -0.998125, 0, 0, 0)
-joint_rotation = Vector3(8.642677e-07, -3.0803459, -1.3113017e-06)
+[node name="LeftToe3Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="11" unique_id=215086386]
+transform = Transform3D(-0.9187668, 0.34647515, 0.18926877, 0.054130618, -0.36432424, 0.9296977, 0.39107236, 0.8644205, 0.3159741, 0.20890841, 0.027039904, 0.06772669)
+joint_offset = Transform3D(-0.998125, -1.3617437e-06, -0.0612085, -1.3113017e-06, 1, -8.6426894e-07, 0.0612085, -7.8238565e-07, -0.998125, 0, 0, 0)
+joint_rotation = Vector3(8.64269e-07, -3.0803459, -1.3113017e-06)
+body_offset = Transform3D(1.0000004, -1.4901161e-07, -7.450581e-09, 0, 1.0000002, 1.1920929e-07, 7.450581e-09, -2.9802322e-08, 1.0000005, 0, 0, 0)
 
-[node name="LeftToe2Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="13" unique_id=1354184316]
-joint_offset = Transform3D(-0.9994821, -3.8291535e-07, 0.03216989, -3.874301e-07, 1, -1.3411035e-07, -0.03216989, -1.4650456e-07, -0.9994821, 0, 0, 0)
-joint_rotation = Vector3(1.3411038e-07, 3.1094172, -3.8743022e-07)
+[node name="LeftToe2Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="13" unique_id=2132112788]
+joint_offset = Transform3D(-0.9994821, -3.8291537e-07, 0.03216989, -3.874301e-07, 1, -1.3411002e-07, -0.03216989, -1.4650423e-07, -0.9994821, 0, 0, 0)
+joint_rotation = Vector3(1.3411005e-07, 3.1094172, -3.8743022e-07)
 
-[node name="LeftToe2Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="15" unique_id=1008408896]
-joint_offset = Transform3D(-0.9997366, 2.823634e-07, -0.022949977, 2.8312195e-07, 1, -2.9802305e-08, 0.022949977, -3.6292096e-08, -0.9997366, 0, 0, 0)
-joint_rotation = Vector3(2.9802301e-08, -3.1186407, 2.8312195e-07)
+[node name="LeftToe2Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="15" unique_id=1558481705]
+joint_offset = Transform3D(-0.9997366, 2.823634e-07, -0.022949977, 2.8312195e-07, 1, -2.9802223e-08, 0.022949977, -3.6292015e-08, -0.9997366, 0, 0, 0)
+joint_rotation = Vector3(2.980222e-08, -3.1186407, 2.8312195e-07)
 
-[node name="LeftBigToeProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="16" unique_id=1498181157]
-joint_offset = Transform3D(-0.9999998, -8.1950196e-07, 0.00063792063, -8.195639e-07, 1, -9.685762e-08, -0.00063792063, -9.738042e-08, -0.9999998, 0, 0, 0)
-joint_rotation = Vector3(9.685763e-08, 3.1409547, -8.195639e-07)
+[node name="LeftBigToeProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="16" unique_id=962717664]
+joint_offset = Transform3D(-0.9999998, -8.1950196e-07, 0.00063792063, -8.195639e-07, 1, -9.6857946e-08, -0.00063792063, -9.738075e-08, -0.9999998, 0, 0, 0)
+joint_rotation = Vector3(9.685796e-08, 3.1409547, -8.195639e-07)
 
-[node name="RightUpperLeg" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="18" unique_id=2059783825]
+[node name="RightUpperLeg" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="18" unique_id=446752818]
 joint_offset = Transform3D(-0.17848276, 1.5684412e-08, -0.98394305, 4.680259e-08, 1, 7.4505895e-09, 0.98394305, -4.4721283e-08, -0.17848276, 0, 0, 0)
 joint_rotation = Vector3(-7.4505895e-09, -1.7502406, 4.680259e-08)
 
-[node name="RightFoot" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="20" unique_id=388707957]
-joint_offset = Transform3D(0.99999803, -2.687511e-07, -0.0019786134, 2.6822093e-07, 1, -2.6822062e-07, 0.0019786134, 2.6768936e-07, 0.99999803, 0, 0, 0)
-joint_rotation = Vector3(2.6822056e-07, -0.0019786148, 2.6822093e-07)
+[node name="RightFoot" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="20" unique_id=542169329]
+joint_offset = Transform3D(0.99999803, -2.6875108e-07, -0.0019786134, 2.6822093e-07, 1, -2.682193e-07, 0.0019786134, 2.6768805e-07, 0.99999803, 0, 0, 0)
+joint_rotation = Vector3(2.6821925e-07, -0.0019786148, 2.6822093e-07)
+mass = 9.82
 
-[node name="RightBigToeDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="22" unique_id=1644442003]
-joint_offset = Transform3D(-0.99989223, 1.2225901e-07, -0.014680248, 1.1920932e-07, 1, 2.0861619e-07, 0.014680248, 2.0684368e-07, -0.99989223, 0, 0, 0)
-joint_rotation = Vector3(-2.0861617e-07, -3.1269119, 1.1920932e-07)
+[node name="RightBigToeDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="22" unique_id=108685207]
+joint_offset = Transform3D(-0.99989223, 1.2225901e-07, -0.014680248, 1.1920932e-07, 1, 2.0861586e-07, 0.014680248, 2.0684335e-07, -0.99989223, 0, 0, 0)
+joint_rotation = Vector3(-2.0861584e-07, -3.1269119, 1.1920932e-07)
 
-[node name="RightToe2Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="23" unique_id=1076465984]
-joint_offset = Transform3D(-0.9994821, -3.540873e-07, -0.03216989, -3.5762787e-07, 1, 1.04308086e-07, 0.03216989, 1.15758986e-07, -0.9994821, 0, 0, 0)
-joint_rotation = Vector3(-1.0430811e-07, -3.1094172, -3.5762798e-07)
+[node name="RightToe2Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="23" unique_id=517998300]
+joint_offset = Transform3D(-0.9994821, -3.540873e-07, -0.03216989, -3.5762787e-07, 1, 1.0430792e-07, 0.03216989, 1.1575882e-07, -0.9994821, 0, 0, 0)
+joint_rotation = Vector3(-1.04307944e-07, -3.1094172, -3.5762798e-07)
 
-[node name="RightToe2Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="24" unique_id=1827191227]
-joint_offset = Transform3D(-0.9999522, -1.2469753e-06, -0.00977778, -1.2516975e-06, 1, 4.7683744e-07, 0.00977778, 4.890535e-07, -0.9999522, 0, 0, 0)
-joint_rotation = Vector3(-4.768375e-07, -3.1318147, -1.2516975e-06)
+[node name="RightToe2Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="24" unique_id=485654742]
+joint_offset = Transform3D(-0.9999522, -1.2469753e-06, -0.00977778, -1.2516975e-06, 1, 4.7683875e-07, 0.00977778, 4.890548e-07, -0.9999522, 0, 0, 0)
+joint_rotation = Vector3(-4.768388e-07, -3.1318147, -1.2516975e-06)
 
-[node name="RightToe2Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="25" unique_id=1140513668]
-joint_offset = Transform3D(-0.9997363, -4.0838108e-07, 0.022949731, -4.0233135e-07, 1, 2.6822084e-07, -0.022949731, 2.5891688e-07, -0.9997363, 0, 0, 0)
-joint_rotation = Vector3(-2.6822093e-07, 3.118641, -4.023315e-07)
+[node name="RightToe2Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="25" unique_id=220581169]
+joint_offset = Transform3D(-0.99973494, -4.0838165e-07, 0.0229497, -4.0233135e-07, 1, 2.682202e-07, -0.0229497, 2.5891657e-07, -0.99973494, 0, 0, 0)
+joint_rotation = Vector3(-2.6822062e-07, 3.118641, -4.0233203e-07)
 
-[node name="RightToe4Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="29" unique_id=1940944304]
-joint_offset = Transform3D(-0.97695327, 4.7123063e-07, 0.21345179, 4.172326e-07, 1, -2.9802325e-07, -0.21345179, -2.0209589e-07, -0.97695327, 0, 0, 0)
-joint_rotation = Vector3(2.980234e-07, 2.9264858, 4.1723274e-07)
+[node name="RightToe4Proximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="29" unique_id=63236704]
+joint_offset = Transform3D(-0.9769523, 4.7123103e-07, 0.21345156, 4.172326e-07, 1, -2.98023e-07, -0.21345156, -2.0209582e-07, -0.9769523, 0, 0, 0)
+joint_rotation = Vector3(2.980234e-07, 2.9264858, 4.1723314e-07)
 
-[node name="RightToe4Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="30" unique_id=2010510993]
-joint_offset = Transform3D(-0.97846955, -2.9117364e-06, 0.20638962, -2.8312215e-06, 1, 6.8545313e-07, -0.20638962, 8.636033e-08, -0.97846955, 0, 0, 0)
-joint_rotation = Vector3(-6.854533e-07, 2.933709, -2.8312224e-06)
+[node name="RightToe4Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="30" unique_id=416885958]
+joint_offset = Transform3D(-0.9784685, -2.9117396e-06, 0.20638938, -2.8312215e-06, 1, 6.854528e-07, -0.20638938, 8.63601e-08, -0.9784685, 0, 0, 0)
+joint_rotation = Vector3(-6.854538e-07, 2.933709, -2.8312256e-06)
 
-[node name="RightToe4Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="31" unique_id=941971283]
-joint_offset = Transform3D(-0.9889201, -2.2549813e-07, 0.1484489, -1.78814e-07, 1, 3.278257e-07, -0.1484489, 2.9764868e-07, -0.9889201, 0, 0, 0)
-joint_rotation = Vector3(-3.2782572e-07, 2.992593, -1.78814e-07)
+[node name="RightToe4Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="31" unique_id=429840161]
+joint_offset = Transform3D(-0.9889201, -2.2549816e-07, 0.1484489, -1.78814e-07, 1, 3.278259e-07, -0.1484489, 2.9764885e-07, -0.9889201, 0, 0, 0)
+joint_rotation = Vector3(-3.278259e-07, 2.992593, -1.78814e-07)
 
-[node name="RightToe5Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="33" unique_id=1634324769]
-joint_offset = Transform3D(-0.9264707, 6.674503e-06, 0.37636697, 6.465708e-06, 1, -1.8179427e-06, -0.37636697, 7.492082e-07, -0.9264707, 0, 0, 0)
-joint_rotation = Vector3(1.817943e-06, 2.7557209, 6.465708e-06)
+[node name="RightToe5Intermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="33" unique_id=345572124]
+joint_offset = Transform3D(-0.9264707, 6.6745033e-06, 0.37636697, 6.465708e-06, 1, -1.8179448e-06, -0.37636697, 7.4920615e-07, -0.9264707, 0, 0, 0)
+joint_rotation = Vector3(1.8179448e-06, 2.7557209, 6.465708e-06)
 
-[node name="RightToe5Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="34" unique_id=1679249155]
-joint_offset = Transform3D(-0.9125422, -8.8472035e-08, 0.40898168, 6.332993e-08, 1, 3.5762778e-07, -0.40898168, 3.5225145e-07, -0.9125422, 0, 0, 0)
+[node name="RightToe5Distal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="34" unique_id=1556872845]
+joint_offset = Transform3D(-0.9125422, -8.8472035e-08, 0.40898165, 6.332993e-08, 1, 3.5762775e-07, -0.40898165, 3.5225145e-07, -0.9125422, 0, 0, 0)
 joint_rotation = Vector3(-3.576279e-07, 2.7202547, 6.332995e-08)
 
-[node name="RightLowerArm" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="42" unique_id=895182680]
-joint_offset = Transform3D(-0.38153318, 1.3474306e-09, -0.92435515, 2.2014135e-07, 1, -8.9406974e-08, 0.92435515, -2.3760052e-07, -0.38153318, 0, 0, 0)
+[node name="RightLowerArm" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="42" unique_id=162737253]
+joint_offset = Transform3D(-0.38153318, 1.3474235e-09, -0.92435515, 2.2014135e-07, 1, -8.940698e-08, 0.92435515, -2.3760052e-07, -0.38153318, 0, 0, 0)
 joint_rotation = Vector3(8.940698e-08, -1.9622507, 2.2014135e-07)
 
-[node name="RightHand" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="43" unique_id=639628697]
-joint_offset = Transform3D(-0.9890025, 1.1238797e-07, 0.14789641, 1.3411044e-07, 1, 1.3690436e-07, -0.14789641, 1.5523331e-07, -0.9890025, 0, 0, 0)
-joint_rotation = Vector3(-1.3690439e-07, 2.9931517, 1.3411048e-07)
+[node name="RightHand" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="43" unique_id=1359643672]
+joint_offset = Transform3D(-0.98900115, 1.1238814e-07, 0.1478962, 1.3411044e-07, 1, 1.3690418e-07, -0.1478962, 1.5523334e-07, -0.98900115, 0, 0, 0)
+joint_rotation = Vector3(-1.369044e-07, 2.9931517, 1.3411066e-07)
 
-[node name="RightThumbMetacarpal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="44" unique_id=1735899377]
-transform = Transform3D(-0.9480329, -0.2255132, 0.22444904, 0.3181722, -0.6723267, 0.6683886, 0.00017263774, 0.7050678, 0.7091399, -0.42028016, 0.9649541, 0.043854557)
-body_offset = Transform3D(1.0000001, -0.0001195159, -0.00012488122, 0.00011961577, 1.0000002, -2.0861626e-07, 0.0001248934, 0, 1.0000002, 0, 0, 0)
+[node name="RightThumbMetacarpal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="44" unique_id=334968610]
+transform = Transform3D(-0.948033, -0.22551322, 0.22444902, 0.31817222, -0.6723267, 0.6683886, 0.00017263046, 0.7050678, 0.7091399, -0.42028016, 0.9649541, 0.043854557)
+body_offset = Transform3D(1.0000001, -0.0001195308, -0.00012489612, 0.00011961808, 1.0000002, -2.0861626e-07, 0.00012488083, 0, 1.0000002, 0, 0, 0)
 
-[node name="RightThumbProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="45" unique_id=1263678943]
-transform = Transform3D(-0.94113153, -0.28811863, 0.17680237, 0.33803946, -0.80347866, 0.49005243, 0.0008636812, 0.52097, 0.8535746, -0.42734736, 0.9438959, 0.06593936)
-body_offset = Transform3D(0.9999998, -0.00045000506, -0.00073664915, 0.00044996408, 1.0000002, -0.00010672212, 0.00073669985, 0.000106304884, 0.9999998, 0, 0, 0)
+[node name="RightThumbProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="45" unique_id=795542523]
+transform = Transform3D(-0.94113153, -0.28811863, 0.17680238, 0.33803946, -0.80347866, 0.49005246, 0.0008636784, 0.52097, 0.8535746, -0.42734736, 0.9438959, 0.06593936)
+body_offset = Transform3D(0.9999998, -0.00045000506, -0.00073663425, 0.00044996265, 1.0000002, -0.000106692314, 0.0007366975, 0.000106304884, 0.9999998, 0, 0, 0)
 
-[node name="RightThumbDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="46" unique_id=248034012]
-transform = Transform3D(-0.90723836, -0.34310848, 0.24330045, 0.42061663, -0.73946995, 0.52561015, -0.00042792768, 0.5791899, 0.8151926, -0.4336476, 0.92635524, 0.07731198)
-joint_offset = Transform3D(-0.7843274, -8.8400077e-07, -0.62034696, -6.556509e-07, 1, -5.9604645e-07, 0.62034696, -6.076448e-08, -0.7843274, 0, 0, 0)
-body_offset = Transform3D(1.0000002, 0.00025551932, 0.000341804, -0.00025554158, 1.0000005, 4.7683716e-07, -0.00034176663, -8.046627e-07, 1, 0, 0, 0)
+[node name="RightThumbDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="46" unique_id=317683319]
+transform = Transform3D(-0.90723836, -0.34310848, 0.24330042, 0.4206166, -0.73946995, 0.5256101, -0.00042792346, 0.5791899, 0.8151926, -0.4336476, 0.92635524, 0.07731198)
+joint_offset = Transform3D(-0.7843273, -8.840008e-07, -0.6203469, -6.556509e-07, 1, -5.9604645e-07, 0.6203469, -6.0764506e-08, -0.7843273, 0, 0, 0)
+joint_rotation = Vector3(5.9604656e-07, -2.4724076, -6.5565104e-07)
+body_offset = Transform3D(1.0000002, 0.00025551932, 0.0003417444, -0.00025553914, 1.0000005, 5.364418e-07, -0.00034176317, -8.046627e-07, 1.0000002, 0, 0, 0)
 
-[node name="RightLittleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="47" unique_id=1461821662]
-joint_offset = Transform3D(-0.9790358, -1.3459307e-06, -0.20368838, -2.4884937e-06, 1, 5.3532444e-06, 0.20368838, 5.747895e-06, -0.9790358, 0, 0, 0)
-joint_rotation = Vector3(-5.353245e-06, -2.9364688, -2.4884937e-06)
+[node name="RightLittleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="47" unique_id=317426040]
+joint_offset = Transform3D(-0.9790358, -1.3459303e-06, -0.20368838, -2.4884937e-06, 1, 5.3532463e-06, 0.20368838, 5.747897e-06, -0.9790358, 0, 0, 0)
+joint_rotation = Vector3(-5.3532463e-06, -2.9364688, -2.4884937e-06)
 
-[node name="RightLittleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="48" unique_id=1000153222]
-joint_offset = Transform3D(-0.99429, -1.3616855e-07, -0.10671181, 6.705521e-08, 1, -1.9008288e-06, 0.10671181, -1.8971306e-06, -0.99429, 0, 0, 0)
-joint_rotation = Vector3(1.9008287e-06, -3.0346773, 6.705521e-08)
+[node name="RightLittleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="48" unique_id=1239177203]
+joint_offset = Transform3D(-0.99429, -1.3616847e-07, -0.10671181, 6.705521e-08, 1, -1.900828e-06, 0.10671181, -1.8971299e-06, -0.99429, 0, 0, 0)
+joint_rotation = Vector3(1.900828e-06, -3.0346773, 6.705521e-08)
 
-[node name="RightRingProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="50" unique_id=1377951301]
-joint_offset = Transform3D(-0.99886894, -2.931028e-07, -0.04754839, -2.9802317e-07, 1, 9.639192e-08, 0.04754839, 1.1045342e-07, -0.99886894, 0, 0, 0)
-joint_rotation = Vector3(-9.639193e-08, -3.0940263, -2.9802317e-07)
+[node name="RightRingProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="50" unique_id=187997428]
+joint_offset = Transform3D(-0.99886894, -2.931028e-07, -0.04754839, -2.9802317e-07, 1, 9.6392085e-08, 0.04754839, 1.10453584e-07, -0.99886894, 0, 0, 0)
+joint_rotation = Vector3(-9.639209e-08, -3.0940263, -2.9802317e-07)
 
-[node name="RightRingIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="51" unique_id=1338806966]
-joint_offset = Transform3D(-0.9997563, 1.17372636e-07, -0.022062086, 1.2665983e-07, 1, -4.1956093e-07, 0.022062086, -4.2225332e-07, -0.9997563, 0, 0, 0)
-joint_rotation = Vector3(4.1956108e-07, -3.1195288, 1.2665987e-07)
+[node name="RightRingIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="51" unique_id=1487164068]
+joint_offset = Transform3D(-0.9997549, 1.1737279e-07, -0.022062056, 1.2665983e-07, 1, -4.1956116e-07, 0.022062056, -4.2225415e-07, -0.9997549, 0, 0, 0)
+joint_rotation = Vector3(4.1956193e-07, -3.1195288, 1.2666004e-07)
 
-[node name="RightMiddleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="53" unique_id=930501156]
-joint_constraints/x/linear_spring_stiffness = 2.05
-joint_constraints/x/linear_spring_damping = 2.11
-joint_constraints/x/angular_spring_enabled = true
-joint_constraints/x/angular_spring_stiffness = 1.645
+[node name="RightMiddleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="54" unique_id=739210573]
+joint_offset = Transform3D(-0.99667525, -6.6065354e-08, 0.08145574, 2.533197e-07, 1, 3.9106226e-06, -0.08145574, 3.9182682e-06, -0.99667525, 0, 0, 0)
+joint_rotation = Vector3(-3.9106294e-06, 3.0600464, 2.5332014e-07)
 
-[node name="RightMiddleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="54" unique_id=1124022457]
-transform = Transform3D(-0.021175334, -0.634988, -0.7722318, -0.044161823, -0.771057, 0.6352329, -0.9988, 0.047554437, -0.0117148375, -0.48205242, 0.9113269, 0.032518037)
-joint_offset = Transform3D(-0.9966766, -6.606524e-08, 0.08145585, 2.533197e-07, 1, 3.910622e-06, -0.08145585, 3.9182623e-06, -0.9966766, 0, 0, 0)
-joint_rotation = Vector3(-3.9106235e-06, 3.0600464, 2.533198e-07)
-body_offset = Transform3D(1.0000005, 1.1175871e-08, 5.5879354e-09, 3.7252903e-09, 1.0000004, -2.688315e-05, 5.5879354e-09, 2.6974478e-05, 1.0000002, 0, 0, 0)
-
-[node name="RightIndexProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="56" unique_id=705297497]
+[node name="RightIndexProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="56" unique_id=737248970]
 joint_offset = Transform3D(-0.9690177, -8.767279e-08, 0.24699053, -9.089706e-07, 1, -3.211199e-06, -0.24699053, -3.336217e-06, -0.9690177, 0, 0, 0)
 joint_rotation = Vector3(3.2111998e-06, 2.8920193, -9.089708e-07)
 
-[node name="RightIndexIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="57" unique_id=1715026845]
-joint_offset = Transform3D(-0.99231726, 1.6013689e-07, 0.12371673, -7.450581e-09, 1, -1.3541429e-06, -0.12371673, -1.344662e-06, -0.99231726, 0, 0, 0)
-joint_rotation = Vector3(1.3541434e-06, 3.017558, -7.450583e-09)
+[node name="RightIndexIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="57" unique_id=2051878749]
+joint_offset = Transform3D(-0.9923163, 1.6013699e-07, 0.12371661, -7.450581e-09, 1, -1.3541426e-06, -0.12371661, -1.3446629e-06, -0.9923163, 0, 0, 0)
+joint_rotation = Vector3(1.3541443e-06, 3.017558, -7.45059e-09)
 
-[node name="LeftLowerArm" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="61" unique_id=274637770]
+[node name="LeftLowerArm" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="61" unique_id=1761602674]
 joint_offset = Transform3D(-0.3815331, 2.4979215e-07, 0.9243552, 3.6589338e-07, 1, -1.1920928e-07, -0.9243552, 2.9273315e-07, -0.3815331, 0, 0, 0)
 
-[node name="LeftHand" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="62" unique_id=1372040666]
-joint_offset = Transform3D(-0.98900247, -9.031098e-09, -0.14789687, 1.5646214e-07, 1, -1.1073428e-06, 0.14789687, -1.1183057e-06, -0.98900247, 0, 0, 0)
-joint_rotation = Vector3(1.1073431e-06, -2.9931512, 1.5646219e-07)
+[node name="LeftHand" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="62" unique_id=952564528]
+joint_offset = Transform3D(-0.9890011, -9.03114e-09, -0.14789666, 1.5646214e-07, 1, -1.107343e-06, 0.14789666, -1.1183074e-06, -0.9890011, 0, 0, 0)
+joint_rotation = Vector3(1.1073449e-06, -2.9931512, 1.564624e-07)
 
-[node name="LeftThumbMetacarpal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="63" unique_id=1037792730]
+[node name="LeftThumbMetacarpal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="63" unique_id=6110294]
 transform = Transform3D(-0.9480257, 0.22555482, -0.22443782, -0.31819364, -0.67273825, 0.66796416, -0.00032537023, 0.7046619, 0.7095432, 0.42028016, 0.9649538, 0.043854654)
 body_offset = Transform3D(1.0000001, 0.00021054661, 0.00024922917, -0.00021078168, 1, 0.000572294, -0.0002492104, -0.00057277083, 1, 0, 0, 0)
 
-[node name="LeftThumbProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="64" unique_id=1587848344]
-transform = Transform3D(-0.9411316, 0.28825372, -0.17658207, -0.33803993, -0.8035531, 0.48993, -0.0006689279, 0.5207803, 0.85369045, 0.42734742, 0.94389576, 0.06593949)
-joint_offset = Transform3D(-0.82677716, -3.889778e-08, 0.5625294, -1.1622905e-06, 1, -1.6391276e-06, -0.5625294, -2.009016e-06, -0.82677716, 0, 0, 0)
-joint_rotation = Vector3(1.6391276e-06, 2.5441506, -1.1622906e-06)
-body_offset = Transform3D(1.0000001, 0.00034762302, 0.0005703263, -0.0003477457, 1.0000001, 0.00011578202, -0.00057042163, -0.000116318464, 1.0000002, 0, 0, 0)
+[node name="LeftThumbProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="64" unique_id=1033742752]
+transform = Transform3D(-0.9411316, 0.28825372, -0.17658207, -0.33803993, -0.8035531, 0.48993, -0.00066893443, 0.5207803, 0.85369045, 0.42734742, 0.94389576, 0.06593949)
+joint_offset = Transform3D(-0.8267771, -3.889795e-08, 0.5625293, -1.1622905e-06, 1, -1.6391273e-06, -0.5625293, -2.009016e-06, -0.8267771, 0, 0, 0)
+joint_rotation = Vector3(1.6391276e-06, 2.5441506, -1.1622907e-06)
+body_offset = Transform3D(1.0000001, 0.00034762302, 0.0005703412, -0.0003477491, 1.0000001, 0.00011578202, -0.0005704272, -0.000116318464, 1.0000002, 0, 0, 0)
 
-[node name="LeftThumbDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="65" unique_id=231041204]
-transform = Transform3D(-0.9085604, 0.346749, -0.23298772, -0.41752502, -0.73527014, 0.5339014, 0.013820848, 0.5823598, 0.8128137, 0.4336477, 0.92635524, 0.07731204)
-joint_offset = Transform3D(-0.7843274, 6.882887e-07, 0.62034696, 4.7683704e-07, 1, -5.066394e-07, -0.62034696, -1.015668e-07, -0.7843274, 0, 0, 0)
-joint_rotation = Vector3(5.066395e-07, 2.4724076, 4.768371e-07)
-body_offset = Transform3D(0.99989945, -0.005325211, -0.013185656, 0.005273208, 0.9999784, -0.003972918, 0.013206392, 0.003902644, 0.99990547, 0, 0, 0)
+[node name="LeftThumbDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="65" unique_id=1538149535]
+transform = Transform3D(-0.91267294, 0.3544586, -0.20343854, -0.40533066, -0.7213561, 0.5615626, 0.05229904, 0.59498286, 0.80203503, 0.4336477, 0.92635524, 0.07731204)
+joint_offset = Transform3D(-0.7843273, 6.8828876e-07, 0.6203469, 4.7683704e-07, 1, -5.0663937e-07, -0.6203469, -1.0156677e-07, -0.7843273, 0, 0, 0)
+joint_rotation = Vector3(5.066395e-07, 2.4724076, 4.7683713e-07)
+body_offset = Transform3D(0.9985016, -0.018172089, -0.051628485, 0.017130679, 0.9996424, -0.020541638, 0.05198311, 0.019626081, 0.9984554, 0, 0, 0)
 
-[node name="LeftLittleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="66" unique_id=1354869988]
-joint_offset = Transform3D(-0.97903466, -1.5445892e-06, 0.20369375, -2.2798772e-06, 1, -3.3751132e-06, -0.20369375, -3.7687496e-06, -0.97903466, 0, 0, 0)
+[node name="LeftLittleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="66" unique_id=683183123]
+joint_offset = Transform3D(-0.97903466, -1.5445892e-06, 0.20369375, -2.2798772e-06, 1, -3.3751135e-06, -0.20369375, -3.7687496e-06, -0.97903466, 0, 0, 0)
 joint_rotation = Vector3(3.3751135e-06, 2.9364634, -2.2798772e-06)
 
-[node name="LeftLittleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="67" unique_id=94204752]
-joint_offset = Transform3D(-0.9942896, -5.3342995e-07, 0.10671273, -9.164213e-07, 1, -3.5399573e-06, -0.10671273, -3.6175388e-06, -0.9942896, 0, 0, 0)
-joint_rotation = Vector3(3.539959e-06, 3.0346763, -9.1642164e-07)
+[node name="LeftLittleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="67" unique_id=1073103597]
+joint_offset = Transform3D(-0.9942882, -5.334307e-07, 0.10671258, -9.164213e-07, 1, -3.5399576e-06, -0.10671258, -3.6175438e-06, -0.9942882, 0, 0, 0)
+joint_rotation = Vector3(3.5399637e-06, 3.0346763, -9.164229e-07)
 
-[node name="LeftRingProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="69" unique_id=584691131]
-joint_offset = Transform3D(-0.99886894, 3.8107362e-07, 0.04754839, 4.3213348e-07, 1, 1.063571e-06, -0.04754839, 1.0829153e-06, -0.99886894, 0, 0, 0)
-joint_rotation = Vector3(-1.0635711e-06, 3.0940263, 4.3213348e-07)
+[node name="LeftRingProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="69" unique_id=629694299]
+joint_offset = Transform3D(-0.99886894, 3.810735e-07, 0.04754839, 4.3213348e-07, 1, 1.0635736e-06, -0.04754839, 1.082918e-06, -0.99886894, 0, 0, 0)
+joint_rotation = Vector3(-1.0635737e-06, 3.0940263, 4.3213348e-07)
 
-[node name="LeftRingIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="70" unique_id=437232853]
-joint_offset = Transform3D(-0.9997563, -3.0151412e-07, 0.022062324, -2.719461e-07, 1, 1.3432e-06, -0.022062324, 1.3368737e-06, -0.9997563, 0, 0, 0)
-joint_rotation = Vector3(-1.3432004e-06, 3.1195285, -2.719462e-07)
+[node name="LeftRingIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="70" unique_id=430566133]
+joint_offset = Transform3D(-0.9997549, -3.0151452e-07, 0.022062294, -2.719461e-07, 1, 1.3431987e-06, -0.022062294, 1.3368742e-06, -0.9997549, 0, 0, 0)
+joint_rotation = Vector3(-1.343201e-06, 3.1195285, -2.719466e-07)
 
-[node name="LeftRingDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="71" unique_id=103101069]
-joint_offset = Transform3D(-0.9997134, 1.0043786e-08, 0.023939619, 2.2351731e-08, 1, 5.1385695e-07, -0.023939619, 5.1424473e-07, -0.9997134, 0, 0, 0)
-joint_rotation = Vector3(-5.138569e-07, 3.1176507, 2.2351731e-08)
+[node name="LeftRingDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="71" unique_id=2085218772]
+joint_offset = Transform3D(-0.9997134, 1.0043817e-08, 0.023939619, 2.2351731e-08, 1, 5.1385564e-07, -0.023939619, 5.142434e-07, -0.9997134, 0, 0, 0)
+joint_rotation = Vector3(-5.138556e-07, 3.1176507, 2.2351731e-08)
 
-[node name="LeftMiddleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="72" unique_id=464308431]
+[node name="LeftMiddleProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="72" unique_id=1746000113]
 joint_offset = Transform3D(-0.9941574, 2.828616e-07, -0.10794016, 2.980232e-07, 1, -1.2433155e-07, 0.10794016, -1.557738e-07, -0.9941574, 0, 0, 0)
 
-[node name="LeftMiddleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="73" unique_id=829356320]
-joint_offset = Transform3D(-0.99667656, -8.6044885e-08, -0.081456564, 6.3329914e-08, 1, -1.8312124e-06, 0.081456564, -1.8302862e-06, -0.99667656, 0, 0, 0)
-joint_rotation = Vector3(1.831213e-06, -3.0600457, 6.3329935e-08)
+[node name="LeftMiddleIntermediate" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="73" unique_id=170033086]
+joint_offset = Transform3D(-0.9966752, -8.604477e-08, -0.08145645, 6.3329914e-08, 1, -1.8312097e-06, 0.08145645, -1.830286e-06, -0.9966752, 0, 0, 0)
+joint_rotation = Vector3(1.8312128e-06, -3.0600457, 6.333002e-08)
 
-[node name="LeftMiddleDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="74" unique_id=426287038]
-transform = Transform3D(-0.0009884096, 0.65651494, 0.75431246, 0.0237061, -0.7540855, 0.6563484, 0.9997185, 0.01853055, -0.014818063, 0.49543178, 0.8950794, 0.033520184)
-joint_offset = Transform3D(-0.9988532, 1.369403e-07, -0.047878224, 1.2665983e-07, 1, 2.1775499e-07, 0.047878224, 2.1144103e-07, -0.9988532, 0, 0, 0)
-joint_rotation = Vector3(-2.1775502e-07, -3.093696, 1.2665983e-07)
-body_offset = Transform3D(1.0000002, 2.9820949e-06, -1.1883676e-06, -3.1553209e-06, 1.0000002, -8.655479e-07, 1.4910474e-06, 7.250637e-07, 1.0000001, 0, 0, 0)
+[node name="LeftMiddleDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="74" unique_id=1833349811]
+joint_offset = Transform3D(-0.9988532, 1.3694032e-07, -0.047878224, 1.2665983e-07, 1, 2.1775524e-07, 0.047878224, 2.1144126e-07, -0.9988532, 0, 0, 0)
+joint_rotation = Vector3(-2.1775524e-07, -3.093696, 1.2665983e-07)
 
-[node name="LeftIndexProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="75" unique_id=649340598]
-transform = Transform3D(-0.1245005, 0.65710235, 0.74344885, 0.16283938, -0.7255875, 0.6685852, 0.978766, 0.20430192, -0.016666139, 0.46202675, 0.9299269, 0.047383532)
-joint_offset = Transform3D(-0.96901774, -2.535541e-07, -0.2469908, 8.0466253e-07, 1, -4.183501e-06, 0.2469908, -4.2526317e-06, -0.96901774, 0, 0, 0)
+[node name="LeftIndexProximal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="75" unique_id=752758643]
+joint_offset = Transform3D(-0.9690177, -2.5355405e-07, -0.24699079, 8.0466253e-07, 1, -4.183501e-06, 0.24699079, -4.2526317e-06, -0.9690177, 0, 0, 0)
 joint_rotation = Vector3(4.1835015e-06, -2.892019, 8.0466265e-07)
-body_offset = Transform3D(1.0000001, 3.2782555e-06, -3.396906e-05, -3.5017729e-06, 1.0000004, 0.00011800742, 3.4302473e-05, -0.00011806283, 1.0000002, 0, 0, 0)
 
-[node name="LeftIndexDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 197920918) index="77" unique_id=1233609291]
-joint_offset = Transform3D(-0.99727285, 8.929206e-09, -0.073802695, 4.8428763e-08, 1, -5.334153e-07, 0.073802695, -5.355348e-07, -0.99727285, 0, 0, 0)
-joint_rotation = Vector3(5.3341535e-07, -3.0677228, 4.8428763e-08)
+[node name="LeftIndexDistal" parent="Kasumi/root/GeneralSkeleton/MarionetteSim" parent_id_path=PackedInt32Array(1935670755, 1914544604) index="77" unique_id=1320478985]
+joint_offset = Transform3D(-0.99727285, 8.92911e-09, -0.073802695, 4.8428763e-08, 1, -5.334166e-07, 0.073802695, -5.355361e-07, -0.99727285, 0, 0, 0)
+joint_rotation = Vector3(5.3341665e-07, -3.0677228, 4.8428763e-08)
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=981554518]
 transform = Transform3D(1, 0, 0, 0, 0.97, 0.247, 0, -0.247, 0.97, 0, 1.7, 3)
 
+[node name="TestTentacleBehaviour" parent="." unique_id=759219912 instance=ExtResource("3_i1d12")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.135, 0)
+
+[node name="Tentacle" parent="TestTentacleBehaviour" index="2" unique_id=700698642]
+particle_count = 20
+segment_length = 0.103868425
+tentacle_mesh = SubResource("PrimitiveMesh_7w87m")
+iteration_count = 6
+damping = 0.99
+bending_stiffness = 0.4
+tentacle_lubricity = 0.185
+contact_stiffness = 0.5
+target_softness_when_blocked = 0.3
+max_depenetration = 3.15
+contact_velocity_damping = 0.5
+body_impulse_scale = 0.0
+
+[node name="TentacleBehavior" parent="TestTentacleBehaviour/Tentacle" index="1" unique_id=1367935941]
+mood = ExtResource("7_g0q66")
+wave_amplitude_scale = 0.6
+wave_temporal_freq = 1.5
+wave_drift_speed = 0.8
+wave_noise_freq = 1.0
+thrust_frequency = 0.0
+thrust_amplitude = 0.0
+thrust_bias = 0.0
+thrust_strike_sharpness = 1.0
+coil_amplitude = 0.0
+rest_extent = 0.92
+pose_stiffness = 0.15
+pose_softness_when_blocked = 0.3
+amplitude_smoothing_rate = 8.0
+thrust_phase_edge_smoothing = 0.1
+attractor_bias = 0.4
+
+[node name="StaticBody3D" parent="TestTentacleBehaviour" index="6" unique_id=1759263795]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.009767532, -0.23000002, 0)
+visible = false
+collision_layer = 0
+
 [editable path="Kasumi"]
+[editable path="TestTentacleBehaviour"]

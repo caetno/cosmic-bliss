@@ -211,18 +211,32 @@ static func generate_with_method(
 			entry.calculated_anatomical_basis = bone_world.basis.inverse() * target_basis
 			entry.use_calculated_frame = true
 			# Detect chirality flip on the abduction axis and store the
-			# compensation flag. Compares the natural rotation motion (flex
-			# axis × along) of basis.z against the anatomically expected abd
-			# direction; if they're anti-aligned, runtime needs to sign-flip
-			# the abd input so +abd_slider produces anatomical abduction.
+			# compensation flag. Evaluates the natural +joint_z rotation
+			# motion (target_basis.z × along) at the *canonical* anatomical
+			# pose, not at rest. This matters for bones whose rest deviates
+			# from canonical along by ~90° (e.g. shoulder T-pose, where the
+			# arm sits perpendicular to canonical-down): the rest-pose motion
+			# direction is perpendicular to expected_abd, which gives dot=0
+			# and silently picks the wrong mirror sign. Rotating the motion
+			# vector by Q(rest→canonical) puts it back where +abd is by
+			# definition aligned with expected_abd.
 			var expected_abd: Vector3 = MarionetteSolverUtils.expected_abd_motion_direction(
 					archetype, is_left_side, muscle_frame)
 			if expected_abd != Vector3.ZERO:
 				var along_world: Vector3 = (child_world.origin - bone_world.origin)
 				if along_world.length_squared() > 1e-9:
-					var natural_abd_motion: Vector3 = target_basis.z.cross(along_world.normalized())
-					if natural_abd_motion.length_squared() > 1e-9:
-						entry.mirror_abd = natural_abd_motion.normalized().dot(expected_abd) < 0.0
+					var rest_along: Vector3 = along_world.normalized()
+					var natural_abd_at_rest: Vector3 = target_basis.z.cross(rest_along)
+					if natural_abd_at_rest.length_squared() > 1e-9:
+						var canonical_along: Vector3 = _canonical_along(
+								archetype, bone_name, is_left_side,
+								bone_world, child_world, parent_world, muscle_frame)
+						var natural_abd: Vector3 = natural_abd_at_rest
+						if canonical_along != Vector3.ZERO \
+								and not canonical_along.is_equal_approx(rest_along):
+							var q := Quaternion(rest_along, canonical_along)
+							natural_abd = q * natural_abd_at_rest
+						entry.mirror_abd = natural_abd.normalized().dot(expected_abd) < 0.0
 			if match_result.matched:
 				report.matched += 1
 				outcome_label = "MATCHED  score=%.2f perm=[%s,%s,%s]" % [
@@ -246,7 +260,8 @@ static func generate_with_method(
 		# the same non-zero-stays-tuned policy.
 		MarionetteMassDefaults.apply(entry, bone_name)
 		entry.rest_anatomical_offset = _compute_rest_offset(
-				archetype, bone_world, child_world, parent_world, entry)
+				archetype, bone_world, child_world, parent_world,
+				muscle_frame, entry, bone_name)
 
 		entries[bone_name] = entry
 		report.generated += 1
@@ -268,41 +283,123 @@ static func generate_with_method(
 # in joint-frame (flex, medial_rot, abduction) radians. See
 # `BoneEntry.rest_anatomical_offset` for the runtime contract.
 #
-# HINGE: canonical zero = parent collinear with child (straight limb).
-#   Rest deviates by the limb-plane bend angle, signed by the joint frame's
-#   +flex axis. Other archetypes return Vector3.ZERO for now — for T-pose rigs
-#   that's already the right answer; the BALL/SADDLE generalization is a
-#   follow-up slice.
+# Algorithm (uniform across archetypes):
+#   1. Pick canonical_along per archetype (`_canonical_along`).
+#   2. Compute the shortest-arc rotation R that takes canonical_along to
+#      the bone's rest_along (axis = canonical × rest, angle = acos(dot)).
+#   3. Express R as an axis-angle vector in joint-frame coords by projecting
+#      the world axis onto the joint basis (= bone_world.basis · calculated
+#      anatomical basis), then scaling by angle.
+#   4. Apply mirror_abd / sided-medial-rotation flips so the offset reads in
+#      canonical-positive convention (matches rom_min/rom_max). The runtime
+#      layer (`AnatomicalPose.bone_local_rotation`) re-applies the same flips
+#      when composing the joint quaternion, so slider value = rest_offset
+#      lands on rest-pose identity.
+#
+# Canonical poses (per archetype):
+#   BALL     — limb hangs down (-muscle_frame.up). Shoulder T-pose has +90°
+#              abd offset; hip T-pose ≈ canonical, offset ≈ 0.
+#   HINGE    — parent and child collinear (extended limb). Carrying-angle
+#              elbow / bent-knee A-pose pick up flex offset; T-pose ≈ 0.
+#   SADDLE   — Foot canonical = horizontal (muscle_frame.forward); Hand and
+#              MCP/MTP saddles canonical = collinear with parent (extended).
+#   SPINE    — collinear with parent (straight spine).
+#   CLAVICLE — laterally outward (±muscle_frame.right). T-pose ≈ canonical.
+#   ROOT/FIXED/PIVOT — no DOF, returns ZERO.
 static func _compute_rest_offset(
 		archetype: int,
 		bone_world: Transform3D,
 		child_world: Transform3D,
 		parent_world: Transform3D,
-		entry: BoneEntry) -> Vector3:
-	if archetype != BoneArchetype.Type.HINGE:
+		muscle_frame: MuscleFrame,
+		entry: BoneEntry,
+		bone_name: StringName) -> Vector3:
+	if archetype == BoneArchetype.Type.ROOT \
+			or archetype == BoneArchetype.Type.FIXED \
+			or archetype == BoneArchetype.Type.PIVOT:
 		return Vector3.ZERO
-	var parent_along_v: Vector3 = bone_world.origin - parent_world.origin
-	if parent_along_v.length_squared() < 1e-9:
+	var rest_along: Vector3 = MarionetteSolverUtils.along_bone_direction(bone_world, child_world)
+	if rest_along == Vector3.ZERO:
 		return Vector3.ZERO
-	var parent_along: Vector3 = parent_along_v.normalized()
-	var child_along: Vector3 = MarionetteSolverUtils.along_bone_direction(bone_world, child_world)
-	if child_along == Vector3.ZERO:
+	var canonical_along: Vector3 = _canonical_along(
+			archetype, bone_name, entry.is_left_side,
+			bone_world, child_world, parent_world, muscle_frame)
+	if canonical_along == Vector3.ZERO:
 		return Vector3.ZERO
-	var bend_axis: Vector3 = parent_along.cross(child_along)
-	var bend_mag_sq: float = bend_axis.length_squared()
-	if bend_mag_sq < 1e-12:
-		return Vector3.ZERO  # collinear — already canonical
-	var alpha_mag: float = acos(clampf(parent_along.dot(child_along), -1.0, 1.0))
-	# Joint frame's +flex axis (in world coords at rest) is the basis.x of the
-	# entry's anatomical basis composed with the bone's rest world basis.
-	# entry.calculated_anatomical_basis is the bone-local form; world-space
-	# flex axis = bone_world.basis * entry.calculated_anatomical_basis.x.
-	var flex_axis_world: Vector3 = (
-			bone_world.basis * entry.calculated_anatomical_basis.x).normalized()
-	var alpha_sign: float = signf(bend_axis.dot(flex_axis_world))
-	if alpha_sign == 0.0:
-		alpha_sign = 1.0
-	return Vector3(alpha_sign * alpha_mag, 0.0, 0.0)
+	var dot: float = clampf(canonical_along.dot(rest_along), -1.0, 1.0)
+	var angle: float = acos(dot)
+	if angle < 1e-6:
+		return Vector3.ZERO
+	var axis_world: Vector3 = canonical_along.cross(rest_along)
+	if axis_world.length_squared() < 1e-12:
+		# 180°: rest is anti-parallel to canonical. Axis is ambiguous; punt.
+		# Pathological for our rigs (would mean the bone points "up" when
+		# anatomy says "down"). Caller can flag via gizmo if it shows up.
+		return Vector3.ZERO
+	axis_world = axis_world.normalized()
+	# Joint frame in world = bone_world.basis · calculated anatomical basis.
+	# Both factors are orthonormal, so .inverse() = .transposed() up to FP.
+	var joint_basis_world: Basis = bone_world.basis * entry.calculated_anatomical_basis
+	var axis_joint: Vector3 = joint_basis_world.inverse() * axis_world
+	var offset: Vector3 = axis_joint * angle
+	# Match the canonical-positive convention used by rom_min/rom_max.
+	# Runtime mirrors live in AnatomicalPose; apply them here too so the
+	# slider value `rest_offset` lands on Quaternion.IDENTITY (= rest pose).
+	if entry.mirror_abd:
+		offset.z = -offset.z
+	var is_sided_med_rot: bool = (
+			archetype == BoneArchetype.Type.BALL
+			or archetype == BoneArchetype.Type.CLAVICLE)
+	if is_sided_med_rot and not entry.is_left_side:
+		offset.y = -offset.y
+	return offset
+
+
+# Canonical anatomical along-bone direction in world space, per archetype.
+# Used by `_compute_rest_offset` and by the canonical-pose mirror_abd check
+# in `generate_with_method`. Returns Vector3.ZERO when the archetype has no
+# meaningful canonical (ROOT, FIXED, PIVOT, or degenerate parent geometry).
+static func _canonical_along(
+		archetype: int,
+		bone_name: StringName,
+		is_left_side: bool,
+		bone_world: Transform3D,
+		child_world: Transform3D,
+		parent_world: Transform3D,
+		muscle_frame: MuscleFrame) -> Vector3:
+	var name: String = String(bone_name)
+	match archetype:
+		BoneArchetype.Type.BALL:
+			# Shoulder / hip: limb hangs straight down at anatomical neutral.
+			return -muscle_frame.up
+		BoneArchetype.Type.HINGE:
+			# Elbow / knee / phalanges: extended (parent and child collinear).
+			var v: Vector3 = bone_world.origin - parent_world.origin
+			if v.length_squared() < 1e-9:
+				return Vector3.ZERO
+			return v.normalized()
+		BoneArchetype.Type.SADDLE:
+			# Ankle is the only saddle whose canonical isn't "extended": the
+			# foot sits perpendicular to the leg (flat on ground) at neutral.
+			# Wrist, thumb metacarpal, MCP/MTP saddles are all "extended".
+			if name.ends_with("Foot"):
+				return muscle_frame.forward
+			var v: Vector3 = bone_world.origin - parent_world.origin
+			if v.length_squared() < 1e-9:
+				return Vector3.ZERO
+			return v.normalized()
+		BoneArchetype.Type.SPINE_SEGMENT:
+			# Vertebrae / neck / head: collinear with parent (straight spine).
+			var v: Vector3 = bone_world.origin - parent_world.origin
+			if v.length_squared() < 1e-9:
+				return Vector3.ZERO
+			return v.normalized()
+		BoneArchetype.Type.CLAVICLE:
+			# Clavicle goes laterally outward from sternum to shoulder. The
+			# bone-local along is signed by side; muscle_frame.right gives the
+			# body-right direction independent of bone-local convention.
+			return -muscle_frame.right if is_left_side else muscle_frame.right
+	return Vector3.ZERO
 
 
 # Resolve the bone's child world-rest transform: explicit tail bone first,

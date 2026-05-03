@@ -99,7 +99,10 @@ func _init() -> void:
 		_test_bone_profile_generator_method_parity_template,
 		_test_rest_offset_hinge_collinear_is_zero,
 		_test_rest_offset_hinge_a_pose_elbow_bend,
-		_test_rest_offset_non_hinge_returns_zero,
+		_test_rest_offset_root_fixed_pivot_returns_zero,
+		_test_rest_offset_ball_shoulder_t_pose_abd_offset,
+		_test_rest_offset_ball_hip_aligned_returns_zero,
+		_test_rest_offset_saddle_foot_horizontal_returns_zero,
 		_test_anatomical_pose_subtracts_rest_offset,
 		_test_anatomical_pose_canonical_zero_at_offset,
 		_test_build_ragdoll_rom_shifted_by_rest_offset,
@@ -859,21 +862,28 @@ func _test_rom_defaults_shoulder_vs_hip() -> bool:
 	hip.archetype = BoneArchetype.Type.BALL
 	MarionetteRomDefaults.apply(hip, &"LeftUpperLeg")
 
-	# Shoulder: flex 0..150°, abd 0..150°.
-	if not is_equal_approx(shoulder.rom_min.x, 0.0):
-		return _fail("rom_shoulder", "flex_min=%f, expected 0" % shoulder.rom_min.x)
-	if not is_equal_approx(shoulder.rom_max.x, deg_to_rad(150.0)):
-		return _fail("rom_shoulder", "flex_max=%f, expected 150°" % rad_to_deg(shoulder.rom_max.x))
-	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(150.0)):
-		return _fail("rom_shoulder", "abd_max=%f, expected 150°" % rad_to_deg(shoulder.rom_max.z))
+	# Shoulder: flex -50..180° (extension + full overhead), abd -50..180°
+	# (cross-body adduction + overhead). Canonical-anatomy convention:
+	# rom_min/rom_max are measured from arms-at-side neutral, not T-pose;
+	# `_compute_rest_offset` shifts to joint-local at ragdoll build.
+	if not is_equal_approx(shoulder.rom_min.x, deg_to_rad(-50.0)):
+		return _fail("rom_shoulder", "flex_min=%f, expected -50°" % rad_to_deg(shoulder.rom_min.x))
+	if not is_equal_approx(shoulder.rom_max.x, deg_to_rad(180.0)):
+		return _fail("rom_shoulder", "flex_max=%f, expected 180°" % rad_to_deg(shoulder.rom_max.x))
+	if not is_equal_approx(shoulder.rom_min.z, deg_to_rad(-50.0)):
+		return _fail("rom_shoulder", "abd_min=%f, expected -50°" % rad_to_deg(shoulder.rom_min.z))
+	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(180.0)):
+		return _fail("rom_shoulder", "abd_max=%f, expected 180°" % rad_to_deg(shoulder.rom_max.z))
 
-	# Hip: flex -15..100°, abd 0..40°.
-	if not is_equal_approx(hip.rom_min.x, deg_to_rad(-15.0)):
-		return _fail("rom_hip", "flex_min=%f, expected -15°" % rad_to_deg(hip.rom_min.x))
-	if not is_equal_approx(hip.rom_max.x, deg_to_rad(100.0)):
-		return _fail("rom_hip", "flex_max=%f, expected 100°" % rad_to_deg(hip.rom_max.x))
-	if not is_equal_approx(hip.rom_max.z, deg_to_rad(40.0)):
-		return _fail("rom_hip", "abd_max=%f, expected 40°" % rad_to_deg(hip.rom_max.z))
+	# Hip: flex -30..120°, abd -25..45°.
+	if not is_equal_approx(hip.rom_min.x, deg_to_rad(-30.0)):
+		return _fail("rom_hip", "flex_min=%f, expected -30°" % rad_to_deg(hip.rom_min.x))
+	if not is_equal_approx(hip.rom_max.x, deg_to_rad(120.0)):
+		return _fail("rom_hip", "flex_max=%f, expected 120°" % rad_to_deg(hip.rom_max.x))
+	if not is_equal_approx(hip.rom_min.z, deg_to_rad(-25.0)):
+		return _fail("rom_hip", "abd_min=%f, expected -25°" % rad_to_deg(hip.rom_min.z))
+	if not is_equal_approx(hip.rom_max.z, deg_to_rad(45.0)):
+		return _fail("rom_hip", "abd_max=%f, expected 45°" % rad_to_deg(hip.rom_max.z))
 
 	# The two are not the same set of values.
 	if shoulder.rom_max.is_equal_approx(hip.rom_max):
@@ -1086,10 +1096,10 @@ func _test_bone_profile_generator_rom_spot_checks() -> bool:
 		return _fail("generator_rom", "LeftLowerArm flex_max=%f°, expected 140°" %
 			rad_to_deg(elbow.rom_max.x))
 
-	# Shoulder: BALL, abd_max = 150° (UpperArm-specific).
+	# Shoulder: BALL, abd_max = 180° (UpperArm-specific, canonical anatomy).
 	var shoulder: BoneEntry = bp.bones[&"LeftUpperArm"]
-	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(150.0)):
-		return _fail("generator_rom", "LeftUpperArm abd_max=%f°, expected 150°" %
+	if not is_equal_approx(shoulder.rom_max.z, deg_to_rad(180.0)):
+		return _fail("generator_rom", "LeftUpperArm abd_max=%f°, expected 180°" %
 			rad_to_deg(shoulder.rom_max.z))
 
 	# Wrist: SADDLE, flex ±55°.
@@ -2500,7 +2510,8 @@ func _test_rest_offset_hinge_collinear_is_zero() -> bool:
 	var child := Transform3D(Basis.IDENTITY, Vector3(0.0, -1.0, 0.0))
 	var entry := _make_hinge_entry_with_world_flex(bone, Vector3.RIGHT)
 	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
-			BoneArchetype.Type.HINGE, bone, child, parent, entry)
+			BoneArchetype.Type.HINGE, bone, child, parent,
+			MuscleFrame.new(), entry, &"LeftLowerArm")
 	if not offset.is_equal_approx(Vector3.ZERO):
 		return _fail("rest_offset_hinge_collinear",
 				"collinear limb should yield zero offset, got %s" % offset)
@@ -2525,7 +2536,8 @@ func _test_rest_offset_hinge_a_pose_elbow_bend() -> bool:
 
 	var entry := _make_hinge_entry_with_world_flex(elbow, Vector3.BACK)
 	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
-			BoneArchetype.Type.HINGE, elbow, wrist, shoulder, entry)
+			BoneArchetype.Type.HINGE, elbow, wrist, shoulder,
+			MuscleFrame.new(), entry, &"LeftLowerArm")
 	if absf(absf(offset.x) - expected_mag) > 1e-4:
 		return _fail("rest_offset_a_pose_elbow",
 				"|offset.x|=%f, expected %f" % [absf(offset.x), expected_mag])
@@ -2536,31 +2548,110 @@ func _test_rest_offset_hinge_a_pose_elbow_bend() -> bool:
 	return _ok("rest_offset_hinge_a_pose_elbow_bend")
 
 
-func _test_rest_offset_non_hinge_returns_zero() -> bool:
-	# BALL/SADDLE/SPINE/CLAVICLE bones leave rest_anatomical_offset at zero
-	# until the follow-up slice. Verify the generator helper returns zero for
-	# every non-HINGE archetype regardless of input geometry.
+func _test_rest_offset_root_fixed_pivot_returns_zero() -> bool:
+	# DOF-less archetypes always return zero — there's no joint to offset.
 	var parent := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
 	var bone := Transform3D(Basis.IDENTITY, Vector3(0.5, 0.5, 0.0))
 	var child := Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0))
 	var entry := _make_hinge_entry_with_world_flex(bone, Vector3.BACK)
-	var non_hinge: Array[int] = [
-		BoneArchetype.Type.BALL,
-		BoneArchetype.Type.SADDLE,
-		BoneArchetype.Type.SPINE_SEGMENT,
-		BoneArchetype.Type.CLAVICLE,
-		BoneArchetype.Type.PIVOT,
-		BoneArchetype.Type.ROOT,
-		BoneArchetype.Type.FIXED,
-	]
-	for arch: int in non_hinge:
+	for arch: int in [BoneArchetype.Type.PIVOT, BoneArchetype.Type.ROOT, BoneArchetype.Type.FIXED]:
 		var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
-				arch, bone, child, parent, entry)
+				arch, bone, child, parent, MuscleFrame.new(), entry, &"Hips")
 		if not offset.is_equal_approx(Vector3.ZERO):
-			return _fail("rest_offset_non_hinge",
+			return _fail("rest_offset_root_fixed_pivot",
 					"archetype %s should return zero, got %s" %
 					[BoneArchetype.to_name(arch), offset])
-	return _ok("rest_offset_non_hinge_returns_zero")
+	return _ok("rest_offset_root_fixed_pivot_returns_zero")
+
+
+func _test_rest_offset_ball_shoulder_t_pose_abd_offset() -> bool:
+	# Right shoulder in T-pose: bone at +X (laterally extended), child further
+	# along +X. canonical_along = -muscle_frame.up = (0,-1,0); rest_along =
+	# (1,0,0). Rotation from canonical to rest is +90° around +Z (world).
+	# Joint frame for right shoulder T-pose: flex=+up, along=+right, abd=-Z;
+	# axis-in-joint-coords lands on -Z component → -π/2. mirror_abd flips it
+	# back to +π/2 in canonical-positive convention.
+	var hips_mid := Transform3D(Basis.IDENTITY, Vector3.ZERO)
+	var shoulder := Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0))  # bone origin
+	var elbow := Transform3D(Basis.IDENTITY, Vector3(2.0, 0.0, 0.0))     # child origin
+	# Build a real BoneEntry the same way the generator would: run the BALL
+	# solver and detect mirror_abd at canonical pose, then call _compute_rest_offset.
+	var mf := MuscleFrame.new()
+	var motion_target: Vector3 = MarionetteSolverUtils.anatomical_motion_target(
+			&"RightUpperArm", BoneArchetype.Type.BALL, mf)
+	var target_basis: Basis = MarionetteBallSolver.solve(
+			shoulder, elbow, mf, false, hips_mid, motion_target)
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.BALL
+	entry.is_left_side = false
+	entry.calculated_anatomical_basis = shoulder.basis.inverse() * target_basis
+	entry.use_calculated_frame = true
+	# Mirror_abd at canonical: rotate the rest-pose abd motion by Q(rest→canonical).
+	var rest_along := (elbow.origin - shoulder.origin).normalized()
+	var natural_abd_at_rest: Vector3 = target_basis.z.cross(rest_along)
+	var canonical_along := -mf.up
+	var q := Quaternion(rest_along, canonical_along)
+	var natural_abd_at_canonical: Vector3 = q * natural_abd_at_rest
+	var expected_abd: Vector3 = MarionetteSolverUtils.expected_abd_motion_direction(
+			BoneArchetype.Type.BALL, false, mf)
+	entry.mirror_abd = natural_abd_at_canonical.normalized().dot(expected_abd) < 0.0
+	if not entry.mirror_abd:
+		return _fail("rest_offset_ball_shoulder",
+				"right shoulder T-pose should set mirror_abd=true (canonical-pose check)")
+
+	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+			BoneArchetype.Type.BALL, shoulder, elbow, hips_mid,
+			mf, entry, &"RightUpperArm")
+	# Expect ~+90° on Z, ~0 on X and Y.
+	if absf(offset.z - PI / 2.0) > 1e-4:
+		return _fail("rest_offset_ball_shoulder",
+				"abd offset = %f rad, expected +π/2" % offset.z)
+	if absf(offset.x) > 1e-4 or absf(offset.y) > 1e-4:
+		return _fail("rest_offset_ball_shoulder",
+				"flex/rot offsets should be ~0, got (%f, %f)" % [offset.x, offset.y])
+	return _ok("rest_offset_ball_shoulder_t_pose_abd_offset")
+
+
+func _test_rest_offset_ball_hip_aligned_returns_zero() -> bool:
+	# T-pose hip: leg straight down, rest_along = -muscle_frame.up = canonical_along.
+	# Angle = 0 → offset = ZERO without going through the rotation math.
+	var hips := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
+	var hip := Transform3D(Basis.IDENTITY, Vector3(0.2, 1.0, 0.0))
+	var knee := Transform3D(Basis.IDENTITY, Vector3(0.2, 0.0, 0.0))
+	var mf := MuscleFrame.new()
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.BALL
+	entry.is_left_side = true
+	entry.calculated_anatomical_basis = Basis.IDENTITY
+	entry.use_calculated_frame = true
+	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+			BoneArchetype.Type.BALL, hip, knee, hips,
+			mf, entry, &"LeftUpperLeg")
+	if not offset.is_equal_approx(Vector3.ZERO):
+		return _fail("rest_offset_ball_hip",
+				"hip with rest=canonical should yield zero offset, got %s" % offset)
+	return _ok("rest_offset_ball_hip_aligned_returns_zero")
+
+
+func _test_rest_offset_saddle_foot_horizontal_returns_zero() -> bool:
+	# T-pose ankle: leg vertical, foot pointing forward. canonical_along for
+	# Foot = muscle_frame.forward, rest_along = forward → angle = 0.
+	var leg := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.0, 0.0))
+	var foot := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 0.0))
+	var toes := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, -0.3))  # forward = -Z in MuscleFrame default
+	var mf := MuscleFrame.new()
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.SADDLE
+	entry.is_left_side = true
+	entry.calculated_anatomical_basis = Basis.IDENTITY
+	entry.use_calculated_frame = true
+	var offset: Vector3 = BoneProfileGenerator._compute_rest_offset(
+			BoneArchetype.Type.SADDLE, foot, toes, leg,
+			mf, entry, &"LeftFoot")
+	if not offset.is_equal_approx(Vector3.ZERO):
+		return _fail("rest_offset_saddle_foot",
+				"horizontal foot in T-pose should yield zero offset, got %s" % offset)
+	return _ok("rest_offset_saddle_foot_horizontal_returns_zero")
 
 
 func _test_anatomical_pose_subtracts_rest_offset() -> bool:

@@ -97,14 +97,12 @@ const _DROP_HEIGHT: float = 5.0
 const _DROP_GRAVITY_SCALE: float = 1.0
 
 # Default angular/linear damp applied to every dynamic MarionetteBone at
-# scene start. Higher values bleed off motion energy faster (less rubbery
-# wobble); lower values give more lively response. Damp mode is forced to
-# REPLACE so the slider value is authoritative — without that, the project
-# default (or Area3D damp) compounds on top.
-# 5.0 chosen from ragdoll_tuner findings: with anatomical mass + no joint
-# spring, body damp 5–15 keeps the rig stable under random per-bone
-# impulses up to ~1 N·s. See extensions/marionette/tests/ragdoll_tuner.gd.
-const _DEFAULT_BONE_DAMP: float = 5.0
+# scene start. Damp mode is forced to REPLACE so the slider value is
+# authoritative — without that, the project default (or Area3D damp)
+# compounds on top. 0.1 keeps the rig lively (floor slams read as floor
+# slams, not as compliance toward T-pose); slide the per-group damp up if
+# stability under contact becomes an issue.
+const _DEFAULT_BONE_DAMP: float = 0.1
 
 # Slider groups for live-tuning angular+linear damp on whole regions.
 # Each group lights up a slider in the right-hand tuning panel; moving
@@ -202,30 +200,44 @@ var _drag_omega_mul: float = 1.0
 # with radius so the shape stays valid (height >= 2·radius + epsilon).
 var _capsule_radius_mul: float = 1.0
 
-# Whether bone-bone (and bone-world) collisions are active. Defaults OFF
-# so the ragdoll falls through itself and the floor without contact
-# pushing it apart — useful baseline for joint-limit-only debugging. The
-# Geometry-section checkbox flips it; _apply_bone_collisions_state walks
-# every CollisionShape3D and sets `disabled` accordingly. Re-applied after
-# Reset / Drop Test so the state survives sim restarts.
-var _bone_collisions_enabled: bool = false
+# Whether bone-bone (and bone-world) collisions are active. Defaults ON
+# because click-drag picks bones via physics raycasting and the disable
+# path zeroes the bone's collision_layer (defensive double-off), which
+# also hides the bones from the picker. Toggle off only when explicitly
+# debugging joint limits without contact. Re-applied after Reset / Drop
+# Test so the state survives sim restarts.
+var _bone_collisions_enabled: bool = true
 
-# Joint angular spring state — applied to all 3 axes of every dynamic
-# bone's 6DOF joint. Defaults to OFF based on ragdoll_tuner findings:
-# under Jolt, even modest spring stiffness amplifies through the chain
-# and explodes within ~10s. Spring-on behaves like a rigid statue (the
-# chain barely moves) which isn't useful ragdoll behavior either.
-# Toggle on via the Joint section to experiment, but don't expect it to
-# stabilize anything in this physics backend.
-var _joint_spring_enabled: bool = false
-var _joint_spring_stiffness: float = 5.0
-var _joint_spring_damping: float = 0.5
-# Limit softness/damping: how the 6DOF angular limits behave at the
-# boundary. Softness < 1.0 makes the limit spongy instead of perfectly
-# rigid; damping > 0 bleeds approach velocity into the limit.
-var _joint_limit_softness: float = 0.5
-var _joint_limit_damping: float = 1.0
-const _JOINT_AXES: Array[String] = ["x", "y", "z"]
+# Jolt 6DOF property support (4.6):
+#   angular_limit_enabled/lower/upper           — supported
+#   linear_limit_enabled/lower/upper            — supported
+#   angular_limit_softness/damping/restitution  — silently ignored
+#   linear_spring_*                              — silently ignored
+#   angular_spring_enabled/stiffness/damping/   — supported
+#       equilibrium_point
+#
+# Per-region angular spring controls. Mirrors the damping section's region
+# split (fingers / toes / arms / legs / spine / head_neck) so the user can
+# tune small-bone coherence (fingers/toes) and large-bone collapse resistance
+# (arms incl. shoulders, spine) independently. Each entry: enabled, stiffness,
+# damping. equilibrium_point stays at 0 (= rest pose) for every bone — that's
+# the only spring we want pre-SPD.
+const _SPRING_GROUP_LABELS: Dictionary[StringName, String] = {
+	&"fingers": "Fingers", &"toes": "Toes", &"arms": "Arms (incl. shoulders)",
+	&"legs": "Legs", &"spine": "Spine", &"head_neck": "Head/Neck",
+}
+const _SPRING_DEFAULTS: Dictionary[StringName, Array] = {
+	# [enabled, stiffness, damping]. Fingers/toes/arms default-on with the
+	# values the user landed on for toes (k=0.5, c=2.8). Legs/spine/head_neck
+	# default-off; flip them via the UI when needed.
+	&"fingers":   [true,  0.5, 2.8],
+	&"toes":      [true,  0.5, 2.8],
+	&"arms":      [true,  0.5, 2.8],
+	&"legs":      [false, 0.5, 2.8],
+	&"spine":     [false, 0.5, 2.8],
+	&"head_neck": [false, 0.5, 2.8],
+}
+var _spring_groups: Dictionary[StringName, Dictionary] = {}
 
 # Mass distribution. Per-bone CoM-style values in kg; bones not in the
 # table fall back to `_ANATOMICAL_DEFAULT_MASS` (covers all the small
@@ -311,8 +323,11 @@ func _ready() -> void:
 
 	_init_damp_groups()
 	_init_tether_multipliers()
+	_init_spring_groups()
 	_marionette.start_simulation()
 	_initialize_bone_damping()
+	_apply_joint_limits_state()
+	_apply_all_region_springs()
 	_apply_bone_collisions_state()
 	# Anatomical mass distribution applied at start so per-bone masses are
 	# physically reasonable from frame 1 (ragdoll_tuner showed uniform 0.9 kg
@@ -320,7 +335,6 @@ func _ready() -> void:
 	# what made contact impulses pump through the chain).
 	_apply_anatomical_masses()
 	_capture_baseline_masses()
-	_apply_joint_constraint_params()
 	_apply_preset_by_index(_DEFAULT_PRESET_INDEX, false)
 	_set_speed(_SPEEDS[_DEFAULT_SPEED_INDEX])
 	_build_ui()
@@ -449,6 +463,233 @@ func _initialize_bone_damping() -> void:
 		_apply_group_damp(group, _group_damp.get(group, _DEFAULT_BONE_DAMP))
 
 
+# Joint angular limits — two modes, switchable from the UI:
+#
+#   1. Authored ROM (default). Re-applies each MarionetteBone's BoneEntry-
+#      derived limits (rom_min/max shifted by rest_anatomical_offset, with
+#      mirror_abd handled the same way Marionette.build_ragdoll does). This
+#      matches what the ROM gizmo arcs and the bone-slider authoring widgets
+#      show — whatever the user sees in those tools is what physics enforces.
+#
+#   2. Override loose ±N. Writes a symmetric ±N range to every dynamic bone's
+#      x/y/z. Debug aid for ROM-of-the-physics smoke testing — e.g. unsticking
+#      a stuck pose to verify the SPD chain isn't to blame, or auditioning a
+#      wider envelope before deciding whether to widen specific BoneEntry ROMs.
+#
+# UNIT NOTE: the `joint_constraints/<axis>/angular_limit_lower|upper` property
+# hint says `radians_as_degrees` (stored radians, inspector formats as deg),
+# but on the Jolt path the stored number is consumed AS DEGREES — writing
+# 2.6 produced a 2.6° limit (rigid rig), not the 149° the rad-as-deg label
+# implies. So everything we write here is in degrees, and we rad_to_deg the
+# BoneEntry's authored ROM (which is in radians) before writing. The runtime
+# `Marionette._apply_joint_constraints` has the same bug: it writes radians
+# directly. Authored-ROM mode here re-writes those same bones, so the limits
+# end up correct after _ready / _reset / _drop_test — but the underlying
+# runtime path needs a separate fix slice (also touches the rom round-trip
+# unit test in extensions/marionette/tests/run_tests.gd).
+const _LOOSEN_AXES: Array[String] = ["x", "y", "z"]
+
+var _use_loose_limits: bool = false
+var _loose_limit_deg: float = 150.0  # degrees, picked when this mode is on
+
+
+# Picks the active mode and re-applies. Idempotent. Called from _ready,
+# _reset, _drop_test, and from the UI checkbox/slider.
+func _apply_joint_limits_state() -> void:
+	if _use_loose_limits:
+		_loosen_joint_limits(_loose_limit_deg)
+	else:
+		_apply_authored_rom()
+
+
+# Re-walks every dynamic bone and writes its BoneEntry-derived limits — the
+# same math `Marionette._apply_joint_constraints` ran at build_ragdoll time.
+# Use this to undo a loose-override and snap physics back into agreement
+# with the gizmo.
+#
+# NOTE: the runtime path in Marionette currently does NOT mirror the
+# `is_right_sided_med` flip that the gizmo and slider apply on right-side
+# BALL/CLAVICLE bones, so on those right-side bones the physics medial-rot
+# range will read sign-flipped relative to the gizmo. Mirroring that here in
+# the test scene would mask the latent bug — leave the runtime parity intact.
+# (Latent because shipped BALL/CLAVICLE rom_y values are symmetric and
+# rest_offset.y is currently zero on T-pose rigs, so the sign error is
+# invisible until either of those changes.)
+func _apply_authored_rom() -> void:
+	if _simulator == null:
+		return
+	var written: int = 0
+	var probe: MarionetteBone = null
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		if child is JiggleBone:
+			continue
+		var b: MarionetteBone = child
+		var entry: BoneEntry = b.bone_entry
+		if entry == null:
+			continue
+		var lo: Vector3 = entry.rom_min - entry.rest_anatomical_offset
+		var up: Vector3 = entry.rom_max - entry.rest_anatomical_offset
+		for i: int in range(3):
+			var axis: String = _LOOSEN_AXES[i]
+			var lower_rad: float = lo[i]
+			var upper_rad: float = up[i]
+			if i == 2 and entry.mirror_abd:
+				var t: float = lower_rad
+				lower_rad = -upper_rad
+				upper_rad = -t
+			# X-axis (flex) sign quirk — HINGE archetypes only. Empirically,
+			# elbow / knee / finger-and-toe phalanges read mirrored under
+			# Jolt without the flip; SADDLE (foot, wrist), BALL (shoulder,
+			# hip), SPINE_SEGMENT, CLAVICLE, and the rest read correctly
+			# without it. SADDLE foot was confirmed flipped *with* the
+			# universal flip (asymmetric ROM -15°..+40° came out as the
+			# opposite). Suspected cause: `_compute_rest_offset` is the only
+			# place that produces a non-zero rest_anatomical_offset.x, and
+			# only on HINGE — the offset apparently combines with Jolt's X
+			# decomposition in a way that mirrors the limit. If a different
+			# archetype later reads mirrored on a deliberately asymmetric
+			# axis, extend this conditional.
+			if i == 0 and entry.archetype == BoneArchetype.Type.HINGE:
+				var t: float = lower_rad
+				lower_rad = -upper_rad
+				upper_rad = -t
+			b.set("joint_constraints/%s/angular_limit_enabled" % axis, true)
+			# Property hint claims radians_as_degrees but the Jolt path treats
+			# the stored number as degrees — write the deg value directly.
+			b.set("joint_constraints/%s/angular_limit_lower" % axis, rad_to_deg(lower_rad))
+			b.set("joint_constraints/%s/angular_limit_upper" % axis, rad_to_deg(upper_rad))
+		written += 1
+		if probe == null and StringName(b.bone_name) == &"LeftUpperArm":
+			probe = b
+	if probe != null:
+		# Read back what was actually written so the print matches the Remote
+		# tree (X reflects the swap-and-negate flip; Y, Z unchanged).
+		var x_lo: float = probe.get("joint_constraints/x/angular_limit_lower")
+		var x_up: float = probe.get("joint_constraints/x/angular_limit_upper")
+		var y_lo: float = probe.get("joint_constraints/y/angular_limit_lower")
+		var y_up: float = probe.get("joint_constraints/y/angular_limit_upper")
+		var z_lo: float = probe.get("joint_constraints/z/angular_limit_lower")
+		var z_up: float = probe.get("joint_constraints/z/angular_limit_upper")
+		print("[authored_rom] %d bones  LeftUpperArm (deg, post-flip): x=[%.1f, %.1f]  y=[%.1f, %.1f]  z=[%.1f, %.1f]" %
+				[written, x_lo, x_up, y_lo, y_up, z_lo, z_up])
+	else:
+		print("[authored_rom] %d bones written" % written)
+
+
+# Symmetric override in DEGREES. Writes ±value_deg to every angular axis on
+# every dynamic bone (jiggle bones excepted). Intended for testing free
+# articulation when the authored ROM is the wrong shape for the rig's rest
+# pose.
+func _loosen_joint_limits(value_deg: float) -> void:
+	if _simulator == null:
+		return
+	var written: int = 0
+	var probe: MarionetteBone = null
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		if child is JiggleBone:
+			continue
+		var b: MarionetteBone = child
+		for axis: String in _LOOSEN_AXES:
+			b.set("joint_constraints/%s/angular_limit_enabled" % axis, true)
+			b.set("joint_constraints/%s/angular_limit_lower" % axis, -value_deg)
+			b.set("joint_constraints/%s/angular_limit_upper" % axis, value_deg)
+		written += 1
+		if probe == null and StringName(b.bone_name) == &"LeftUpperArm":
+			probe = b
+	if probe != null:
+		var lo_x: float = probe.get("joint_constraints/x/angular_limit_lower")
+		var up_x: float = probe.get("joint_constraints/x/angular_limit_upper")
+		print("[loose_limits] %d bones  LeftUpperArm read-back (deg): x=[%.1f, %.1f]  (wrote ±%.1f)" %
+				[written, lo_x, up_x, value_deg])
+	else:
+		print("[loose_limits] %d bones written" % written)
+
+
+func _on_loose_limits_toggled(on: bool) -> void:
+	_use_loose_limits = on
+	_apply_joint_limits_state()
+
+
+func _on_loose_limit_value_changed(v: float) -> void:
+	_loose_limit_deg = v
+	if _use_loose_limits:
+		_apply_joint_limits_state()
+
+
+# Builds the per-group spring state from `_SPRING_DEFAULTS`. Called once
+# from `_ready` because the dictionary literal in defaults isn't writable
+# directly and we want fresh per-instance state on each scene load.
+func _init_spring_groups() -> void:
+	_spring_groups.clear()
+	for group: StringName in _DAMP_GROUP_ORDER:
+		var d: Array = _SPRING_DEFAULTS.get(group, [false, 0.5, 2.8])
+		_spring_groups[group] = {
+			"enabled": d[0], "stiffness": d[1], "damping": d[2],
+		}
+
+
+# Writes the angular-spring state for every dynamic MarionetteBone whose
+# region falls in `group`'s region set. Reuses `_damp_group_regions` (the
+# same StringName→[Region…] map the damping section uses), so a bone is
+# in exactly one spring group at most. Disabling writes `enabled=false` so
+# the spring stops contributing — stiffness/damping values are still
+# pushed so a re-enable picks the slider state back up immediately.
+func _apply_region_spring(group: StringName) -> void:
+	if _simulator == null:
+		return
+	var state: Dictionary = _spring_groups.get(group, {})
+	if state.is_empty():
+		return
+	var enabled: bool = state["enabled"]
+	var stiffness: float = state["stiffness"]
+	var damping: float = state["damping"]
+	var regions: Array = _damp_group_regions.get(group, [])
+	if regions.is_empty():
+		return
+	var count: int = 0
+	for child: Node in _simulator.get_children():
+		if not (child is MarionetteBone):
+			continue
+		if child is JiggleBone:
+			continue
+		var b: MarionetteBone = child
+		var region: int = MarionetteBoneRegion.region_for(StringName(b.bone_name))
+		if not regions.has(region):
+			continue
+		for axis: String in _LOOSEN_AXES:
+			b.set("joint_constraints/%s/angular_spring_enabled" % axis, enabled)
+			b.set("joint_constraints/%s/angular_spring_stiffness" % axis, stiffness)
+			b.set("joint_constraints/%s/angular_spring_damping" % axis, damping)
+		count += 1
+	print("[spring:%s] %s on %d bones  k=%.2f  c=%.2f" %
+			[group, "enabled" if enabled else "disabled",
+			count, stiffness, damping])
+
+
+func _apply_all_region_springs() -> void:
+	for group: StringName in _DAMP_GROUP_ORDER:
+		_apply_region_spring(group)
+
+
+func _on_spring_group_enabled(group: StringName, on: bool) -> void:
+	_spring_groups[group]["enabled"] = on
+	_apply_region_spring(group)
+
+
+func _on_spring_group_stiffness(group: StringName, v: float) -> void:
+	_spring_groups[group]["stiffness"] = v
+	_apply_region_spring(group)
+
+
+func _on_spring_group_damping(group: StringName, v: float) -> void:
+	_spring_groups[group]["damping"] = v
+	_apply_region_spring(group)
+
+
 # Sets `disabled` on every bone CollisionShape3D from `_bone_collisions_enabled`,
 # AND zeroes the body's collision_layer/mask when disabled — belt and
 # suspenders so the body is fully off the broadphase even if some Jolt
@@ -551,51 +792,6 @@ func _print_mass_state(reason: String, count: int) -> void:
 			PhysicsServer3D.BODY_PARAM_MASS) if idx != null else 0.0
 	print("[mass:%s] %d bones  Hips=%.3f (srv %.3f)  LeftIndexProximal=%.4f (srv %.4f)  scale=%.2f" %
 			[reason, count, hips_m, hips_srv, idx_m, idx_srv, _mass_scale])
-
-
-# Pushes joint-spring + limit-softness state into every dynamic bone's
-# 6DOF joint. Called on every relevant slider/checkbox change and on
-# _ready so the initial state matches the UI. Properties are dynamic
-# (set via path strings) — Jolt may not honor every one of them; if a
-# slider has no visible effect that's the engine, not the wiring.
-func _apply_joint_constraint_params() -> void:
-	if _simulator == null:
-		return
-	for child: Node in _simulator.get_children():
-		if not (child is MarionetteBone):
-			continue
-		var b: MarionetteBone = child
-		for axis: String in _JOINT_AXES:
-			b.set("joint_constraints/%s/angular_limit_softness" % axis, _joint_limit_softness)
-			b.set("joint_constraints/%s/angular_limit_damping" % axis, _joint_limit_damping)
-			b.set("joint_constraints/%s/angular_spring_enabled" % axis, _joint_spring_enabled)
-			b.set("joint_constraints/%s/angular_spring_stiffness" % axis, _joint_spring_stiffness)
-			b.set("joint_constraints/%s/angular_spring_damping" % axis, _joint_spring_damping)
-
-
-func _on_joint_limit_softness_changed(v: float) -> void:
-	_joint_limit_softness = v
-	_apply_joint_constraint_params()
-
-
-func _on_joint_limit_damping_changed(v: float) -> void:
-	_joint_limit_damping = v
-	_apply_joint_constraint_params()
-
-
-func _on_joint_spring_enabled_toggled(on: bool) -> void:
-	_joint_spring_enabled = on
-	_apply_joint_constraint_params()
-
-
-func _on_joint_spring_stiffness_changed(v: float) -> void:
-	_joint_spring_stiffness = v
-	_apply_joint_constraint_params()
-
-
-func _on_joint_spring_damping_changed(v: float) -> void:
-	_joint_spring_damping = v
-	_apply_joint_constraint_params()
 
 
 # Removes any existing debug meshes, then (if `_show_capsules`) spawns a
@@ -853,12 +1049,13 @@ func _reset() -> void:
 	Engine.time_scale = prior_scale
 	_marionette.start_simulation()
 	_initialize_bone_damping()
+	_apply_joint_limits_state()
+	_apply_all_region_springs()
 	_apply_bone_collisions_state()
 	# Don't re-capture baselines — that would clobber an anatomical pass
 	# the user already applied. Mass scale slider is the live knob if they
 	# want it different post-reset.
 	_apply_mass_scale(_mass_scale)
-	_apply_joint_constraint_params()
 	_apply_preset_by_index(_DEFAULT_PRESET_INDEX)
 
 
@@ -892,9 +1089,10 @@ func _drop_test() -> void:
 	Engine.time_scale = prior_scale
 	_marionette.start_simulation()
 	_initialize_bone_damping()
+	_apply_joint_limits_state()
+	_apply_all_region_springs()
 	_apply_bone_collisions_state()
 	_apply_mass_scale(_mass_scale)
-	_apply_joint_constraint_params()
 	_apply_gravity_scale()
 	_refresh_tethers()
 	_sync_ui_state()
@@ -1341,7 +1539,7 @@ func _build_tuning_panel() -> void:
 	anchor.offset_left = -WIDTH - 12.0
 	anchor.offset_top = 12.0
 	anchor.offset_right = -12.0
-	anchor.offset_bottom = 12.0 + 760.0  # height; sized to the section count
+	anchor.offset_bottom = 12.0 + 1100.0  # height; sized to the section count
 	layer.add_child(anchor)
 
 	var col := VBoxContainer.new()
@@ -1395,26 +1593,54 @@ func _build_tuning_panel() -> void:
 	col.add_child(anat_btn)
 
 	col.add_child(_make_spacer(8))
-	col.add_child(_make_section_header("Joint angular spring"))
-	var spring_row := HBoxContainer.new()
-	var spring_cb := CheckBox.new()
-	spring_cb.text = "Enabled"
-	spring_cb.button_pressed = _joint_spring_enabled
-	spring_cb.tooltip_text = "Adds a torsional spring at each 6DOF axis pulling the joint toward equilibrium. Replaces SPD muscle stiffness as the thing keeping the chain coherent under contact."
-	spring_cb.toggled.connect(_on_joint_spring_enabled_toggled)
-	spring_row.add_child(spring_cb)
-	col.add_child(spring_row)
-	col.add_child(_make_slider_row("Stiffness", 0.0, 50.0, 0.5, _joint_spring_stiffness,
-			_on_joint_spring_stiffness_changed))
-	col.add_child(_make_slider_row("Damping", 0.0, 5.0, 0.05, _joint_spring_damping,
-			_on_joint_spring_damping_changed))
+	col.add_child(_make_section_header("Joint limits"))
+	var limits_row := HBoxContainer.new()
+	var loose_cb := CheckBox.new()
+	loose_cb.text = "Override loose ±"
+	loose_cb.button_pressed = _use_loose_limits
+	loose_cb.tooltip_text = "Off (default): every joint uses the BoneEntry-authored ROM (rom_min/max - rest_anatomical_offset). This is what the ROM gizmo arcs and the bone-slider widgets show. On: writes a symmetric ±N° range (degrees) to every angular axis. Debug aid — useful for sanity-checking the SPD chain in isolation from ROM clamps."
+	loose_cb.toggled.connect(_on_loose_limits_toggled)
+	limits_row.add_child(loose_cb)
+	col.add_child(limits_row)
+	col.add_child(_make_slider_row("± deg", 5.0, 180.0, 1.0, _loose_limit_deg,
+			_on_loose_limit_value_changed))
+	var rom_btn := Button.new()
+	rom_btn.text = "Re-apply authored ROM"
+	rom_btn.tooltip_text = "Untoggles loose mode and snaps every joint back to its BoneEntry-derived limits (rom_min/max - rest_anatomical_offset). Use after a build_ragdoll change, or to verify physics matches the gizmo."
+	rom_btn.pressed.connect(func() -> void:
+		if _use_loose_limits:
+			_use_loose_limits = false
+		_apply_joint_limits_state())
+	col.add_child(rom_btn)
 
 	col.add_child(_make_spacer(8))
-	col.add_child(_make_section_header("Joint limit"))
-	col.add_child(_make_slider_row("Softness", 0.0, 1.0, 0.02, _joint_limit_softness,
-			_on_joint_limit_softness_changed))
-	col.add_child(_make_slider_row("Damping", 0.0, 1.0, 0.02, _joint_limit_damping,
-			_on_joint_limit_damping_changed))
+	col.add_child(_make_section_header("Region springs"))
+	for group: StringName in _DAMP_GROUP_ORDER:
+		var state: Dictionary = _spring_groups[group]
+		# Capture group locally so each closure sees its own iteration's value.
+		# Avoids Callable.bind's argument-order subtlety (it appends rather than
+		# prepends in the slider/checkbox call paths used here).
+		var g: StringName = group
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var label := Label.new()
+		label.text = _SPRING_GROUP_LABELS.get(group, String(group))
+		label.custom_minimum_size = Vector2(150, 0)
+		label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		label.add_theme_constant_override("outline_size", 2)
+		row.add_child(label)
+		var cb := CheckBox.new()
+		cb.text = "On"
+		cb.button_pressed = state["enabled"]
+		cb.tooltip_text = "Jolt's 6DOF angular spring on every dynamic bone in this region (rest-pose equilibrium). Pulls flailing chains back to rest so the rig reads coherent. Tune k and c per region — small bones (fingers/toes) want different values than large bones (arms/legs/spine)."
+		cb.toggled.connect(func(on: bool) -> void:
+			_on_spring_group_enabled(g, on))
+		row.add_child(cb)
+		col.add_child(row)
+		col.add_child(_make_slider_row("k", 0.0, 1.0, 0.01, state["stiffness"],
+				func(v: float) -> void: _on_spring_group_stiffness(g, v)))
+		col.add_child(_make_slider_row("c", 0.0, 5.0, 0.05, state["damping"],
+				func(v: float) -> void: _on_spring_group_damping(g, v)))
 
 
 static func _make_section_header(text: String) -> Label:
