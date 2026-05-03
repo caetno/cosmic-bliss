@@ -1,0 +1,28 @@
+[gd_resource type="Resource" script_class="TentacleMood" load_steps=2 format=3 uid="uid://b8tmood4ldrape"]
+
+[ext_resource type="Script" path="res://addons/tentacletech/scripts/behavior/tentacle_mood.gd" id="1_script"]
+
+[resource]
+resource_name = "4L drape"
+script = ExtResource("1_script")
+wave_amplitude_scale = 0.0
+wave_temporal_freq = 0.0
+wave_drift_speed = 0.0
+wave_noise_freq = 0.0
+wave_spatial_phase = 0.0
+thrust_frequency = 0.0
+thrust_amplitude = 0.0
+thrust_bias = 0.0
+thrust_strike_sharpness = 1.0
+coil_amplitude = 0.0
+rest_extent = 1.0
+pose_stiffness = 0.0
+pose_softness_when_blocked = 0.0
+bending_stiffness = 0.3
+damping = 0.97
+contact_stiffness = 0.4
+contact_velocity_damping = 0.7
+attractor_bias = 0.0
+amplitude_smoothing_rate = 0.0
+thrust_phase_edge_smoothing = 0.0
+time_scale = 1.0
