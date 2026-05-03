@@ -263,7 +263,7 @@ All share the PBD projection pattern from §4.3. Different detection and differe
 | 1 | Particle vs ragdoll capsule | Once-per-tick snapshot + AABB broadphase | Project outside capsule surface; apply reaction impulse to bone | Yes |
 | 2 | Particle vs orifice rim | EntryInteraction geometric test | Per-direction ring bilateral compliance (§6.3) | Yes |
 | 3 | Particle vs tunnel wall | Spline projection with radius tolerance | Project onto tunnel cylinder; record wall pressure | Yes |
-| 4 | Particle vs environment | Limited raycasts (3 per tentacle per tick) | Project out of surface along hit normal | Yes |
+| 4 | Particle vs environment | Per-particle sphere `get_rest_info` query, iterated up to `MAX_CONTACTS_PER_PARTICLE = 2` slots with growing exclude list (slice 4M, 2026-05-03) | Per-contact XPBD penetration projection with persistent `normal_lambda` accumulator; Jacobi+SOR position apply averages multi-contact deltas | Yes (per-contact lambda-bounded cone) |
 | 5 | Particle vs tentacle particle | Spatial hash (always on inside orifices) | Push apart symmetric, half each | Yes |
 | 6 | Tentacle surface vs grab target | Explicit attachment constraint with slip | Particle pinned to target with friction-limited slip | Yes |
 | 7 | Tip vs closed surface (probing) | Same as #1 until orifice boundary crossed | Same as #1 | Yes |
@@ -309,6 +309,8 @@ else:
 **This single block handles stick-slip, grip, rib modulation, and all surface interactions.** There is no state machine. The friction cone *is* the state — whether tangential motion falls inside or outside of it is computed each iteration from current values.
 
 **Per-iteration semantics.** Friction projects every PBD iteration. In *naturally-resolved* contacts (gravity holds the chain to a floor) iter 1's collision push leaves Δn ≈ 0 in iters 2–4, so per-tick cancellation tapers to ~1× `kinetic_cone` automatically — `Δx` is measured from `prev_position` so iter 1 already canceled what it could against the start-of-tick reference. In *actively-driven* contacts (a pose target continuously pushing the chain into a wall) the depth re-accumulates each iter and friction can stack to `iter_count × kinetic_cone` per tick — a ~4× over-friction worst case at default `iter_count = 4`. Acceptable for now; a per-tick friction budget on `TentacleParticle` (reset in `predict()`, decremented per friction projection) is the proper fix when specific scenarios force it. See `Cosmic_Bliss_Update_2026-05-02_phase4_friction_correction.md`.
+
+**Per-contact lambda-bounded cone (slice 4M, 2026-05-03).** The block above is the original tightly-coupled-to-Δn form. The shipping implementation lifts from Obi `ContactHandling.cginc::SolveFriction`: each environment contact slot maintains a persistent `normal_lambda` accumulator (`max(λ + dlambda, 0)` clamped, where `dlambda` comes from XPBD-style penetration projection) that survives across iterations within an outer tick. Friction cones are sized by *that contact's* accumulated normal impulse (`static_cone = μ_s × normal_lambda`, `kinetic_cone = μ_k × normal_lambda` in m·kg units), not the per-iter Δn. The "4× over-friction worst case" the original form had under repeated iterations is gone — `normal_lambda` can only grow during the iter loop (clamped to ≥ 0), so subsequent iters see the same or larger cone, never an inflated copy. Multi-contact friction is per-slot — a particle in two contacts gets two friction projections, position deltas Jacobi-averaged via SOR. Per-slot `friction_applied` is unaveraged so the type-1 reciprocal pass routes each slot's share to its own colliding body (a particle rubbing against two surfaces correctly produces full reciprocal impulse on each). See `Cosmic_Bliss_Update_2026-05-03_phase4_wedge_robustness.md` for the full reshape and `pbd_research/findings_obi_synthesis.md` for the source-level synthesis. **Spec divergence flagged in CLAUDE.md status row:** the cone is scalar 1D (along current `dx_tan_dir`), not Obi's tangent/bitangent pyramid — acceptable for a 1D chain where tangent motion is dominated by the chord direction.
 
 For each friction projection on a type-1 collision, the friction displacement is also applied as an equal-and-opposite impulse on the contacted ragdoll bone:
 
@@ -2121,14 +2123,23 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 12. Ragdoll snapshot
 13. Type-1, type-4 collision
 14. Unified friction projection
-15. Acceptance: tentacles don't phase through hero, drag-along behavior, stick-slip visible on ribbed tentacles
+14a. **Multi-contact probe + Jacobi+lambda solver loop** (slice 4M; per-particle manifold up to 2 contacts via iterated `get_rest_info` + exclude list, Jacobi-with-atomic-deltas-and-SOR position accumulator, per-contact persistent `normal_lambda` + `tangent_lambda` accumulators replacing the per-particle dn budget; lifted from Obi `ContactHandling.cginc` + `AtomicDeltas.cginc` + `ColliderCollisionConstraints.compute`)
+14b. **XPBD compliance on the distance constraint** (slice 4M-XPBD; canonical Macklin form per Obi `DistanceConstraints.compute`, per-segment lambda buffer reset in `predict()` per outer tick — required for repeated-solve position correctness)
+14c. **Fresh-this-tick contact snapshot** (slice 4N; `Tentacle::get_in_contact_this_tick_snapshot()` written between probe and iterate, gives consumers running between those points one-tick-fresh manifold flags)
+14d. **Sub-stepping for thrust frames** (slice 4O; promoted from Phase 9 polish — outer-frame substep loop with displacement-driven heuristic floor, friction_applied accumulates across substeps via `reset_friction_applied`, reciprocal impulse uses outer dt for correct momentum)
+14e. **Sleep threshold + max depenetration cap** (slice 4P; settle in-contact particles below `||position − prev_position||² ≤ (threshold·dt)²` by snapping to `prev_position`; cap per-iter normal-lambda growth to `max_depenetration · dt` so deep penetrations resolve over multiple ticks not one explosive frame)
+15. Acceptance: tentacles don't phase through hero, drag-along behavior, stick-slip visible on ribbed tentacles, settled chains converge under multi-contact wedge geometry without per-tick flicker, thrust scenarios with target stiffness ≥ 0.5 don't tunnel through static walls
 
-**Phase 5 — Orifice system**
-16. Ring bones + weight painting auto-generator plugin
-17. EntryInteraction + bilateral compliance (single tentacle first)
-18. Spring-damper ring dynamics
-19. Type-2, type-3 collision (orifice rim, tunnel walls, straight tunnels first)
-20. Acceptance: tentacle penetrates, orifice stretches with jiggle, bulge retention on retract
+**Phase 4 close-out cluster reference docs** (all 2026-05-03): plan in `Cosmic_Bliss_Update_2026-05-03_phase4_wedge_robustness.md`; Obi 7.x source synthesis in `docs/pbd_research/findings_obi_synthesis.md`. Phase 4 fully landed 2026-05-03; Phase 5 unblocked.
+
+**Phase 5 — Orifice system** (rim particle loop model per `Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md`; supersedes the pre-2026-05-03 driven 8-direction ring-bone draft)
+16. Rim anchor authoring + skin weighting in Blender (rim anchors are kinematic targets for rim particle rest positions in Center frame, NOT driven outputs; mesh skin weights bind to anchor names but skinning shader reads live rim particle world positions)
+17. `RimParticle` / `RimLoopState` data structures + `Orifice` C++ owning per-loop XPBD constraint set (closed-loop distance + volume on enclosed area + per-particle spring-back to authored rest position + soft attachment to host bone via orifice frame)
+18. Multi-loop per orifice — single (default), outer + inner anatomical, decorated rim (jewelry + anatomical opening), compound openings (multi-sphincter tunnels for peristalsis); inter-loop coupling springs authored per-pair, optional
+19. EntryInteraction + bilateral compliance via per-particle stiffness distribution (single tentacle first; multi-loop authoring path open)
+20. Type-2, type-3 collision (orifice rim is the closed PBD loop; tunnel walls; straight tunnels first); reaction-on-host-bone closure per-rim-particle with the existing wedge math
+20a. Realism sub-slices from `Cosmic_Bliss_Update_2026-05-03_obi_realism_and_orifice.md` §4: **4P-A** one-sided XPBD distance for compress > stretch anisotropy (Obi tether pattern); **4P-B** strain-stiffening J-curve on rim spring-back; **4P-C** slow rest-position recovery for orifice memory
+21. Acceptance: tentacle penetrates, rim deforms with continuous (non-faceted) silhouette under load, multi-loop configurations (outer + inner) supported, orifice memory persists across attempts, glancing approaches slide off the rim naturally without scripted angle gates
 
 **Phase 6 — Stimulus bus + mechanical sound**
 21. StimulusBus autoload with events, continuous channels, modulation channels
@@ -2164,9 +2175,10 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 
 **Phase 9 — Polish**
 37. Tentacle-vs-tentacle outside orifices (optional)
-38. Sub-stepping for fast motion
+38. ChainConstraints direct tridiagonal solver for *free-air* (non-contact) chain segments — promoted from Obi 7.x research (`pbd_research/findings_obi_synthesis.md`); O(N) one-pass exact for pure chains, but doesn't compose with multi-contact softening, so contact-touching segments stay on per-segment XPBD
 39. Per-region bulger stiffness
-40. Profile on low-end hardware, cut iteration counts as needed
+40. CCD against capsules (only if 4O sub-stepping proves insufficient for thrust scenarios; 4O typically makes this unnecessary)
+41. Profile on low-end hardware, cut iteration counts as needed
 
 ---
 
@@ -2185,7 +2197,11 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 - Storage bulgers are never evicted while their region is on-camera. Respect the priority tier.
 
 **Gotchas:**
-- **Tunneling at high velocity:** particle sub-stepping kicks in when displacement > 50% of safety radius. Default to 1×; escalate to 2–3× for tentacles currently in thrust scenarios.
+- **Tunneling at high velocity:** outer-frame substep loop (slice 4O, 2026-05-03) auto-bumps the per-frame substep count when worst-case predicted displacement (gravity·dt² + singleton-target snap) exceeds `0.5 × collision_radius`. `substep_count` @export on Tentacle/TentacleMood is a FLOOR (heuristic can exceed it), hard-capped at 4. Pose-target driven thrust intentionally omitted from the heuristic — thrust-heavy moods set `substep_count` manually (typical 2-4). Strict no-tunnel guarantee requires CCD against capsules (Phase 9, only if sub-stepping proves insufficient).
+- **Multi-contact wedge:** chain particle pinched between two solid colliders requires multi-contact probe + per-contact lambda accumulator (slice 4M, 2026-05-03; `MAX_CONTACTS_PER_PARTICLE = 2`). Single-normal projection would oscillate at any wedge half-angle below ~80° because the cached "nearest" contact flips per-tick. Jacobi+SOR position-delta averaging handles N contacts naturally without bisector heuristics; the per-contact `normal_lambda` accumulator scales each slot's friction cone independently.
+- **Anti-parallel pinch (n0·n1 < −0.5)** is geometrically degenerate: both contact projections cancel under Jacobi averaging — PBD has nothing to push against. Friction zeroes out by design (no useful tangent direction). Detect and emit a `pinched` event on the bus (Phase 6) rather than thrashing the iterate loop. Particle stays at the pinch point; this is correct.
+- **Fresh-contact snapshot vs last-tick snapshot:** `PBDSolver::get_particle_in_contact_snapshot()` reflects the previous tick's iterate-loop flags (gated on `inv_mass > 0`). Behavior drivers reducing stiffness on contact should consume `Tentacle::get_in_contact_this_tick_snapshot()` (slice 4N, 2026-05-03; written between probe and iterate, fires for any particle within probe range including pinned). The two accessors have different semantics by design — choose by use case. Process-order requirement: drivers consuming the fresh accessor must run their `_physics_process` after the Tentacle's; default parent-first ordering when the driver is a child of the Tentacle gives this for free.
+- **`predict()` clears `in_contact_this_tick`:** the `target_softness_when_blocked` modulation in iterate step 2 (slice 4M-pre.2) reads the flag set by the *previous* iter's collision step, so iter 0 of every tick pulls at full strength regardless of contact state — a 1-iter latency on the softening. Acceptable for headless tests (steady-state convergence dominates); flagged for future work if a scenario shows soft-vs-stiff difference invisibly.
 - **Orifice boundary flipping:** hysteresis on "inside tunnel" vs "outside" — enter at 5cm past plane, exit at 2cm outside.
 - **Double-counting at orifice entry:** type-1 capsule collision is suppressed per-particle for capsules in the orifice's `suppressed_bones` list. Prevents particle feeling both capsule push and ring compression.
 - **Friction resonance/jitter:** high `μ_s` with low iteration count oscillates at the cone boundary. Add 5% dead-band around static cone threshold.

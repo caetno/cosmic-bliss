@@ -1,6 +1,8 @@
 # Cosmic Bliss — Design Update 2026-05-03 — Phase 4 wedge robustness
 
-> **Status: pending — slice 4M reshaped 2026-05-03 after Obi source review.**
+> **Status: applied 2026-05-03.** All cluster slices (4M-pre / 4M / 4M-XPBD / 4N / 4O / 4P) shipped. Top-level review of cluster spec divergences ratified them as acceptable design decisions. The post-review architecture-doc edits in §"Spec edits to apply post-review" below have been applied to `docs/architecture/TentacleTech_Architecture.md` (§13 phase plan now reflects close-out cluster items 14a–14e and the rim-model-amended Phase 5; §14 gotchas gain four new bullets covering tunneling/multi-contact-wedge/anti-parallel-pinch/fresh-contact-snapshot/`predict()`-clears-flag; §4.2 collision types table updated for multi-contact; §4.3 friction projection gains the per-contact-lambda variant). This doc remains as changelog. Phase 5 unblocked.
+>
+> **Original status header (2026-05-03):** pending — slice 4M reshaped 2026-05-03 after Obi source review.
 > Initial slice plan for sub-Claude in `extensions/tentacletech/`. Top-level
 > review of Web-Claude-Code's wedge-case analysis confirmed the structural
 > mismatch flagged as deferred slice 4M is real, plus four other issues
