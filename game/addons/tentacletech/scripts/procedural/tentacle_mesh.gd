@@ -286,21 +286,27 @@ func _ensure_baked() -> void:
 	_cached_errors = ctx.errors
 	_cached_warnings = ctx.warnings
 
-	# Worst-case AABB for spline-deformed culling. The vertex shader
-	# (§5.3) places each ring along the bent spline, so the deformed mesh
-	# can reach anywhere within a sphere of radius `length` from the
-	# Tentacle node origin. Without an override, Godot frustum-culls using
-	# the rest-pose AABB (a cylinder along +Z from z=0 to z=length) and
-	# drops the whole tentacle whenever the *rest pose* is off-screen even
-	# if the bent silhouette is fully on-screen. Padded by peak_radius for
-	# the §3.1 layered girth deformation envelope.
+	# AABB for spline-deformed culling. The vertex shader (§5.3) places each
+	# ring along the bent spline, so the bent silhouette can reach laterally
+	# in any direction (±X, ±Y) by up to the chain length. Along the chain
+	# axis the mesh is one-sided: the anchor is at local origin and the
+	# mesh extends in -Z by `length` (plus tip cap overrun). The chain only
+	# crosses into +Z if it swings past the anchor — uncommon, and we accept
+	# the (rare) cull miss in exchange for a tight rest-pose AABB that hugs
+	# the actual visible mesh instead of mirroring above the anchor.
+	#
+	# Padded by peak_radius for the §3.1 layered girth deformation envelope.
 	var cap_overrun: float = (tip_radius * tip_pointiness
 			if tip_cap_rings > 0
 			else length * 0.5 / float(length_segments))
 	var pad: float = maxf(_cached_peak_radius,
 			maxf(base_radius, maxf(tip_radius, cap_overrun)))
 	var reach: float = length + pad
-	custom_aabb = AABB(Vector3(-reach, -reach, -reach), Vector3(2.0 * reach, 2.0 * reach, 2.0 * reach))
+	# Local Z range: [-(length + pad), +pad]. Lateral X/Y: ±reach so a fully
+	# bent chain (90° off-axis) is still inside the AABB.
+	custom_aabb = AABB(
+			Vector3(-reach, -reach, -length - pad),
+			Vector3(2.0 * reach, 2.0 * reach, length + 2.0 * pad))
 
 	_baked = true
 	_baking = false

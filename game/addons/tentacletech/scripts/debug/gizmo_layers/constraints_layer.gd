@@ -40,8 +40,9 @@ func _ready() -> void:
 	# Render after the tentacle mesh so it can't paint over us.
 	_material.render_priority = RenderingServer.MATERIAL_RENDER_PRIORITY_MAX
 	material_override = _material
-
-	top_level = true
+	# top_level not used — see particles_layer.gd for the rationale. The
+	# layer inherits the Tentacle's transform; update_from converts world
+	# particle positions to layer-local before drawing.
 
 
 func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
@@ -49,11 +50,18 @@ func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
 	if p_tentacle == null:
 		return
 
-	var positions: PackedVector3Array = p_tentacle.call(&"get_particle_positions")
+	var positions_world: PackedVector3Array = p_tentacle.call(&"get_particle_positions")
 	var ratios: PackedFloat32Array = p_tentacle.call(&"get_segment_stretch_ratios")
-	var n: int = positions.size()
+	var n: int = positions_world.size()
 	if n < 2:
 		return
+
+	# Convert world to layer-local — see particles_layer.gd for rationale.
+	var inv: Transform3D = global_transform.affine_inverse()
+	var positions: PackedVector3Array = PackedVector3Array()
+	positions.resize(n)
+	for i in n:
+		positions[i] = inv * positions_world[i]
 
 	# Estimate segment length for sizing the bending arc — use the rest of the
 	# first segment if available, otherwise the current.
@@ -84,7 +92,7 @@ func update_from(p_tentacle: Node3D, p_show_bending: bool = true) -> void:
 		var pidx: int = pull_state.get("particle_index", -1)
 		if pidx >= 0 and pidx < n:
 			var from: Vector3 = positions[pidx]
-			var to: Vector3 = pull_state.get("target", from)
+			var to: Vector3 = inv * pull_state.get("target", positions_world[pidx])
 			_draw_arrow(from, to, _Colors.TARGET)
 			_draw_sphere(to, TARGET_MARKER_SIZE, _Colors.TARGET_MARKER)
 

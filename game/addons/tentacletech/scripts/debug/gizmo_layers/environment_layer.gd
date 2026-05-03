@@ -46,8 +46,9 @@ func _ready() -> void:
 	_material.render_priority = RenderingServer.MATERIAL_RENDER_PRIORITY_MAX
 	material_override = _material
 
-	# Snapshot positions are world-space — match the other layers' convention.
-	top_level = true
+	# top_level not used — see particles_layer.gd for the rationale. The
+	# layer inherits the Tentacle's transform; update_from converts the
+	# world-space snapshot to layer-local before drawing.
 
 
 func update_from(p_tentacle: Node3D) -> void:
@@ -60,16 +61,25 @@ func update_from(p_tentacle: Node3D) -> void:
 	if contacts.is_empty():
 		return
 
-	_imesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	# Defer surface_begin until we know we have at least one vertex — Godot
+	# refuses to close an empty surface and spams an error otherwise.
+	var any_vertex: bool = false
+	# Convert world snapshot to layer-local — see particles_layer.gd.
+	var inv: Transform3D = global_transform.affine_inverse()
 	for entry in contacts:
 		if not (entry is Dictionary):
 			continue
-		var origin: Vector3 = entry.get("query_origin", Vector3.ZERO)
+		var origin: Vector3 = inv * entry.get("query_origin", Vector3.ZERO)
 		var hit: bool = entry.get("hit", false)
-		var hit_point: Vector3 = entry.get("hit_point", Vector3.ZERO)
-		var hit_normal: Vector3 = entry.get("hit_normal", Vector3.UP)
+		var hit_point: Vector3 = inv * entry.get("hit_point", Vector3.ZERO)
+		# Hit normal is a direction — rotate by inverse basis only (no
+		# translation), keep unit length.
+		var hit_normal: Vector3 = (inv.basis * entry.get("hit_normal", Vector3.UP)).normalized()
 
 		if hit:
+			if not any_vertex:
+				_imesh.surface_begin(Mesh.PRIMITIVE_LINES)
+				any_vertex = true
 			# Connector from particle origin to its nearest-surface point.
 			_imesh.surface_set_color(_Colors.ENV_RAY_HIT); _imesh.surface_add_vertex(origin)
 			_imesh.surface_set_color(_Colors.ENV_RAY_HIT); _imesh.surface_add_vertex(hit_point)
@@ -79,7 +89,7 @@ func update_from(p_tentacle: Node3D) -> void:
 			_imesh.surface_set_color(_Colors.ENV_HIT_NORMAL)
 			_imesh.surface_add_vertex(hit_point + hit_normal * NORMAL_STUB_LENGTH)
 			if draw_friction_vectors:
-				var fa: Vector3 = entry.get("friction_applied", Vector3.ZERO)
+				var fa: Vector3 = inv.basis * entry.get("friction_applied", Vector3.ZERO)
 				var fa_len: float = fa.length()
 				if fa_len > 1e-7:
 					var scaled_len: float = minf(fa_len * FRICTION_VECTOR_GAIN, FRICTION_VECTOR_MAX)
@@ -89,11 +99,15 @@ func update_from(p_tentacle: Node3D) -> void:
 					_imesh.surface_set_color(_Colors.ENV_FRICTION)
 					_imesh.surface_add_vertex(hit_point + dir * scaled_len)
 		elif draw_no_hit_stubs:
+			if not any_vertex:
+				_imesh.surface_begin(Mesh.PRIMITIVE_LINES)
+				any_vertex = true
 			# Tiny down-stub at the particle position so it's still visible
 			# the probe ran (and missed) at this particle.
 			_imesh.surface_set_color(_Colors.ENV_RAY_NO_HIT); _imesh.surface_add_vertex(origin)
 			_imesh.surface_set_color(_Colors.ENV_RAY_NO_HIT); _imesh.surface_add_vertex(origin + Vector3(0, -0.02, 0))
-	_imesh.surface_end()
+	if any_vertex:
+		_imesh.surface_end()
 
 
 func _draw_hit_marker(p_center: Vector3, p_size: float, p_color: Color) -> void:

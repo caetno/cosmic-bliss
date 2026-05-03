@@ -53,19 +53,32 @@ func _redraw(p_gizmo: EditorNode3DGizmo) -> void:
 	if node == null:
 		return
 
-	# Read snapshots. All accessors are by-copy (PackedArray / Dictionary).
-	var positions_world: PackedVector3Array = node.call(&"get_particle_positions")
-	var ratios: PackedFloat32Array = node.call(&"get_segment_stretch_ratios")
-	if positions_world.is_empty():
+	# Edit-time gizmo always shows the REST-POSE layout in node-local space.
+	# Reading the live solver's particle positions is unreliable at edit time
+	# because Godot's editor instantiates the scene multiple times during load
+	# (initial → preview → final), and rebuild_chain ends up running with
+	# identity transform on at least one of those passes — leaving particles
+	# in local coords for the gizmo to read while the mesh path's
+	# _update_spline_data_texture happens to read them at a different moment
+	# when they're world. Drawing the rest-pose layout directly avoids the
+	# whole timing question: anchor at local origin, particles spaced along
+	# local -Z by segment_length. The editor applies the parent transform
+	# correctly, so the gizmo always lines up with the mesh.
+	var particle_count: int = int(node.particle_count)
+	var seg_length: float = float(node.segment_length)
+	if particle_count < 2 or seg_length < 1e-5:
 		return
-
-	# Particles & constraint segments are returned in *world* space; gizmos
-	# expect *node-local* space. Transform.
-	var inv: Transform3D = node.global_transform.affine_inverse()
 	var positions_local := PackedVector3Array()
-	positions_local.resize(positions_world.size())
-	for i in positions_world.size():
-		positions_local[i] = inv * positions_world[i]
+	positions_local.resize(particle_count)
+	for i in particle_count:
+		positions_local[i] = Vector3(0.0, 0.0, -seg_length * float(i))
+
+	# Stretch ratios are 1.0 at rest pose by definition, so the constraints
+	# layer paints all segments at REST color.
+	var ratios := PackedFloat32Array()
+	ratios.resize(particle_count - 1)
+	for i in particle_count - 1:
+		ratios[i] = 1.0
 
 	_draw_particles(p_gizmo, positions_local)
 	_draw_segments(p_gizmo, positions_local, ratios)

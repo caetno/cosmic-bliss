@@ -22,16 +22,17 @@ func _ready() -> void:
 	_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_material.no_depth_test = true
 	_material.disable_receive_shadows = true
-	# Queue with transparents (which draw after opaques) and bump priority
-	# to the max so the mesh can never paint over us. Without this, the
-	# tentacle mesh's opaque pass would render after this layer and hide it.
 	_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_material.render_priority = RenderingServer.MATERIAL_RENDER_PRIORITY_MAX
 	material_override = _material
-
-	# Render in world space — the layer doesn't follow the parent overlay's
-	# transform, since particle positions returned by the snapshot are world.
-	top_level = true
+	# top_level was previously set here to render in world space, but Godot
+	# doesn't fully detach the global basis when a top_level node is added
+	# beneath a rotated parent — the layer ends up inheriting the Tentacle's
+	# rotation as its own, which then re-applies to every vertex during
+	# rendering. The robust pattern is to leave the layer parented (so its
+	# global_transform tracks the Tentacle's) and convert world particle
+	# positions to layer-local in update_from, which the parent transform
+	# then projects back to world.
 
 
 func update_from(p_tentacle: Node3D, p_size: float) -> void:
@@ -45,10 +46,17 @@ func update_from(p_tentacle: Node3D, p_size: float) -> void:
 	if n == 0:
 		return
 
+	# Convert world-space particle positions to layer-local space. The layer
+	# inherits the Tentacle's transform, so its global_transform projects
+	# layer-local back to world during render — net effect: crosses appear
+	# at the world particle positions. Cross arms are kept in layer-local
+	# axes (constant size) by NOT rotating them.
+	var inv: Transform3D = global_transform.affine_inverse()
+
 	_imesh.surface_begin(Mesh.PRIMITIVE_LINES)
 	var half: float = p_size * 0.5
 	for i in n:
-		var p: Vector3 = positions[i]
+		var p: Vector3 = inv * positions[i]
 		var w: float = inv_masses[i] if i < inv_masses.size() else 1.0
 		var c: Color = _Colors.particle_color(w)
 		_imesh.surface_set_color(c)
