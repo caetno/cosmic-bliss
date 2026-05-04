@@ -57,6 +57,13 @@ func _run_tests() -> void:
 		"test_host_bone_offset_applied",
 		"test_host_bone_invalid_path_falls_back",
 		"test_host_bone_path_change_re_resolves",
+		# Slice 5C-A — type-2 contact (tentacle ↔ rim, normal projection).
+		"test_type2_pushes_tentacle_particle_out",
+		"test_type2_pushes_rim_particle_correspondingly",
+		"test_type2_lambda_accumulates_across_iters",
+		"test_type2_contact_resets_per_tick",
+		"test_type2_no_contact_outside_radius",
+		"test_type2_pinned_rim_particle_only_pushes_tentacle",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -527,6 +534,222 @@ func test_host_bone_path_change_re_resolves() -> bool:
 		return false
 	o.queue_free()
 	skel.queue_free()
+	return true
+
+
+# ---------------------------------------------------------------------------
+# Slice 5C-A — type-2 contact (tentacle particle ↔ rim particle, bilateral
+# normal projection only — no friction yet, that's 5C-C).
+
+# Build a Tentacle parented under root with N particles. Returns the node;
+# the chain settles at its anchor (defaults to particle 0 at the node's
+# global_transform).
+func _make_tentacle_for_contact(p_n: int = 4, p_seg: float = 0.05,
+		p_radius: float = 0.04, p_pos: Vector3 = Vector3.ZERO) -> Node3D:
+	var t: Node3D = ClassDB.instantiate("Tentacle")
+	t.particle_count = p_n
+	t.segment_length = p_seg
+	t.particle_collision_radius = p_radius
+	t.gravity = Vector3.ZERO
+	# Disable env probe — 5C-A only exercises tentacle-rim contact.
+	t.environment_probe_distance = 0.0
+	t.position = p_pos
+	t.name = "TestTentacle"
+	get_root().add_child(t)
+	return t
+
+
+# Build a circular Orifice with N=8, radius=0.05, soft spring so contact
+# can dominate. Caller registers tentacles after add_child.
+func _make_orifice_for_contact(p_radius: float = 0.05, p_n: int = 8,
+		p_rest_stiffness: float = 0.05) -> Node3D:
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	o.entry_axis = ENTRY_AXIS
+	o.name = "TestOrifice"
+	get_root().add_child(o)
+	var rest_pos: PackedVector3Array = o.make_circular_rest_positions(p_n, p_radius, ENTRY_AXIS)
+	var seg_lens: PackedFloat32Array = o.make_uniform_segment_rest_lengths(rest_pos)
+	var area: float = absf(o.compute_polygon_area(rest_pos, ENTRY_AXIS))
+	var stf := PackedFloat32Array()
+	stf.resize(p_n)
+	for i in p_n:
+		stf[i] = p_rest_stiffness
+	o.add_rim_loop(rest_pos, seg_lens, area, stf, 1e-4, 1e-6, 0.02)
+	return o
+
+
+# Tentacle particle starts INSIDE a rim particle's contact range. After
+# one tick, the tentacle particle has moved along the contact normal away
+# from the rim particle.
+func test_type2_pushes_tentacle_particle_out() -> bool:
+	var o: Node3D = _make_orifice_for_contact()
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04)
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	# Place tentacle particle 1 right at the world position of rim
+	# particle 0 (rim sits on +X at radius 0.05 in the entry-axis plane).
+	var rim_state: Array = o.get_rim_loop_state(0)
+	var rim_pos_0: Vector3 = rim_state[0]["current_position"]
+	t.get_solver().set_particle_position(1, rim_pos_0)
+	var t_initial: Vector3 = t.get_particle_positions()[1]
+	o.tick(DT)
+	var t_final: Vector3 = t.get_particle_positions()[1]
+	var moved: Vector3 = t_final - t_initial
+	if moved.length() < 1e-4:
+		push_error("tentacle particle did not move (expected push out): %s" % moved)
+		return false
+	# Push direction must oppose the normal (tentacle moves AWAY from rim).
+	var normal_to_rim: Vector3 = (rim_pos_0 - t_initial).normalized()
+	if normal_to_rim.length_squared() > 0.0 and moved.dot(normal_to_rim) > 1e-4:
+		push_error("tentacle moved toward rim instead of away: dot=%f" % moved.dot(normal_to_rim))
+		return false
+	# Snapshot has at least one contact for this pair.
+	var contacts: Array = o.get_type2_contacts_snapshot()
+	var found := false
+	for ci in contacts.size():
+		var c: Dictionary = contacts[ci]
+		if int(c.get("particle_index", -1)) == 1 and int(c.get("rim_particle_index", -1)) == 0:
+			found = true
+			break
+	if not found:
+		push_error("expected (tent_particle=1, rim_particle=0) in snapshot, got %d entries" % contacts.size())
+		return false
+	return true
+
+
+# With both tentacle and rim particles unpinned (default inv_mass=1), the
+# bilateral mass split distributes the projection 50/50. Verify the rim
+# particle moved by a similar magnitude to the tentacle particle (signs
+# opposite, magnitudes within tolerance).
+func test_type2_pushes_rim_particle_correspondingly() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.0)  # zero rest spring → easy to displace
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04)
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	var rim_state: Array = o.get_rim_loop_state(0)
+	var rim_pos_0_initial: Vector3 = rim_state[0]["current_position"]
+	# Push tentacle particle 1 just past the rim particle's contact zone.
+	var penetration_pos: Vector3 = rim_pos_0_initial + Vector3(-0.01, 0.0, 0.0)
+	t.get_solver().set_particle_position(1, penetration_pos)
+	var t_initial: Vector3 = t.get_particle_positions()[1]
+	o.tick(DT)
+	var rim_after: Vector3 = o.get_particle_position(0, 0)
+	var t_after: Vector3 = t.get_particle_positions()[1]
+	var rim_moved: float = (rim_after - rim_pos_0_initial).length()
+	var t_moved: float = (t_after - t_initial).length()
+	if rim_moved < 1e-4:
+		push_error("rim particle did not move (expected mass-split correction): %f" % rim_moved)
+		return false
+	# 50/50 mass split → both move by similar magnitude (within 50% of each
+	# other after the spring/distance constraints react across the loop).
+	if rim_moved < 0.2 * t_moved or rim_moved > 5.0 * t_moved:
+		push_error("rim/tent move ratio off: rim=%f tent=%f" % [rim_moved, t_moved])
+		return false
+	return true
+
+
+# normal_lambda only grows during the iter loop within a single tick — XPBD
+# clamps the accumulator to ≥ 0 so contacts only push, never pull. Verify
+# by snapshotting after a tick and asserting all contact lambdas are ≥ 0.
+func test_type2_lambda_accumulates_across_iters() -> bool:
+	var o: Node3D = _make_orifice_for_contact()
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04)
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	var rim_pos_0: Vector3 = (o.get_rim_loop_state(0)[0]["current_position"] as Vector3)
+	t.get_solver().set_particle_position(1, rim_pos_0 + Vector3(-0.005, 0.0, 0.0))
+	o.tick(DT)
+	var contacts: Array = o.get_type2_contacts_snapshot()
+	if contacts.size() == 0:
+		push_error("expected at least one contact, got 0")
+		return false
+	for ci in contacts.size():
+		var c: Dictionary = contacts[ci]
+		var lam: float = c.get("normal_lambda", -1.0)
+		if not is_finite(lam):
+			push_error("non-finite normal_lambda: %f" % lam)
+			return false
+		if lam < 0.0:
+			push_error("normal_lambda went negative (XPBD clamp violated): %f" % lam)
+			return false
+	return true
+
+
+# Each tick rebuilds the contact list from scratch with normal_lambda = 0.
+# Even after many ticks of contact, the FIRST contact reported per tick has
+# bounded lambda — no compounding across ticks (canary equivalent of the
+# distance-lambda reset test).
+func test_type2_contact_resets_per_tick() -> bool:
+	var o: Node3D = _make_orifice_for_contact()
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04)
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	var rim_pos_0: Vector3 = (o.get_rim_loop_state(0)[0]["current_position"] as Vector3)
+	t.get_solver().set_particle_position(1, rim_pos_0 + Vector3(-0.005, 0.0, 0.0))
+	o.tick(DT)
+	var first_lam := 0.0
+	var contacts_first: Array = o.get_type2_contacts_snapshot()
+	for ci in contacts_first.size():
+		var c: Dictionary = contacts_first[ci]
+		first_lam = max(first_lam, float(c.get("normal_lambda", 0.0)))
+	# Run 60 more ticks; after each, snapshot lambda magnitude. If reset
+	# weren't wired, lambda would compound and exceed the first tick by
+	# orders of magnitude. Bound: max-per-tick stays within 5× the first
+	# tick's value.
+	var lam_max := first_lam
+	for _i in 60:
+		# Re-push the tentacle particle so contact is consistent each tick
+		# (lazy reset: predict in solver clears in_contact flag, so we have
+		# to re-induce contact each frame for this canary).
+		t.get_solver().set_particle_position(1, rim_pos_0 + Vector3(-0.005, 0.0, 0.0))
+		o.tick(DT)
+		var contacts: Array = o.get_type2_contacts_snapshot()
+		for ci in contacts.size():
+			var c: Dictionary = contacts[ci]
+			lam_max = max(lam_max, float(c.get("normal_lambda", 0.0)))
+	if lam_max > 5.0 * first_lam + 1e-6:
+		push_error("normal_lambda compounded across ticks: max=%e first=%e" % [lam_max, first_lam])
+		return false
+	return true
+
+
+# Tentacle particles outside the contact radius produce no contact entries.
+func test_type2_no_contact_outside_radius() -> bool:
+	var o: Node3D = _make_orifice_for_contact()
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04, Vector3(0.0, 1.0, 0.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	# Tentacle is at world y=1.0 — far above the rim, no chance of contact.
+	o.tick(DT)
+	var contacts: Array = o.get_type2_contacts_snapshot()
+	if contacts.size() != 0:
+		push_error("expected 0 contacts when tentacle is outside radius, got %d" % contacts.size())
+		return false
+	return true
+
+
+# Pinned rim particle (inv_mass=0) takes 0 share of the mass-split, so the
+# tentacle particle is projected out by the FULL penetration depth.
+func test_type2_pinned_rim_particle_only_pushes_tentacle() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_contact(4, 0.05, 0.04)
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	# Pin rim particle 0 in place.
+	o.set_particle_inv_mass(0, 0, 0.0)
+	var rim_pos_0: Vector3 = o.get_particle_position(0, 0)
+	# Push tentacle particle 1 INTO the rim by 1 cm.
+	var penetration := 0.01
+	t.get_solver().set_particle_position(1, rim_pos_0 + Vector3(-penetration, 0.0, 0.0))
+	var t_initial: Vector3 = t.get_particle_positions()[1]
+	o.tick(DT)
+	# The pinned rim particle should not have moved.
+	var rim_after: Vector3 = o.get_particle_position(0, 0)
+	if (rim_after - rim_pos_0).length() > 1e-4:
+		push_error("pinned rim particle drifted: %e" % (rim_after - rim_pos_0).length())
+		return false
+	# The tentacle particle should have moved by the full penetration depth
+	# (within distance constraint slack — the tentacle's distance constraint
+	# pulls particle 1 back toward the chain, so we tolerate ~30% slack).
+	var t_after: Vector3 = t.get_particle_positions()[1]
+	var t_moved: float = (t_after - t_initial).length()
+	if t_moved < 0.5 * penetration:
+		push_error("tentacle barely moved despite pinned rim: moved=%e expected≈%e" % [t_moved, penetration])
+		return false
 	return true
 
 

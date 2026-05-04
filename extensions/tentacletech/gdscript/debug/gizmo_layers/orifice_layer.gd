@@ -32,6 +32,11 @@ const REST_MARKER_COLOR := Color(0.55, 1.0, 0.8, 0.7)
 # at a glance "this is where the orifice's Center frame is anchored on
 # the ragdoll".
 const HOST_BONE_COLOR := Color(0.95, 0.35, 0.85, 0.95)
+# Orange — slice 5C-A type-2 contact lines from tentacle particle to rim
+# particle. Distinct from rim cyan / rest mint / host bone red-purple /
+# environment magenta — chosen so a glance separates contact pairs from
+# rim deformation.
+const TYPE2_CONTACT_COLOR := Color(1.0, 0.7, 0.25, 0.95)
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -112,6 +117,34 @@ func update_from(p_orifice: Node3D) -> void:
 		var bone_xform: Transform3D = host_state.get("current_world_transform", Transform3D())
 		var bone_world: Vector3 = bone_xform.origin
 		_draw_cross(inv * bone_world, HOST_BONE_MARKER_SIZE, HOST_BONE_COLOR)
+
+	# Slice 5C-A — type-2 contact lines. One short orange segment per
+	# contact, from the tentacle particle's world position to the rim
+	# particle's world position. The contact normal is encoded by the
+	# segment direction; lambda magnitude is reserved for a future "thicker
+	# line" treatment once 5C-C lands the friction half.
+	var contacts: Array = p_orifice.call(&"get_type2_contacts_snapshot")
+	if contacts.size() > 0:
+		for ci in contacts.size():
+			var contact: Dictionary = contacts[ci]
+			var loop_idx: int = int(contact.get("loop_index", -1))
+			var rim_idx: int = int(contact.get("rim_particle_index", -1))
+			if loop_idx < 0 or rim_idx < 0:
+				continue
+			var rim_world: Vector3 = p_orifice.call(&"get_particle_position", loop_idx, rim_idx)
+			# Reconstruct tentacle particle world position from the cached
+			# normal + radii_sum + signed gap encoded in `distance`. Saves
+			# a node lookup; works as long as the snapshot is fresh.
+			var normal: Vector3 = contact.get("normal", Vector3.UP)
+			var radii_sum: float = contact.get("radii_sum", 0.0)
+			var gap: float = contact.get("distance", 0.0)
+			# Rim is in `+normal` from the tentacle particle, so the
+			# tentacle particle sits at `rim_world − normal × (radii_sum + gap)`.
+			var tent_world: Vector3 = rim_world - normal * (radii_sum + gap)
+			_imesh.surface_set_color(TYPE2_CONTACT_COLOR)
+			_imesh.surface_add_vertex(inv * tent_world)
+			_imesh.surface_set_color(TYPE2_CONTACT_COLOR)
+			_imesh.surface_add_vertex(inv * rim_world)
 
 	_imesh.surface_end()
 

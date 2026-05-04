@@ -308,6 +308,19 @@ public:
 	// substep_count = 1 (one reset, one accumulate, one read).
 	void reset_friction_applied();
 
+	// Slice 5C-A — external position-delta intake. Lets the orifice's
+	// type-2 contact projection push tentacle particles through the same
+	// Jacobi accumulator that the solver's own constraints use, then
+	// flush in one apply pass. The bilateral mass split inside the
+	// orifice writes the tentacle-side delta here; the rim-side delta
+	// goes through the orifice's per-loop accumulator.
+	//
+	// Critical: this path does NOT touch `prev_position`, so the
+	// implicit Verlet velocity is preserved — what looks like a
+	// "snap" via `set_particle_position` would zero velocity instead.
+	void add_external_position_delta(int p_index, const godot::Vector3 &p_delta);
+	void apply_external_position_deltas();
+
 protected:
 	static void _bind_methods();
 

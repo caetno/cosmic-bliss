@@ -552,6 +552,20 @@ void Tentacle::clear_anchor_override() {
 
 Ref<PBDSolver> Tentacle::get_solver() const { return solver; }
 
+// Slice 5C-A — external position-delta intake. Routes through the chain
+// solver's Jacobi accumulator + apply pass so type-2 (and later type-3,
+// type-5+) contact sources can push particles without zeroing the
+// implicit Verlet velocity that `set_particle_position` would.
+void Tentacle::add_external_position_delta(int p_particle_index, const Vector3 &p_delta) {
+	if (solver.is_null()) return;
+	solver->add_external_position_delta(p_particle_index, p_delta);
+}
+
+void Tentacle::flush_external_position_deltas() {
+	if (solver.is_null()) return;
+	solver->apply_external_position_deltas();
+}
+
 // -- Snapshots --------------------------------------------------------------
 
 PackedVector3Array Tentacle::get_particle_positions() const {
@@ -1310,6 +1324,10 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("clear_anchor_override"), &Tentacle::clear_anchor_override);
 
 	ClassDB::bind_method(D_METHOD("get_solver"), &Tentacle::get_solver);
+	ClassDB::bind_method(D_METHOD("add_external_position_delta", "particle_index", "delta"),
+			&Tentacle::add_external_position_delta);
+	ClassDB::bind_method(D_METHOD("flush_external_position_deltas"),
+			&Tentacle::flush_external_position_deltas);
 
 	ClassDB::bind_method(D_METHOD("get_particle_positions"), &Tentacle::get_particle_positions);
 	ClassDB::bind_method(D_METHOD("get_particle_inv_masses"), &Tentacle::get_particle_inv_masses);

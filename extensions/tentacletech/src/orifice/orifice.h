@@ -10,9 +10,12 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
 #include <vector>
+
+class Tentacle;
 
 // Phase-5 slice 5A primitive. Spec:
 // docs/architecture/TentacleTech_Architecture.md §6.1–§6.4 (rim particle
@@ -70,6 +73,13 @@ struct RimLoopState {
 	// compliance is this distribution (front-of-mouth tighter than back, etc.).
 	std::vector<float> rim_particle_rest_stiffness_per_k; // size N
 
+	// Slice 5C-A — per-rim-particle contact radius. Sums with the
+	// tentacle particle's `collision_radius × girth_scale` to produce
+	// the type-2 contact threshold. Default 0.02 m authored at
+	// `add_rim_loop` time; per-particle so anatomy with thicker /
+	// thinner rim flesh can be authored.
+	std::vector<float> rim_contact_radius_per_k; // size N
+
 	// Per-loop tunables (§6.4).
 	float area_compliance = 1e-4f;     // low → near-incompressible
 	float distance_compliance = 1e-6f; // low → taut circumference
@@ -83,6 +93,28 @@ struct RimLoopState {
 	// scales by sor_factor.
 	std::vector<godot::Vector3> position_delta_scratch;
 	std::vector<int> position_delta_count;
+};
+
+// Slice 5C-A — type-2 contact (tentacle particle ↔ rim particle).
+// Persistent across iters within a tick; rebuilt every tick. Holds the
+// XPBD `normal_lambda` accumulator that scales each contact's response
+// across iters and is the future input to the §6.3 reaction-on-host-bone
+// pass (5C-C scope).
+struct Type2Contact {
+	int tentacle_idx = -1;
+	int particle_idx = -1;
+	int loop_idx = -1;
+	int rim_particle_idx = -1;
+	// Cached contact geometry from the start-of-tick collection pass.
+	// `normal` points from tentacle particle toward rim particle (the
+	// rim is pushed in `+normal`, the tentacle in `-normal`); `radii_sum`
+	// is `tentacle.collision_radius × girth_scale + rim_contact_radius_per_k`.
+	godot::Vector3 normal;
+	float radii_sum = 0.0f;
+	// XPBD lambda accumulator. Persists across iters within a tick;
+	// reset to 0 in `_collect_type2_contacts`. Clamped to ≥ 0 (contacts
+	// only push, never pull) per Obi `ParticleCollisionConstraints.compute`.
+	float normal_lambda = 0.0f;
 };
 
 class Orifice : public godot::Node3D {
@@ -169,6 +201,26 @@ public:
 	// in `--script` mode).
 	godot::Transform3D get_center_frame_world() const;
 
+	// Tentacle registration (slice 5C-A) — contacts are checked against
+	// every registered tentacle each tick. `register_tentacle` /
+	// `unregister_tentacle` are imperative API; the @export
+	// `tentacle_paths` array is the authoring-time path list, kept in
+	// sync by both routes.
+	void set_tentacle_paths(const godot::TypedArray<godot::NodePath> &p_paths);
+	godot::TypedArray<godot::NodePath> get_tentacle_paths() const;
+	bool register_tentacle(const godot::NodePath &p_path);
+	bool unregister_tentacle(const godot::NodePath &p_path);
+	int get_registered_tentacle_count() const;
+	int get_resolved_tentacle_count() const;
+	godot::NodePath get_tentacle_path(int p_index) const;
+
+	// Per-tick fresh snapshot (slice 5C-A) of the active type-2 contact
+	// list. Each entry: { tentacle_path, particle_index, loop_index,
+	// rim_particle_index, normal, distance, normal_lambda }. `distance`
+	// is signed (negative means penetrating; XPBD pushes lambda toward
+	// the value that drives this to zero across iters).
+	godot::Array get_type2_contacts_snapshot() const;
+
 	// Authoring API --------------------------------------------------------
 
 	// Append a new rim loop. Returns the loop index, or -1 on invalid
@@ -177,14 +229,22 @@ public:
 	// must be the same size (closed loop, segment k connects particle k to
 	// (k+1) mod N). `p_target_enclosed_area` should be the polygon area
 	// computed from the rest positions (utility `compute_polygon_area`
-	// available statically).
+	// available statically). `p_default_contact_radius` is the per-rim-
+	// particle contact radius applied uniformly to every particle; pass
+	// 0 (or negative) to use the slice 5C-A default of 0.02 m.
 	int add_rim_loop(
 			const godot::PackedVector3Array &p_rest_positions_in_center_frame,
 			const godot::PackedFloat32Array &p_segment_rest_lengths,
 			float p_target_enclosed_area,
 			const godot::PackedFloat32Array &p_rest_stiffness_per_k,
 			float p_area_compliance,
-			float p_distance_compliance);
+			float p_distance_compliance,
+			float p_default_contact_radius = 0.02f);
+
+	// Per-particle authoring of the contact radius, after `add_rim_loop`.
+	// Negative values are clamped to 0 (no contact at that particle).
+	void set_rim_contact_radius(int p_loop_index, int p_particle_index, float p_radius);
+	float get_rim_contact_radius(int p_loop_index, int p_particle_index) const;
 
 	// Remove all rim loops; resets internal buffers. Does not affect
 	// orifice config (gravity, iteration_count, etc.).
@@ -286,10 +346,34 @@ private:
 
 	std::vector<RimLoopState> rim_loops;
 
+	// Slice 5C-A — registered tentacles for type-2 contact + cached
+	// resolved pointers. `tentacle_paths` is authored; `_tentacles_resolved`
+	// is rebuilt lazily from the paths each tick (cheap re-validate, same
+	// pattern as 5B's host-bone resolver).
+	godot::TypedArray<godot::NodePath> tentacle_paths;
+	mutable std::vector<Tentacle *> _tentacles_resolved;
+	mutable bool _tentacles_dirty = true;
+
+	// Slice 5C-A — fresh-this-tick contact list. Built in
+	// `_collect_type2_contacts` from the registered tentacles + every
+	// rim loop, brute-force N×M; the iterate step reads it back to drive
+	// XPBD bilateral projection.
+	std::vector<Type2Contact> _type2_contacts;
+
 	// Tick stages — per-loop.
 	void _predict_loop(RimLoopState &loop, float p_dt);
-	void _iterate_loop(RimLoopState &loop, float p_dt);
+	// Slice 5C-A — single-iteration body extracted from the previous
+	// `_iterate_loop`. The new outer `tick()` runs `iteration_count`
+	// passes, interleaving per-loop constraint passes with the cross-
+	// loop type-2 contact pass.
+	void _iterate_loop_one_pass(RimLoopState &loop, float p_dt);
 	void _finalize_loop(RimLoopState &loop, float p_dt);
+
+	// Slice 5C-A — type-2 contact infrastructure.
+	void _resolve_tentacles_lazy() const;
+	Tentacle *_resolve_node_to_tentacle(const godot::NodePath &p_path) const;
+	void _collect_type2_contacts();
+	void _iterate_type2_contacts(float p_dt);
 
 	// Jacobi delta helpers, scoped per loop (each loop owns its own
 	// scratch buffers — no cross-loop interference).

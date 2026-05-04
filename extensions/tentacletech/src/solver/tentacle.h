@@ -96,6 +96,16 @@ public:
 	// etc., without re-binding every PBDSolver setter on Tentacle too).
 	godot::Ref<PBDSolver> get_solver() const;
 
+	// Slice 5C-A — external position-delta intake. Forwards to the solver's
+	// Jacobi accumulator + apply pass so `Orifice` (or any other type-2 / 3
+	// contact source) can push particles without snapping `prev_position` —
+	// preserves the implicit Verlet velocity that `set_particle_position`
+	// would zero. Calls are accumulated; `flush_external_position_deltas()`
+	// averages and writes to position. Multiple deltas on the same particle
+	// in one flush window compose by Jacobi average (Obi `AtomicDeltas`).
+	void add_external_position_delta(int p_particle_index, const godot::Vector3 &p_delta);
+	void flush_external_position_deltas();
+
 	// Snapshot accessors per §15.2 ----------------------------------------
 
 	godot::PackedVector3Array get_particle_positions() const;

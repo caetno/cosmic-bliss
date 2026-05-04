@@ -1016,6 +1016,16 @@ void PBDSolver::reset_friction_applied() {
 	}
 }
 
+void PBDSolver::add_external_position_delta(int p_index, const Vector3 &p_delta) {
+	int n = (int)particles.size();
+	if (p_index < 0 || p_index >= n) return;
+	add_position_delta(p_index, p_delta);
+}
+
+void PBDSolver::apply_external_position_deltas() {
+	apply_position_deltas_all();
+}
+
 int PBDSolver::get_environment_contact_count() const {
 	int total = 0;
 	int n = env_contact_count.size();
@@ -1212,6 +1222,10 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::get_sleep_threshold);
 	ClassDB::bind_method(D_METHOD("reset_friction_applied"),
 			&PBDSolver::reset_friction_applied);
+	ClassDB::bind_method(D_METHOD("add_external_position_delta", "particle_index", "delta"),
+			&PBDSolver::add_external_position_delta);
+	ClassDB::bind_method(D_METHOD("apply_external_position_deltas"),
+			&PBDSolver::apply_external_position_deltas);
 	ClassDB::bind_method(D_METHOD("set_contact_velocity_damping", "damping"),
 			&PBDSolver::set_contact_velocity_damping);
 	ClassDB::bind_method(D_METHOD("get_contact_velocity_damping"),
