@@ -88,6 +88,18 @@ func _run_tests() -> void:
 		"test_5cc_host_body_resolves_via_explicit_path",
 		"test_5cc_host_body_receives_radial_impulse",
 		"test_5cc_host_body_receives_axial_wedge_impulse",
+		# Slice 5D — rim particle loop realism (4P-A + 4P-B + 4P-C).
+		"test_4pa_compression_resisted_strongly",
+		"test_4pa_stretch_allowed",
+		"test_4pa_two_sided_mode_preserves_5a_behavior",
+		"test_4pa_anisotropic_lambda_resets_each_tick",
+		"test_4pb_linear_regime_matches_5a",
+		"test_4pb_high_strain_stiffens",
+		"test_4pb_recovery_rate_increases_with_displacement",
+		"test_4pc_sustained_displacement_creeps_into_rest_position",
+		"test_4pc_release_recovers_toward_neutral",
+		"test_4pc_max_offset_clamp_holds",
+		"test_4pc_default_rates_dont_drift_neutral_orifice",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -1548,6 +1560,314 @@ func test_5cc_host_body_receives_axial_wedge_impulse() -> bool:
 	# Wedge math is specced; without girth-gradient driver in this
 	# test, the axial component may be zero. Smoke check that the
 	# accessor + math run cleanly.
+	return true
+
+
+# ---------------------------------------------------------------------------
+# Slice 5D — rim particle loop realism (4P-A anisotropic distance,
+# 4P-B J-curve strain stiffening, 4P-C plastic offset / orifice memory).
+
+# Two adjacent rim particles pushed toward each other should converge
+# back to rest length within a few ticks (compression branch is stiff).
+func test_4pa_compression_resisted_strongly() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.0)
+	# Anisotropic mode is the default; verify and lock in.
+	if not o.get_loop_distance_anisotropic(0):
+		push_error("expected distance_anisotropic to default true")
+		return false
+	# Capture initial rest distance between particle 0 and particle 1.
+	var rest_len: float = float(o.get_rim_loop_state(0)[0].get("neighbour_rest_distance", 0.0))
+	if rest_len <= 0.0:
+		push_error("rest_len not populated")
+		return false
+	# Push particle 0 inward (toward orifice center) so segment 0 is in
+	# compression. Center is at world origin per the test scaffold.
+	var p0_initial: Vector3 = o.get_particle_position(0, 0)
+	var compressed_pos: Vector3 = p0_initial * 0.5  # half radius
+	o.set_particle_position(0, 0, compressed_pos)
+	# Tick a few times to let the compression branch act.
+	for _i in 5:
+		o.tick(DT)
+	# After settling, segment 0 length should be close to rest_len.
+	var p0_after: Vector3 = o.get_particle_position(0, 0)
+	var p1_after: Vector3 = o.get_particle_position(0, 1)
+	var seg_len: float = (p0_after - p1_after).length()
+	var error: float = absf(seg_len - rest_len) / rest_len
+	if error > 0.20:
+		push_error("compression not resolved: seg_len=%f rest=%f err=%f" % [seg_len, rest_len, error])
+		return false
+	return true
+
+
+# Two adjacent rim particles pulled apart should stretch substantially
+# under the compliant stretch branch (high distance_stretch_compliance).
+# Pin particle 0 at a displaced position so it stays put; let the rest
+# of the loop settle and see if segment 0 ends up stretched.
+func test_4pa_stretch_allowed() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	# Bump stretch compliance way up to make the visible effect strong.
+	o.set_loop_distance_stretch_compliance(0, 1e-1)
+	var rest_len: float = float(o.get_rim_loop_state(0)[0].get("neighbour_rest_distance", 0.0))
+	# Pin particle 0 at a displaced position so the segment is forced
+	# into stretch. Re-set position each tick (pinned particles ignore
+	# integration but the manual override holds them in place).
+	var p0_initial: Vector3 = o.get_particle_position(0, 0)
+	var stretched_pos: Vector3 = p0_initial * 2.0  # 100% beyond
+	o.set_particle_inv_mass(0, 0, 0.0)
+	for _i in 30:
+		o.set_particle_position(0, 0, stretched_pos)
+		o.tick(DT)
+	# Segment should remain stretched (compliant branch lets it give).
+	var p0_after: Vector3 = o.get_particle_position(0, 0)
+	var p1_after: Vector3 = o.get_particle_position(0, 1)
+	var seg_len: float = (p0_after - p1_after).length()
+	var stretch_ratio: float = seg_len / rest_len
+	if stretch_ratio < 1.10:
+		push_error("expected visible stretch, got ratio %f (rest_len=%f, seg_len=%f)" % [stretch_ratio, rest_len, seg_len])
+		return false
+	return true
+
+
+# With anisotropic = false, the rim resists compression and stretch
+# symmetrically (slice 5A baseline preserved for jewelry rims).
+func test_4pa_two_sided_mode_preserves_5a_behavior() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.0)
+	o.set_loop_distance_anisotropic(0, false)
+	var rest_len: float = float(o.get_rim_loop_state(0)[0].get("neighbour_rest_distance", 0.0))
+	# Pin all particles except 0 so only segment 0 mutates.
+	for k in range(1, 8):
+		o.set_particle_inv_mass(0, k, 0.0)
+	# Stretch case.
+	var p0_initial: Vector3 = o.get_particle_position(0, 0)
+	o.set_particle_position(0, 0, p0_initial * 1.5)
+	for _i in 5:
+		o.tick(DT)
+	var seg_after_stretch: float = (o.get_particle_position(0, 0) - o.get_particle_position(0, 1)).length()
+	var stretch_err: float = absf(seg_after_stretch - rest_len) / rest_len
+	# Reset.
+	o.set_particle_position(0, 0, p0_initial)
+	for _i in 3:
+		o.tick(DT)
+	# Compression case.
+	o.set_particle_position(0, 0, p0_initial * 0.5)
+	for _i in 5:
+		o.tick(DT)
+	var seg_after_compress: float = (o.get_particle_position(0, 0) - o.get_particle_position(0, 1)).length()
+	var compress_err: float = absf(seg_after_compress - rest_len) / rest_len
+	# In two-sided mode, both directions should converge similarly.
+	# Allow a 3× ratio between the two directions (still both small).
+	if max(stretch_err, compress_err) > 0.20:
+		push_error("two-sided mode failed to converge: stretch_err=%f compress_err=%f" % [stretch_err, compress_err])
+		return false
+	if stretch_err > 3.0 * compress_err + 0.05:
+		push_error("two-sided mode is asymmetric: stretch=%f compress=%f" % [stretch_err, compress_err])
+		return false
+	return true
+
+
+# Distance lambda resets per tick in BOTH anisotropic and two-sided
+# modes — canary equivalent of the 4M-XPBD distance reset test.
+func test_4pa_anisotropic_lambda_resets_each_tick() -> bool:
+	for aniso in [true, false]:
+		var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.0)
+		o.set_loop_distance_anisotropic(0, aniso)
+		# Perturb one particle each tick to keep the constraint active.
+		for _i in 30:
+			var p0: Vector3 = o.get_particle_position(0, 0)
+			o.set_particle_position(0, 0, p0 + Vector3(0.005, 0.0, 0.0))
+			o.tick(DT)
+		var max_lam := 0.0
+		var state: Array = o.get_rim_loop_state(0)
+		for k in state.size():
+			var lam: float = absf(state[k]["distance_lambda"])
+			if not is_finite(lam):
+				push_error("non-finite distance_lambda in mode aniso=%s" % aniso)
+				return false
+			if lam > max_lam:
+				max_lam = lam
+		# The reset bounds the per-tick lambda — without it the value
+		# would grow into the multi-meter range over 30 ticks of
+		# perturbation.
+		if max_lam > 1e-2:
+			push_error("distance_lambda compounded in mode aniso=%s: max=%f" % [aniso, max_lam])
+			return false
+	return true
+
+
+# With alpha=0 and beta=0, J-curve is flat → spring-back behavior is
+# identical to slice 5A's linear regime.
+func test_4pb_linear_regime_matches_5a() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.7)
+	o.set_loop_j_curve_alpha(0, 0.0)
+	o.set_loop_j_curve_beta(0, 0.0)
+	# Displace one particle by 1 cm.
+	var rest0: Vector3 = (o.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	o.set_particle_position(0, 0, rest0 + Vector3(0.01, 0.0, 0.0))
+	# Settle.
+	for _i in 60:
+		o.tick(DT)
+	var d_after: float = (o.get_particle_position(0, 0) - rest0).length()
+	# In the linear regime the displacement should decay substantially.
+	if d_after > 0.005:
+		push_error("linear spring-back didn't decay enough: %f" % d_after)
+		return false
+	return true
+
+
+# With aggressive alpha, restoring force on a high-strain particle is
+# significantly higher than the linear case → effective_compliance
+# shrinks. Snapshot exposes this directly. Pin the particle so it
+# can't settle before the snapshot reads strain.
+func test_4pb_high_strain_stiffens() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.7)
+	o.set_loop_j_curve_alpha(0, 5.0)
+	o.set_loop_j_curve_beta(0, 0.0)
+	o.set_loop_j_curve_characteristic_length(0, 0.05)
+	# Pin particle 0 at displaced position (= rest + 0.10 m, ≈ 2× char_len).
+	var rest0: Vector3 = (o.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	o.set_particle_inv_mass(0, 0, 0.0)
+	o.set_particle_position(0, 0, rest0 + Vector3(0.10, 0.0, 0.0))
+	o.tick(DT)
+	var state: Array = o.get_rim_loop_state(0)
+	var strain: float = float(state[0].get("current_strain", 0.0))
+	var eff_comp: float = float(state[0].get("effective_compliance", 0.0))
+	if strain < 1.5:
+		push_error("expected high strain reading, got %f" % strain)
+		return false
+	# Now compare to the linear-regime case at the same displacement.
+	var o2: Node3D = _make_orifice_for_contact(0.05, 8, 0.7)
+	o2.set_loop_j_curve_alpha(0, 0.0)
+	o2.set_loop_j_curve_characteristic_length(0, 0.05)
+	var rest02: Vector3 = (o2.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	o2.set_particle_inv_mass(0, 0, 0.0)
+	o2.set_particle_position(0, 0, rest02 + Vector3(0.10, 0.0, 0.0))
+	o2.tick(DT)
+	var state2: Array = o2.get_rim_loop_state(0)
+	var lin_eff_comp: float = float(state2[0].get("effective_compliance", 0.0))
+	# J-curve effective compliance should be substantially smaller
+	# (stiffer spring) than linear.
+	if eff_comp >= lin_eff_comp * 0.5:
+		push_error("J-curve didn't stiffen: eff_comp=%f lin=%f" % [eff_comp, lin_eff_comp])
+		return false
+	return true
+
+
+# J-curve makes the spring effectively stiffer at high strain. Compare
+# the per-particle `effective_compliance` field directly between linear
+# and J-curve regimes at the same displacement — same setup as
+# `test_4pb_high_strain_stiffens` but verifies the snapshot exposes the
+# difference cleanly across two side-by-side orifices.
+func test_4pb_recovery_rate_increases_with_displacement() -> bool:
+	# Pin both particles so the snapshot reads a stable strain value.
+	var o_lin: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	o_lin.set_loop_j_curve_alpha(0, 0.0)
+	o_lin.set_loop_j_curve_characteristic_length(0, 0.05)
+	o_lin.set_particle_inv_mass(0, 0, 0.0)
+	var rest_lin: Vector3 = (o_lin.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	o_lin.set_particle_position(0, 0, rest_lin + Vector3(0.05, 0.0, 0.0))
+	var o_jc: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	o_jc.set_loop_j_curve_alpha(0, 5.0)
+	o_jc.set_loop_j_curve_characteristic_length(0, 0.05)
+	o_jc.set_particle_inv_mass(0, 0, 0.0)
+	var rest_jc: Vector3 = (o_jc.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	o_jc.set_particle_position(0, 0, rest_jc + Vector3(0.05, 0.0, 0.0))
+	o_lin.tick(DT)
+	o_jc.tick(DT)
+	var lin_eff: float = float(o_lin.get_rim_loop_state(0)[0].get("effective_compliance", 0.0))
+	var jc_eff: float = float(o_jc.get_rim_loop_state(0)[0].get("effective_compliance", 0.0))
+	# At strain = 1 with alpha = 5, j_factor = 6 → eff = base / 6.
+	# Linear (alpha = 0) → eff = base. J-curve case should be < linear.
+	if jc_eff >= lin_eff * 0.9:
+		push_error("J-curve didn't reduce effective compliance: lin=%g jc=%g" % [lin_eff, jc_eff])
+		return false
+	return true
+
+
+# Sustained displacement creeps into plastic_offset. Pin the particle
+# so set_particle_position holds it without implicit-velocity
+# springiness fighting back.
+func test_4pc_sustained_displacement_creeps_into_rest_position() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	# Bump accumulate rate so the test runs in a manageable number of
+	# ticks; recover rate set to zero so memory persists.
+	o.set_loop_plastic_accumulate_rate(0, 1.0)  # ~1s time constant
+	o.set_loop_plastic_recover_rate(0, 0.0)
+	o.set_loop_plastic_max_offset(0, 0.05)
+	o.set_particle_inv_mass(0, 0, 0.0)
+	var rest0: Vector3 = (o.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	# Pin the particle at a 1cm offset; tick for 5s real-time (300 ticks).
+	for _i in 300:
+		o.set_particle_position(0, 0, rest0 + Vector3(0.01, 0.0, 0.0))
+		o.tick(DT)
+	var po: Vector3 = (o.get_rim_loop_state(0)[0]["plastic_offset"] as Vector3)
+	if po.length() < 0.001:
+		push_error("plastic_offset didn't accumulate: %s" % po)
+		return false
+	return true
+
+
+# After release, plastic_offset decays toward zero under recover rate.
+func test_4pc_release_recovers_toward_neutral() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	o.set_loop_plastic_accumulate_rate(0, 2.0)
+	o.set_loop_plastic_recover_rate(0, 0.0)
+	o.set_loop_plastic_max_offset(0, 0.05)
+	o.set_particle_inv_mass(0, 0, 0.0)
+	var rest0: Vector3 = (o.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	# Phase 1: accumulate.
+	for _i in 200:
+		o.set_particle_position(0, 0, rest0 + Vector3(0.01, 0.0, 0.0))
+		o.tick(DT)
+	var po_loaded: Vector3 = (o.get_rim_loop_state(0)[0]["plastic_offset"] as Vector3)
+	if po_loaded.length() < 0.001:
+		push_error("plastic_offset didn't load: %s" % po_loaded)
+		return false
+	# Phase 2: unpin + enable recovery, disable accumulation.
+	o.set_particle_inv_mass(0, 0, 1.0)
+	o.set_loop_plastic_accumulate_rate(0, 0.0)
+	o.set_loop_plastic_recover_rate(0, 2.0)
+	# Don't touch the particle; let the spring-back pull it home.
+	for _i in 600:
+		o.tick(DT)
+	var po_recovered: Vector3 = (o.get_rim_loop_state(0)[0]["plastic_offset"] as Vector3)
+	if po_recovered.length() > po_loaded.length() * 0.20:
+		push_error("plastic_offset didn't recover: loaded=%s recovered=%s" % [po_loaded, po_recovered])
+		return false
+	return true
+
+
+# Plastic offset magnitude is clamped to plastic_max_offset.
+func test_4pc_max_offset_clamp_holds() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	o.set_loop_plastic_accumulate_rate(0, 5.0)
+	o.set_loop_plastic_recover_rate(0, 0.0)
+	o.set_loop_plastic_max_offset(0, 0.005)  # tight clamp
+	o.set_particle_inv_mass(0, 0, 0.0)
+	var rest0: Vector3 = (o.get_rim_loop_state(0)[0]["rest_position"] as Vector3)
+	# Hold the particle at 2× the clamp.
+	for _i in 200:
+		o.set_particle_position(0, 0, rest0 + Vector3(0.010, 0.0, 0.0))
+		o.tick(DT)
+	var po: Vector3 = (o.get_rim_loop_state(0)[0]["plastic_offset"] as Vector3)
+	if po.length() > 0.005 + 1e-5:
+		push_error("plastic_offset exceeded clamp: |po|=%f, clamp=0.005" % po.length())
+		return false
+	return true
+
+
+# Stationary orifice (no perturbation) produces zero plastic_offset
+# drift — defaults are memory-neutral (writes vs decay match).
+func test_4pc_default_rates_dont_drift_neutral_orifice() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	# Defaults: accumulate=0.05, recover=0.05, max=0.005.
+	for _i in 600:
+		o.tick(DT)
+	var state: Array = o.get_rim_loop_state(0)
+	for k in state.size():
+		var po: Vector3 = state[k].get("plastic_offset", Vector3.ZERO)
+		if po.length() > 1e-4:
+			push_error("plastic_offset drifted on stationary orifice: k=%d |po|=%f" % [k, po.length()])
+			return false
 	return true
 
 

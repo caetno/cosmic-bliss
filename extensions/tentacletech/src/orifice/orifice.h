@@ -50,10 +50,22 @@ struct RimParticle {
 	godot::Vector3 position;
 	godot::Vector3 prev_position;
 	float inv_mass = 1.0f;
-	// Authored offset from the orifice Center bone. In 5A (no host bone
-	// soft attachment yet), Center frame == orifice node global_transform
-	// at construction time; rest-world is recomputed each tick.
+	// Authored offset from the orifice Center bone. Updated derived
+	// from `neutral_rest_position_in_center_frame + plastic_offset` per
+	// tick (slice 5D §4P-C — orifice memory). Read by the spring-back
+	// step + the §15.2 snapshot.
 	godot::Vector3 rest_position_in_center_frame;
+	// Slice 5D §4P-C — IMMUTABLE authored neutral position. Set once in
+	// `add_rim_loop` and never written at runtime. The runtime
+	// `rest_position_in_center_frame` drifts away from this via
+	// `plastic_offset` under sustained displacement, then recovers
+	// back. `neutral` is the long-term anatomical baseline.
+	godot::Vector3 neutral_rest_position_in_center_frame;
+	// Slice 5D §4P-C — runtime plastic offset (Center frame). Lerps
+	// toward sustained displacement (`plastic_accumulate_rate`) and
+	// decays toward zero (`plastic_recover_rate`); clamped to
+	// `plastic_max_offset`. Initialized to zero in `add_rim_loop`.
+	godot::Vector3 plastic_offset;
 	// XPBD lambda accumulators — reset in predict() each tick, persist
 	// across iters within a tick. Snapshot accessor surfaces both for
 	// the §15.2 dictionary.
@@ -84,7 +96,42 @@ struct RimLoopState {
 
 	// Per-loop tunables (§6.4).
 	float area_compliance = 1e-4f;     // low → near-incompressible
-	float distance_compliance = 1e-6f; // low → taut circumference
+	float distance_compliance = 1e-6f; // low → taut circumference (compression branch in 4P-A)
+
+	// Slice 5D §4P-A — anisotropic distance constraints. Anatomical
+	// flesh is incompressible (rim can't collapse below authored
+	// circumference) but compliant under tension (rim stretches
+	// visibly under load; bulgers handle displaced volume). When
+	// `distance_anisotropic == true`, the per-pair distance constraint
+	// uses `distance_compliance` for compression (stiff) and
+	// `distance_stretch_compliance` for stretch (compliant); when
+	// false, both branches use `distance_compliance` (the legacy 5A
+	// two-sided behaviour, preserved for jewelry rims that need
+	// rigid-rim two-sided constraints).
+	bool distance_anisotropic = true;
+	float distance_stretch_compliance = 1e-3f; // ~1000× softer than compression at default
+
+	// Slice 5D §4P-B — strain-stiffening J-curve on per-particle
+	// spring-back. Anatomical tissue stiffens nonlinearly with strain
+	// (collagen recruitment). Effective compliance =
+	// `base / (1 + alpha × s² + beta × s⁴) / dt²` where
+	// `s = displacement_magnitude / j_curve_characteristic_length`.
+	// alpha = 0 + beta = 0 → linear regime (5A baseline preserved).
+	// Typical: alpha ≈ 1 mild, ≈ 5 aggressive; beta only kicks in at
+	// high strain (collagen-locking limit).
+	float j_curve_alpha = 0.0f;
+	float j_curve_beta = 0.0f;
+	float j_curve_characteristic_length = 0.05f; // m, ~rest rim radius
+
+	// Slice 5D §4P-C — orifice memory. `plastic_offset` per particle
+	// drifts toward sustained displacement (write rate) and recovers
+	// toward zero (decay rate) over seconds, clamped in magnitude.
+	// Defaults give "memory-neutral" behaviour: write and decay rates
+	// match, no net drift on noise. Bumping `accumulate > recover`
+	// gives long-term remodeling; the inverse gives elastic-only.
+	float plastic_accumulate_rate = 0.05f; // 1/s, ~20s time constant
+	float plastic_recover_rate = 0.05f;
+	float plastic_max_offset = 0.005f; // m, hard clamp magnitude
 
 	// XPBD volume Lagrange multiplier (one per loop, scalar). Reset in
 	// predict() each tick; persists across iters within the tick.
@@ -302,6 +349,31 @@ public:
 	// Negative values are clamped to 0 (no contact at that particle).
 	void set_rim_contact_radius(int p_loop_index, int p_particle_index, float p_radius);
 	float get_rim_contact_radius(int p_loop_index, int p_particle_index) const;
+
+	// Slice 5D — per-loop realism tunables (4P-A anisotropic distance,
+	// 4P-B J-curve, 4P-C plastic offset). Per-loop because anatomical
+	// rims and jewelry rims can coexist on the same orifice with
+	// different responses; per-loop access keeps the authoring
+	// surface simple while letting tests exercise each.
+	// 4P-A:
+	void set_loop_distance_anisotropic(int p_loop_index, bool p_value);
+	bool get_loop_distance_anisotropic(int p_loop_index) const;
+	void set_loop_distance_stretch_compliance(int p_loop_index, float p_value);
+	float get_loop_distance_stretch_compliance(int p_loop_index) const;
+	// 4P-B:
+	void set_loop_j_curve_alpha(int p_loop_index, float p_value);
+	float get_loop_j_curve_alpha(int p_loop_index) const;
+	void set_loop_j_curve_beta(int p_loop_index, float p_value);
+	float get_loop_j_curve_beta(int p_loop_index) const;
+	void set_loop_j_curve_characteristic_length(int p_loop_index, float p_value);
+	float get_loop_j_curve_characteristic_length(int p_loop_index) const;
+	// 4P-C:
+	void set_loop_plastic_accumulate_rate(int p_loop_index, float p_value);
+	float get_loop_plastic_accumulate_rate(int p_loop_index) const;
+	void set_loop_plastic_recover_rate(int p_loop_index, float p_value);
+	float get_loop_plastic_recover_rate(int p_loop_index) const;
+	void set_loop_plastic_max_offset(int p_loop_index, float p_value);
+	float get_loop_plastic_max_offset(int p_loop_index) const;
 
 	// Remove all rim loops; resets internal buffers. Does not affect
 	// orifice config (gravity, iteration_count, etc.).

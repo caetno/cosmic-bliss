@@ -208,6 +208,13 @@ void Orifice::_iterate_loop_one_pass(RimLoopState &loop, float p_dt) {
 	const Vector3 n_hat = normalize_or_z(entry_axis);
 
 	const float compliance_distance = loop.distance_compliance * dt2_inv;
+	// Slice 5D §4P-A — separate compliance for the stretch branch when
+	// `distance_anisotropic` is true. With default ratio 1e-6 vs 1e-3
+	// (~1000×), the rim is near-rigid in compression and visibly
+	// compliant in stretch. When the flag is false (jewelry / rigid
+	// rim), this value is unused and the step falls back to the
+	// symmetric 5A behaviour.
+	const float compliance_distance_stretch = loop.distance_stretch_compliance * dt2_inv;
 	const float compliance_area = loop.area_compliance * dt2_inv;
 
 	// Slice 5B — Center frame is bone-driven when host bone is active,
@@ -235,8 +242,16 @@ void Orifice::_iterate_loop_one_pass(RimLoopState &loop, float p_dt) {
 		float rest_len = loop.rim_segment_rest_lengths[k];
 		float constraint = dist - rest_len;
 		float &lambda = p_a.distance_lambda_to_next;
-		float dlambda = (-constraint - compliance_distance * lambda) /
-				(w_sum + compliance_distance + 1e-8f);
+		// Slice 5D §4P-A — anisotropic compliance: stiff in compression
+		// (constraint < 0), compliant in stretch (constraint > 0).
+		// Falls back to the symmetric `distance_compliance` when the
+		// flag is off (jewelry / rigid rim).
+		float compliance_eff = compliance_distance;
+		if (loop.distance_anisotropic && constraint > 0.0f) {
+			compliance_eff = compliance_distance_stretch;
+		}
+		float dlambda = (-constraint - compliance_eff * lambda) /
+				(w_sum + compliance_eff + 1e-8f);
 		lambda += dlambda;
 		Vector3 delta = (d / dist) * dlambda;
 		if (p_a.inv_mass > 0.0f) {
@@ -285,16 +300,36 @@ void Orifice::_iterate_loop_one_pass(RimLoopState &loop, float p_dt) {
 	// stiffness distribution (front-vs-back, etc.). Scalar
 	// distance constraint with target distance = 0; degenerate at
 	// dist→0 (already at rest) so we early-out there.
+	//
+	// Slice 5D §4P-C — `rest = neutral + plastic_offset`; offset is
+	// updated in `_finalize_loop` after the iter loop, so within iter
+	// it's read-only here.
+	// Slice 5D §4P-B — strain-stiffening J-curve: effective compliance
+	// shrinks as displacement magnitude grows past
+	// `j_curve_characteristic_length`. alpha=beta=0 → linear regime
+	// (5A baseline).
+	const float j_alpha = loop.j_curve_alpha;
+	const float j_beta = loop.j_curve_beta;
+	const float j_char_len_inv = (loop.j_curve_characteristic_length > 1e-6f)
+			? (1.0f / loop.j_curve_characteristic_length)
+			: 0.0f;
 	for (int k = 0; k < n; k++) {
 		RimParticle &p_k = loop.rim_particles[k];
 		if (p_k.inv_mass <= 0.0f) continue;
-		Vector3 rest_world = xform.xform(p_k.rest_position_in_center_frame);
+		Vector3 rest_local = p_k.neutral_rest_position_in_center_frame + p_k.plastic_offset;
+		Vector3 rest_world = xform.xform(rest_local);
 		Vector3 d = p_k.position - rest_world;
 		float dist = d.length();
 		if (dist < 1e-8f) continue;
-		float compliance_spring = stiffness_to_compliance(
-				loop.rim_particle_rest_stiffness_per_k[k]) *
-				dt2_inv;
+		float base_compliance = stiffness_to_compliance(
+				loop.rim_particle_rest_stiffness_per_k[k]);
+		float strain = dist * j_char_len_inv;
+		float strain_sq = strain * strain;
+		float strain_quad = strain_sq * strain_sq;
+		float j_factor = 1.0f + j_alpha * strain_sq + j_beta * strain_quad;
+		// j_factor ≥ 1, so effective compliance ≤ base. With alpha=0
+		// + beta=0 (default), j_factor = 1.0 → unchanged.
+		float compliance_spring = (base_compliance / j_factor) * dt2_inv;
 		float &lambda = p_k.spring_lambda;
 		float dlambda = (-dist - compliance_spring * lambda) /
 				(p_k.inv_mass + compliance_spring + 1e-8f);
@@ -305,10 +340,47 @@ void Orifice::_iterate_loop_one_pass(RimLoopState &loop, float p_dt) {
 	_apply_deltas_all(loop);
 }
 
-void Orifice::_finalize_loop(RimLoopState & /*loop*/, float /*p_dt*/) {
-	// No-op for 5A. Slot for the §6.4 "pull-out jiggle" damping (already
-	// emerges from the XPBD constraint balance + global solver damping)
-	// and the §6.10 ContractionPulse rest-position deltas (later slice).
+void Orifice::_finalize_loop(RimLoopState &loop, float p_dt) {
+	// Slice 5D §4P-C — orifice memory. Per particle, lerp `plastic_offset`
+	// toward the current Center-frame displacement at `accumulate_rate`,
+	// then decay it toward zero at `recover_rate`, then clamp to
+	// `plastic_max_offset`. The two rates compete: writes vs decay.
+	// Defaults are equal (memory-neutral): no net drift on a stationary
+	// orifice; visible memory only when load is sustained for seconds.
+	int n = (int)loop.rim_particles.size();
+	if (n < 1) return;
+	if (loop.plastic_accumulate_rate <= 0.0f && loop.plastic_recover_rate <= 0.0f) {
+		// Both rates disabled — preserve `plastic_offset` as-is (allows
+		// authoring scripts to drive offsets manually if needed).
+		return;
+	}
+	const Transform3D xform = get_center_frame_world();
+	const Transform3D xform_inv = xform.affine_inverse();
+	const float acc_lerp = Math::clamp(loop.plastic_accumulate_rate * p_dt, 0.0f, 1.0f);
+	const float decay = 1.0f - Math::clamp(loop.plastic_recover_rate * p_dt, 0.0f, 1.0f);
+	const float max_off = loop.plastic_max_offset;
+	const float max_off_sq = max_off * max_off;
+	for (int k = 0; k < n; k++) {
+		RimParticle &p = loop.rim_particles[k];
+		Vector3 pos_local = xform_inv.xform(p.position);
+		Vector3 current_off = pos_local - p.neutral_rest_position_in_center_frame;
+		// Step 1 — lerp plastic_offset toward current displacement.
+		p.plastic_offset = p.plastic_offset.lerp(current_off, acc_lerp);
+		// Step 2 — decay toward zero (concurrent recovery; the two
+		// rates compete to determine net memory).
+		p.plastic_offset *= decay;
+		// Step 3 — magnitude clamp.
+		float len_sq = p.plastic_offset.length_squared();
+		if (len_sq > max_off_sq && max_off > 0.0f) {
+			float scale = max_off / Math::sqrt(len_sq);
+			p.plastic_offset *= scale;
+		}
+		// Refresh the cached rest_position_in_center_frame for snapshot
+		// consumers (gizmo, spring-back step on the NEXT tick reads
+		// `neutral + plastic_offset` directly so this assignment is
+		// for surface-area / debug introspection only).
+		p.rest_position_in_center_frame = p.neutral_rest_position_in_center_frame + p.plastic_offset;
+	}
 }
 
 // -- Configuration ---------------------------------------------------------
@@ -535,7 +607,12 @@ int Orifice::add_rim_loop(
 	_refresh_center_frame_cache();
 	const Transform3D xform = get_center_frame_world();
 	for (int k = 0; k < n; k++) {
+		// Slice 5D §4P-C — `neutral` is the immutable authored anchor;
+		// `rest_position` starts identical (plastic_offset = 0) and
+		// drifts at runtime under `_finalize_loop`'s plastic update.
+		loop.rim_particles[k].neutral_rest_position_in_center_frame = rp[k];
 		loop.rim_particles[k].rest_position_in_center_frame = rp[k];
+		loop.rim_particles[k].plastic_offset = Vector3();
 		Vector3 world = xform.xform(rp[k]);
 		loop.rim_particles[k].position = world;
 		loop.rim_particles[k].prev_position = world;
@@ -628,10 +705,26 @@ Array Orifice::get_rim_loop_state(int p_loop_index) const {
 	// frame_world()` returns the right thing for the rim's rest-world
 	// projection — no warnings, no special-casing in callers.
 	const Transform3D xform = get_center_frame_world();
+	// Slice 5D — pre-computed J-curve scratch (per-loop, not per-
+	// particle, so we hoist out of the inner loop).
+	const float j_alpha = loop.j_curve_alpha;
+	const float j_beta = loop.j_curve_beta;
+	const float j_char_len_inv = (loop.j_curve_characteristic_length > 1e-6f)
+			? (1.0f / loop.j_curve_characteristic_length)
+			: 0.0f;
 	for (int k = 0; k < n; k++) {
 		const RimParticle &p = loop.rim_particles[k];
-		Vector3 rest_world = xform.xform(p.rest_position_in_center_frame);
+		Vector3 rest_local = p.neutral_rest_position_in_center_frame + p.plastic_offset;
+		Vector3 rest_world = xform.xform(rest_local);
 		Vector3 velocity = p.position - p.prev_position; // tick-rate Δ; caller divides by dt if desired
+		// Slice 5D §4P-B / §4P-C — derived snapshot fields.
+		Vector3 displacement = p.position - rest_world;
+		float strain = displacement.length() * j_char_len_inv;
+		float strain_sq = strain * strain;
+		float j_factor = 1.0f + j_alpha * strain_sq + j_beta * strain_sq * strain_sq;
+		float base_compliance = stiffness_to_compliance(
+				loop.rim_particle_rest_stiffness_per_k[k]);
+		float effective_compliance = base_compliance / j_factor;
 		Dictionary d;
 		d["rest_position"] = rest_world;
 		d["current_position"] = p.position;
@@ -640,6 +733,12 @@ Array Orifice::get_rim_loop_state(int p_loop_index) const {
 		d["distance_lambda"] = p.distance_lambda_to_next;
 		d["neighbour_rest_distance"] = loop.rim_segment_rest_lengths[k];
 		d["inv_mass"] = p.inv_mass;
+		// Slice 5D §15.2 extensions.
+		d["plastic_offset"] = p.plastic_offset;
+		d["neutral_rest_position"] = xform.xform(p.neutral_rest_position_in_center_frame);
+		d["current_strain"] = strain;
+		d["effective_compliance"] = effective_compliance;
+		d["distance_anisotropic_mode"] = loop.distance_anisotropic;
 		out.push_back(d);
 	}
 	return out;
@@ -704,6 +803,42 @@ float Orifice::get_rim_contact_radius(int p_loop_index, int p_particle_index) co
 	if (p_particle_index < 0 || p_particle_index >= (int)loop.rim_contact_radius_per_k.size()) return 0.0f;
 	return loop.rim_contact_radius_per_k[p_particle_index];
 }
+
+// -- Slice 5D per-loop realism tunables -----------------------------------
+
+#define ORIFICE_LOOP_GETSET(setter, getter, field, def_invalid)                  \
+	void Orifice::setter(int p_loop_index, decltype(RimLoopState::field) p_v) {  \
+		if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return;   \
+		rim_loops[p_loop_index].field = p_v;                                     \
+	}                                                                             \
+	decltype(RimLoopState::field) Orifice::getter(int p_loop_index) const {       \
+		if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return def_invalid; \
+		return rim_loops[p_loop_index].field;                                    \
+	}
+
+// 4P-A
+ORIFICE_LOOP_GETSET(set_loop_distance_anisotropic, get_loop_distance_anisotropic,
+		distance_anisotropic, false)
+ORIFICE_LOOP_GETSET(set_loop_distance_stretch_compliance, get_loop_distance_stretch_compliance,
+		distance_stretch_compliance, 0.0f)
+
+// 4P-B
+ORIFICE_LOOP_GETSET(set_loop_j_curve_alpha, get_loop_j_curve_alpha,
+		j_curve_alpha, 0.0f)
+ORIFICE_LOOP_GETSET(set_loop_j_curve_beta, get_loop_j_curve_beta,
+		j_curve_beta, 0.0f)
+ORIFICE_LOOP_GETSET(set_loop_j_curve_characteristic_length, get_loop_j_curve_characteristic_length,
+		j_curve_characteristic_length, 0.0f)
+
+// 4P-C
+ORIFICE_LOOP_GETSET(set_loop_plastic_accumulate_rate, get_loop_plastic_accumulate_rate,
+		plastic_accumulate_rate, 0.0f)
+ORIFICE_LOOP_GETSET(set_loop_plastic_recover_rate, get_loop_plastic_recover_rate,
+		plastic_recover_rate, 0.0f)
+ORIFICE_LOOP_GETSET(set_loop_plastic_max_offset, get_loop_plastic_max_offset,
+		plastic_max_offset, 0.0f)
+
+#undef ORIFICE_LOOP_GETSET
 
 // -- Tentacle registration (slice 5C-A) ------------------------------------
 
@@ -1913,6 +2048,40 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_type2_contacts_snapshot"), &Orifice::get_type2_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("set_rim_contact_radius", "loop_index", "particle_index", "radius"), &Orifice::set_rim_contact_radius);
 	ClassDB::bind_method(D_METHOD("get_rim_contact_radius", "loop_index", "particle_index"), &Orifice::get_rim_contact_radius);
+
+	// Slice 5D — per-loop realism tunables (4P-A / 4P-B / 4P-C).
+	ClassDB::bind_method(D_METHOD("set_loop_distance_anisotropic", "loop_index", "value"),
+			&Orifice::set_loop_distance_anisotropic);
+	ClassDB::bind_method(D_METHOD("get_loop_distance_anisotropic", "loop_index"),
+			&Orifice::get_loop_distance_anisotropic);
+	ClassDB::bind_method(D_METHOD("set_loop_distance_stretch_compliance", "loop_index", "value"),
+			&Orifice::set_loop_distance_stretch_compliance);
+	ClassDB::bind_method(D_METHOD("get_loop_distance_stretch_compliance", "loop_index"),
+			&Orifice::get_loop_distance_stretch_compliance);
+	ClassDB::bind_method(D_METHOD("set_loop_j_curve_alpha", "loop_index", "value"),
+			&Orifice::set_loop_j_curve_alpha);
+	ClassDB::bind_method(D_METHOD("get_loop_j_curve_alpha", "loop_index"),
+			&Orifice::get_loop_j_curve_alpha);
+	ClassDB::bind_method(D_METHOD("set_loop_j_curve_beta", "loop_index", "value"),
+			&Orifice::set_loop_j_curve_beta);
+	ClassDB::bind_method(D_METHOD("get_loop_j_curve_beta", "loop_index"),
+			&Orifice::get_loop_j_curve_beta);
+	ClassDB::bind_method(D_METHOD("set_loop_j_curve_characteristic_length", "loop_index", "value"),
+			&Orifice::set_loop_j_curve_characteristic_length);
+	ClassDB::bind_method(D_METHOD("get_loop_j_curve_characteristic_length", "loop_index"),
+			&Orifice::get_loop_j_curve_characteristic_length);
+	ClassDB::bind_method(D_METHOD("set_loop_plastic_accumulate_rate", "loop_index", "value"),
+			&Orifice::set_loop_plastic_accumulate_rate);
+	ClassDB::bind_method(D_METHOD("get_loop_plastic_accumulate_rate", "loop_index"),
+			&Orifice::get_loop_plastic_accumulate_rate);
+	ClassDB::bind_method(D_METHOD("set_loop_plastic_recover_rate", "loop_index", "value"),
+			&Orifice::set_loop_plastic_recover_rate);
+	ClassDB::bind_method(D_METHOD("get_loop_plastic_recover_rate", "loop_index"),
+			&Orifice::get_loop_plastic_recover_rate);
+	ClassDB::bind_method(D_METHOD("set_loop_plastic_max_offset", "loop_index", "value"),
+			&Orifice::set_loop_plastic_max_offset);
+	ClassDB::bind_method(D_METHOD("get_loop_plastic_max_offset", "loop_index"),
+			&Orifice::get_loop_plastic_max_offset);
 
 	// Slice 5C-B — EntryInteraction lifecycle.
 	ClassDB::bind_method(D_METHOD("set_entry_interaction_grace_period", "seconds"), &Orifice::set_entry_interaction_grace_period);

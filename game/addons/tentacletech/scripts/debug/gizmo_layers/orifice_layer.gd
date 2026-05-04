@@ -62,6 +62,19 @@ const HOST_BODY_COLOR := Color(0.55, 1.0, 0.3, 0.95)
 const PRESSURE_LOW_COLOR := Color(0.3, 1.0, 0.4, 0.9)
 const PRESSURE_MID_COLOR := Color(1.0, 1.0, 0.3, 0.9)
 const PRESSURE_HIGH_COLOR := Color(1.0, 0.3, 0.3, 0.95)
+# Slice 5D §4P-C — magenta arrow from neutral rest to current rest
+# position (which is `neutral + plastic_offset`). Drawn only when
+# offset is non-zero so a steady orifice stays clean.
+const PLASTIC_OFFSET_COLOR := Color(1.0, 0.4, 1.0, 0.95)
+# Slice 5D §4P-A — when distance_anisotropic_mode is true and a rim
+# segment is in the stretch regime, tint shifts from rim-cyan toward
+# yellow as a visual cue. Computed via lerp at draw time; this is the
+# saturated yellow endpoint.
+const RIM_SEGMENT_STRETCH_COLOR := Color(1.0, 0.95, 0.3, 0.95)
+# Slice 5D §4P-B — J-curve strain heat overlay around rim particles
+# (only when alpha or beta non-zero). Cool→hot palette.
+const J_CURVE_COOL_COLOR := Color(0.3, 0.6, 1.0, 0.85)
+const J_CURVE_HOT_COLOR := Color(1.0, 0.3, 0.6, 0.95)
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -114,25 +127,65 @@ func update_from(p_orifice: Node3D) -> void:
 			current_local[k] = inv * (d["current_position"] as Vector3)
 			rest_local[k] = inv * (d["rest_position"] as Vector3)
 
-		# Closed-loop rim segments.
+		# Closed-loop rim segments. Slice 5D §4P-A — when the loop is in
+		# anisotropic mode AND the segment is currently in the stretch
+		# regime (current_length > rest_length), tint shifts toward
+		# yellow to flag the asymmetric behavior.
+		var aniso_mode: bool = false
+		if n > 0:
+			aniso_mode = bool((state[0] as Dictionary).get("distance_anisotropic_mode", false))
 		for k in n:
 			var k1: int = (k + 1) % n
-			_imesh.surface_set_color(RIM_SEGMENT_COLOR)
+			var dk: Dictionary = state[k]
+			var rest_len: float = float(dk.get("neighbour_rest_distance", 0.0))
+			var seg_color: Color = RIM_SEGMENT_COLOR
+			if aniso_mode and rest_len > 1e-6:
+				var cur_len: float = (current_local[k] - current_local[k1]).length()
+				if cur_len > rest_len:
+					var stretch_ratio: float = clampf((cur_len / rest_len) - 1.0, 0.0, 0.5)
+					seg_color = RIM_SEGMENT_COLOR.lerp(RIM_SEGMENT_STRETCH_COLOR, stretch_ratio / 0.5)
+			_imesh.surface_set_color(seg_color)
 			_imesh.surface_add_vertex(current_local[k])
-			_imesh.surface_set_color(RIM_SEGMENT_COLOR)
+			_imesh.surface_set_color(seg_color)
 			_imesh.surface_add_vertex(current_local[k1])
 
-		# Per-particle current position cross (color reflects pinned/free).
+		# Per-particle current position cross. Slice 5D §4P-B — when J-
+		# curve is non-zero, the cross color blends from cool (low strain)
+		# to hot (high strain). Otherwise standard pinned/free gradient.
 		for k in n:
 			var d: Dictionary = state[k]
 			var inv_mass: float = d.get("inv_mass", 1.0)
+			var strain: float = float(d.get("current_strain", 0.0))
 			var c: Color = _Colors.particle_color(inv_mass)
+			# J-curve strain heat: lerp blend factor by 1 − 1/(1+strain²)
+			# so the cool-to-hot transition tracks the J-curve factor
+			# itself. Only kicks in when the loop has J-curve enabled
+			# (signaled by a noticeable strain reading).
+			if strain > 0.05:
+				var heat: float = 1.0 - 1.0 / (1.0 + strain * strain)
+				c = J_CURVE_COOL_COLOR.lerp(J_CURVE_HOT_COLOR, heat)
 			_draw_cross(current_local[k], RIM_PARTICLE_SIZE, c)
 
 		# Rest position as a small mint dot — deformation reads as the
 		# offset between rest and current.
 		for k in n:
 			_draw_cross(rest_local[k], REST_MARKER_SIZE, REST_MARKER_COLOR)
+
+		# Slice 5D §4P-C — plastic offset arrow from neutral rest to
+		# current rest. Only drawn when offset is non-zero (zero-input
+		# orifice stays clean). Magenta to distinguish from the
+		# host-bone red-purple marker.
+		for k in n:
+			var d: Dictionary = state[k]
+			var po: Vector3 = d.get("plastic_offset", Vector3.ZERO)
+			if po.length() < 1e-4:
+				continue
+			var neutral_world: Vector3 = d.get("neutral_rest_position", rest_local[k])
+			var neutral_local: Vector3 = inv * neutral_world
+			_imesh.surface_set_color(PLASTIC_OFFSET_COLOR)
+			_imesh.surface_add_vertex(neutral_local)
+			_imesh.surface_set_color(PLASTIC_OFFSET_COLOR)
+			_imesh.surface_add_vertex(rest_local[k])
 
 	# Slice 5B — host bone marker. Drawn once for the orifice (not per
 	# loop) at the bone's resolved world position. Helps debug "is the
