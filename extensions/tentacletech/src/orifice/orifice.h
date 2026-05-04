@@ -2,10 +2,14 @@
 #define TENTACLETECH_ORIFICE_H
 
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/skeleton3d.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/node_path.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <godot_cpp/variant/string_name.hpp>
+#include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
 #include <vector>
@@ -119,6 +123,52 @@ public:
 	void set_entry_axis(const godot::Vector3 &p_axis);
 	godot::Vector3 get_entry_axis() const;
 
+	// Host bone soft attachment (slice 5B). The orifice's Center frame
+	// inherits the bone's `global_transform * get_bone_global_pose(idx)`
+	// at the start of each `tick()`, optionally with an authored
+	// `host_bone_offset` so the orifice can sit slightly off the bone
+	// origin without re-rigging. When unset (skeleton_path empty or
+	// bone_name empty or resolution fails), the orifice falls back to
+	// its own `global_transform` (slice 5A behavior — no warnings).
+	//
+	// The bone transform is read ONCE at tick start. Per-iteration calls
+	// to `get_bone_global_pose` would force a skeleton recompute and
+	// kill performance, so the iterate loop reads the cached node
+	// global_transform instead. Same discipline as the §4 ragdoll
+	// snapshot non-negotiable.
+	void set_skeleton_path(const godot::NodePath &p_path);
+	godot::NodePath get_skeleton_path() const;
+	void set_bone_name(const godot::StringName &p_name);
+	godot::StringName get_bone_name() const;
+	void set_host_bone_offset(const godot::Transform3D &p_offset);
+	godot::Transform3D get_host_bone_offset() const;
+	// Convenience setter — paths-and-name in one call. Equivalent to
+	// `set_skeleton_path` then `set_bone_name`. Returns true if the
+	// resolution succeeded (the cached pointer + bone index are valid),
+	// false if the skeleton can't be located or the bone doesn't exist
+	// (the orifice falls back to its own transform either way).
+	bool set_host_bone(const godot::NodePath &p_skeleton_path, const godot::StringName &p_bone_name);
+
+	// Snapshot of the host bone state for the gizmo overlay + tests.
+	//   { has_host_bone: bool, skeleton_path, bone_name, bone_index,
+	//     current_world_transform: Transform3D }
+	// `current_world_transform` is the bone's resolved world transform
+	// (skeleton.global_transform × get_bone_global_pose(idx)) WITHOUT
+	// `host_bone_offset` applied — the offset is what positions the
+	// orifice's Center frame relative to that. `bone_index` is -1 when
+	// unresolved.
+	godot::Dictionary get_host_bone_state() const;
+
+	// Resolved Center frame in world space for the current tick. Equals
+	// `bone.global_transform × get_bone_global_pose × host_bone_offset`
+	// when the host bone is active, else falls back to the orifice's
+	// own `global_transform` (or identity if not in tree). This is the
+	// frame the rim particle rest positions are projected through into
+	// world space; expose it so tests + gizmos don't have to fight
+	// Godot's `global_transform` getter (which fails outside the tree
+	// in `--script` mode).
+	godot::Transform3D get_center_frame_world() const;
+
 	// Authoring API --------------------------------------------------------
 
 	// Append a new rim loop. Returns the loop index, or -1 on invalid
@@ -197,6 +247,42 @@ private:
 	float damping = DEFAULT_DAMPING;
 	godot::Vector3 gravity = godot::Vector3(0.0f, 0.0f, 0.0f);
 	godot::Vector3 entry_axis = godot::Vector3(0.0f, 0.0f, 1.0f);
+
+	// Host bone soft attachment (slice 5B). `_skeleton_cached` and
+	// `_bone_index_cached` are resolved lazily inside
+	// `_resolve_host_bone_lazy()`; `_host_bone_dirty` triggers a re-
+	// resolve on the next refresh after any of `skeleton_path`,
+	// `bone_name`, or the scene tree topology might have changed.
+	// `_host_bone_active` is the result of the last resolve — true only
+	// if both the skeleton pointer is non-null AND the bone index is
+	// >= 0. Falls back to the orifice node's own global_transform
+	// otherwise (silently — no warnings, matching slice 5A behavior).
+	godot::NodePath skeleton_path;
+	godot::StringName bone_name;
+	godot::Transform3D host_bone_offset;
+	mutable godot::Skeleton3D *_skeleton_cached = nullptr;
+	mutable int _bone_index_cached = -1;
+	mutable bool _host_bone_active = false;
+	mutable bool _host_bone_dirty = true;
+	// Once-per-tick resolved Center frame in world space. Refreshed at
+	// the start of `tick()` and read by every rim particle's rest-world
+	// projection inside the iterate loop. Stays at identity until the
+	// first `tick()` runs.
+	godot::Transform3D _center_frame_cached;
+
+	// Resolves `skeleton_path` + `bone_name` to a cached pointer + bone
+	// index. Cheap when not dirty (single bool check). Const so const
+	// snapshot accessors can call it; the cache is `mutable`.
+	void _resolve_host_bone_lazy() const;
+	// Reads the bone's resolved world transform from the cached
+	// skeleton/bone (must follow `_resolve_host_bone_lazy()`). Returns
+	// `Transform3D()` if the cache says the host bone is inactive.
+	godot::Transform3D _read_host_bone_world_transform() const;
+	// Refreshes `_center_frame_cached` from the active state — bone-
+	// driven when host bone is active, else the orifice's own
+	// `global_transform` (with `is_inside_tree` guard so `--script`
+	// SceneTrees don't print warnings). Called once per `tick()`.
+	void _refresh_center_frame_cache();
 
 	std::vector<RimLoopState> rim_loops;
 

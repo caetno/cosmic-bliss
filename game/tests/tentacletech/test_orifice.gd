@@ -1,6 +1,6 @@
 extends SceneTree
 
-# Phase-5 slice 5A — Orifice rim primitive unit tests.
+# Phase-5 slice 5A + 5B — Orifice rim primitive unit tests.
 #
 # Run from repo root:
 #   godot --path game --headless --script res://tests/tentacletech/test_orifice.gd
@@ -12,12 +12,28 @@ extends SceneTree
 # MODULE_INITIALIZATION_LEVEL_SCENE — after the GDScript parser has resolved
 # identifiers in --script mode. Static methods bound with bind_static_method
 # are callable through any instance.
+#
+# `_init()` runs before SceneTree::initialize() finishes wiring up the root,
+# so nodes added there report `is_inside_tree() == false` and Skeleton3D
+# APIs that depend on tree state warn or fail. Defer the test body to the
+# first `_process` tick (mirrors test_collision_type4.gd).
 
 const DT := 1.0 / 60.0
 const ENTRY_AXIS := Vector3(0.0, 0.0, 1.0)
 
 
-func _init() -> void:
+var _ran: bool = false
+
+
+func _process(_delta: float) -> bool:
+	if _ran:
+		return true # signal quit
+	_ran = true
+	_run_tests()
+	return true
+
+
+func _run_tests() -> void:
 	if not ClassDB.class_exists("Orifice"):
 		push_error("[FAIL] tentacletech extension not loaded (Orifice missing)")
 		quit(2)
@@ -35,7 +51,14 @@ func _init() -> void:
 		"test_spring_back_decays_displacement",
 		"test_pinned_neighbor_loop_settles",
 		"test_polygon_area_helper_circle",
+		# Slice 5B — host bone soft attachment.
+		"test_host_bone_tracking_moves_orifice_frame",
+		"test_host_bone_tracking_pulls_rim_along",
+		"test_host_bone_offset_applied",
+		"test_host_bone_invalid_path_falls_back",
+		"test_host_bone_path_change_re_resolves",
 	]:
+		_reset_root()
 		if call(test_name):
 			print("[PASS] %s" % test_name)
 			passed += 1
@@ -45,6 +68,12 @@ func _init() -> void:
 
 	print("\n%d passed, %d failed" % [passed, failed])
 	quit(0 if failed == 0 else 1)
+
+
+func _reset_root() -> void:
+	for c in root.get_children():
+		root.remove_child(c)
+		c.free()
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +288,245 @@ func test_polygon_area_helper_circle() -> bool:
 	if absf(area - ideal) / ideal > 1e-4:
 		push_error("polygon area %f != expected %f for regular %d-gon" % [area, ideal, n])
 		return false
+	return true
+
+
+# ---------------------------------------------------------------------------
+# Slice 5B — host bone soft attachment
+
+# Build a Skeleton3D with a single bone at the origin, parented under the
+# scene root. Returns (skeleton, bone_index).
+func _make_skeleton(bone_name: StringName = &"Hips") -> Skeleton3D:
+	var skel := Skeleton3D.new()
+	skel.name = "TestSkeleton"
+	get_root().add_child(skel)
+	# Add the bone via add_bone; rest pose left at identity (relative to
+	# the skeleton root).
+	skel.add_bone(bone_name)
+	# Reset pose so get_bone_global_pose returns the identity-by-default
+	# transform we expect at the start of each test.
+	skel.reset_bone_poses()
+	return skel
+
+
+# Move the bone (in skeleton-local coords). Helper to reduce boilerplate.
+func _set_bone_pos(skel: Skeleton3D, bone_idx: int, p_pos: Vector3) -> void:
+	skel.set_bone_pose_position(bone_idx, p_pos)
+
+
+# `--script` mode reports `is_inside_tree() == false` even after `add_child`,
+# which makes both `Node.get_path()` and `Node.get_path_to()` fail with
+# "Parameter \"data.tree\" is null." Construct an absolute path under
+# /root/<name> manually instead.
+func _node_path(node: Node) -> NodePath:
+	return NodePath("/root/" + str(node.name))
+
+
+# Bone moves -> Orifice global_transform tracks it after one tick.
+func test_host_bone_tracking_moves_orifice_frame() -> bool:
+	var skel: Skeleton3D = _make_skeleton(&"Hips")
+	# Skeleton itself sits at world (5, 0, 0) so the test verifies both
+	# the skeleton.global_transform and the per-bone pose contribute.
+	skel.position = Vector3(5.0, 0.0, 0.0)
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	o.entry_axis = ENTRY_AXIS
+	get_root().add_child(o)
+	var resolved: bool = o.set_host_bone(_node_path(skel), &"Hips")
+	if not resolved:
+		push_error("set_host_bone failed to resolve")
+		return false
+	# Move the bone.
+	var bone_local := Vector3(0.0, 1.5, 0.0)
+	_set_bone_pos(skel, 0, bone_local)
+	# Tick once — refresh runs at the start of tick().
+	o.tick(DT)
+	var expected: Vector3 = Vector3(5.0, 1.5, 0.0)
+	var got: Vector3 = (o.get_center_frame_world() as Transform3D).origin
+	if (got - expected).length() > 1e-3:
+		push_error("orifice frame %s != expected %s" % [got, expected])
+		o.queue_free()
+		skel.queue_free()
+		return false
+	# Verify get_host_bone_state reports the live bone transform.
+	var state: Dictionary = o.get_host_bone_state()
+	if not state.get("has_host_bone", false):
+		push_error("has_host_bone false after successful resolve")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	if int(state.get("bone_index", -1)) != 0:
+		push_error("bone_index %d != 0" % int(state.get("bone_index", -1)))
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.queue_free()
+	skel.queue_free()
+	return true
+
+
+# Bone moves -> rim particles get pulled along by spring-back. After
+# settling, particles end roughly at the new rest world positions.
+func test_host_bone_tracking_pulls_rim_along() -> bool:
+	var skel: Skeleton3D = _make_skeleton(&"Hips")
+	var radius := 0.05
+	var n := 8
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	o.entry_axis = ENTRY_AXIS
+	get_root().add_child(o)
+	o.set_host_bone(_node_path(skel), &"Hips")
+	# Configure the rim loop.
+	var rest_pos: PackedVector3Array = o.make_circular_rest_positions(n, radius, ENTRY_AXIS)
+	var seg_lens: PackedFloat32Array = o.make_uniform_segment_rest_lengths(rest_pos)
+	var area: float = absf(o.compute_polygon_area(rest_pos, ENTRY_AXIS))
+	var stf := PackedFloat32Array()
+	stf.resize(n)
+	for i in n:
+		stf[i] = 0.7  # moderately stiff spring-back so it follows the bone
+	o.add_rim_loop(rest_pos, seg_lens, area, stf, 1e-4, 1e-6)
+	# Settle at zero bone offset.
+	for _i in 60:
+		o.tick(DT)
+	# Capture initial particle position.
+	var initial_p0: Vector3 = o.get_particle_position(0, 0)
+	# Move the bone laterally.
+	var bone_step := Vector3(0.0, 0.0, 0.5)
+	_set_bone_pos(skel, 0, bone_step)
+	# Settle.
+	for _i in 240:
+		o.tick(DT)
+	var final_p0: Vector3 = o.get_particle_position(0, 0)
+	# The particle should have shifted by approximately bone_step.
+	var delta: Vector3 = final_p0 - initial_p0
+	if (delta - bone_step).length() > 0.01:
+		push_error("rim particle didn't follow bone: delta=%s expected=%s" % [delta, bone_step])
+		o.queue_free()
+		skel.queue_free()
+		return false
+	# Loop circumference should remain reasonably preserved (no balloon).
+	var area_after: float = absf(o.get_loop_current_enclosed_area(0))
+	if absf(area_after - area) / area > 0.10:
+		push_error("loop area drifted: %f -> %f" % [area, area_after])
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.queue_free()
+	skel.queue_free()
+	return true
+
+
+# Non-identity host_bone_offset is applied on top of the bone pose.
+func test_host_bone_offset_applied() -> bool:
+	var skel: Skeleton3D = _make_skeleton(&"Hips")
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	get_root().add_child(o)
+	o.set_host_bone(_node_path(skel), &"Hips")
+	# Author an offset of (0.2, 0.0, 0.0) in bone-local space.
+	var offset := Transform3D(Basis(), Vector3(0.2, 0.0, 0.0))
+	o.host_bone_offset = offset
+	# Move the bone to (0, 1, 0).
+	_set_bone_pos(skel, 0, Vector3(0.0, 1.0, 0.0))
+	o.tick(DT)
+	# Expected world: bone (0, 1, 0) × offset (0.2, 0, 0) = (0.2, 1, 0).
+	var expected := Vector3(0.2, 1.0, 0.0)
+	var got: Vector3 = (o.get_center_frame_world() as Transform3D).origin
+	if (got - expected).length() > 1e-3:
+		push_error("offset not applied: got %s expected %s" % [got, expected])
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.queue_free()
+	skel.queue_free()
+	return true
+
+
+# Invalid path / unknown bone name → falls back silently to the orifice's
+# own global_transform, no crash, no errors emitted.
+func test_host_bone_invalid_path_falls_back() -> bool:
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	o.position = Vector3(2.0, 0.0, 0.0)
+	get_root().add_child(o)
+	# Bad NodePath.
+	var ok_bad_path: bool = o.set_host_bone(NodePath("DoesNotExist"), &"Hips")
+	if ok_bad_path:
+		push_error("set_host_bone returned true for invalid path")
+		o.queue_free()
+		return false
+	o.tick(DT)
+	# Orifice frame should equal its own global_transform (identity-based,
+	# since no host bone is active).
+	var got: Vector3 = (o.get_center_frame_world() as Transform3D).origin
+	var expected := Vector3(2.0, 0.0, 0.0)
+	if (got - expected).length() > 1e-5:
+		push_error("orifice frame moved despite invalid bone: %s != %s" % [got, expected])
+		o.queue_free()
+		return false
+	# get_host_bone_state.has_host_bone should be false.
+	var state: Dictionary = o.get_host_bone_state()
+	if state.get("has_host_bone", true):
+		push_error("has_host_bone true after invalid path")
+		o.queue_free()
+		return false
+	# Now configure a valid skeleton but a bone name that doesn't exist.
+	var skel: Skeleton3D = _make_skeleton(&"Hips")
+	var ok_bad_bone: bool = o.set_host_bone(_node_path(skel), &"NoSuchBone")
+	if ok_bad_bone:
+		push_error("set_host_bone returned true for unknown bone name")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.tick(DT)
+	state = o.get_host_bone_state()
+	if state.get("has_host_bone", true):
+		push_error("has_host_bone true after unknown bone name")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.queue_free()
+	skel.queue_free()
+	return true
+
+
+# Changing bone_name after setup re-resolves the bone index.
+func test_host_bone_path_change_re_resolves() -> bool:
+	var skel := Skeleton3D.new()
+	skel.name = "MultiBoneSkel"
+	get_root().add_child(skel)
+	skel.add_bone(&"Hips")
+	skel.add_bone(&"Chest")
+	skel.reset_bone_poses()
+	var o: Node3D = ClassDB.instantiate("Orifice")
+	get_root().add_child(o)
+	# Configure for Hips first.
+	var ok: bool = o.set_host_bone(_node_path(skel), &"Hips")
+	if not ok:
+		push_error("initial set_host_bone(Hips) failed")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	if int(o.get_host_bone_state().get("bone_index", -1)) != 0:
+		push_error("bone_index didn't resolve to 0 for Hips")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	# Switch to Chest.
+	o.bone_name = &"Chest"
+	o.tick(DT)
+	if int(o.get_host_bone_state().get("bone_index", -1)) != 1:
+		push_error("bone_index didn't re-resolve to 1 after switching to Chest")
+		o.queue_free()
+		skel.queue_free()
+		return false
+	# Move the Chest bone, verify the orifice tracks it (not Hips).
+	skel.set_bone_pose_position(1, Vector3(0.0, 0.5, 0.0))
+	o.tick(DT)
+	var got: Vector3 = (o.get_center_frame_world() as Transform3D).origin
+	if (got - Vector3(0.0, 0.5, 0.0)).length() > 1e-3:
+		push_error("orifice tracked Hips instead of Chest after rename: %s" % got)
+		o.queue_free()
+		skel.queue_free()
+		return false
+	o.queue_free()
+	skel.queue_free()
 	return true
 
 

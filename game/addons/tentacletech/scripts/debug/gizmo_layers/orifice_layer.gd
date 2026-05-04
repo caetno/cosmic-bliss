@@ -18,6 +18,7 @@ const _Colors := preload("res://addons/tentacletech/scripts/debug/colors.gd")
 
 const RIM_PARTICLE_SIZE := 0.012
 const REST_MARKER_SIZE := 0.006
+const HOST_BONE_MARKER_SIZE := 0.018
 
 # Bright cyan — distinct from particle layer's white crosses and the
 # constraint layer's rest-color (also white). Picks up "this segment is
@@ -26,6 +27,11 @@ const RIM_SEGMENT_COLOR := Color(0.4, 0.95, 1.0, 0.9)
 # Mint that stays distinct from the particle layer's red-pinned and the
 # rim segment cyan; matches Reverie's "neutral rest" palette.
 const REST_MARKER_COLOR := Color(0.55, 1.0, 0.8, 0.7)
+# Red-purple for the host bone marker — distinct from the rim cyan, the
+# rest mint, and Godot's default skeleton orange-yellow. Tells the user
+# at a glance "this is where the orifice's Center frame is anchored on
+# the ragdoll".
+const HOST_BONE_COLOR := Color(0.95, 0.35, 0.85, 0.95)
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -97,6 +103,15 @@ func update_from(p_orifice: Node3D) -> void:
 		# offset between rest and current.
 		for k in n:
 			_draw_cross(rest_local[k], REST_MARKER_SIZE, REST_MARKER_COLOR)
+
+	# Slice 5B — host bone marker. Drawn once for the orifice (not per
+	# loop) at the bone's resolved world position. Helps debug "is the
+	# orifice tracking the right bone".
+	var host_state: Dictionary = p_orifice.call(&"get_host_bone_state")
+	if host_state.get("has_host_bone", false):
+		var bone_xform: Transform3D = host_state.get("current_world_transform", Transform3D())
+		var bone_world: Vector3 = bone_xform.origin
+		_draw_cross(inv * bone_world, HOST_BONE_MARKER_SIZE, HOST_BONE_COLOR)
 
 	_imesh.surface_end()
 

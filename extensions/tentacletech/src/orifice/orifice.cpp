@@ -1,9 +1,15 @@
 #include "orifice.h"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/skeleton3d.hpp>
+#include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
+#include <godot_cpp/variant/string.hpp>
 
 using namespace godot;
 
@@ -93,6 +99,18 @@ void Orifice::tick(float p_dt) {
 	if (p_dt < 1e-4f) return;
 	if (p_dt > 1.0f / 40.0f) p_dt = 1.0f / 40.0f;
 
+	// Slice 5B — refresh the Center frame from the host bone ONCE per
+	// tick before any per-loop work runs. Reading bone transforms inside
+	// the iterate loop would force a skeleton recompute per call (same
+	// gotcha as §4.5's once-per-tick ragdoll snapshot). The resolver +
+	// `_center_frame_cached` cover both paths: bone-driven when the host
+	// bone is active, else the orifice node's own `global_transform`
+	// (or identity if not in tree). `get_center_frame_world()` reads
+	// from the cache, so subsequent rim-particle rest-world projections
+	// don't re-resolve.
+	_resolve_host_bone_lazy();
+	_refresh_center_frame_cache();
+
 	for (size_t li = 0; li < rim_loops.size(); li++) {
 		RimLoopState &loop = rim_loops[li];
 		if ((int)loop.rim_particles.size() < 3) continue;
@@ -141,13 +159,13 @@ void Orifice::_iterate_loop(RimLoopState &loop, float p_dt) {
 	const float compliance_distance = loop.distance_compliance * dt2_inv;
 	const float compliance_area = loop.area_compliance * dt2_inv;
 
-	// Use the node's global_transform when wired into the tree; fall back
-	// to identity otherwise. This keeps headless tests (--script mode,
-	// where `is_inside_tree` can return false even after add_child) silent
-	// without affecting in-game behavior. The Center frame in 5A is just
-	// the orifice node's transform; once host-bone soft attachment lands
-	// in 5B the lookup moves to the bone's global xform.
-	const Transform3D xform = is_inside_tree() ? get_global_transform() : Transform3D();
+	// Slice 5B — Center frame is bone-driven when host bone is active,
+	// else falls back to the orifice node's own transform (which itself
+	// falls back to identity in `--script` mode where `is_inside_tree`
+	// returns false even after `add_child`). Either way `get_center_
+	// frame_world()` returns the right thing for the rim's rest-world
+	// projection — no warnings, no special-casing in callers.
+	const Transform3D xform = get_center_frame_world();
 
 	for (int iter = 0; iter < iteration_count; iter++) {
 		// 1. Closed-loop XPBD distance constraints around the rim.
@@ -261,6 +279,168 @@ Vector3 Orifice::get_gravity() const { return gravity; }
 void Orifice::set_entry_axis(const Vector3 &p_axis) { entry_axis = p_axis; }
 Vector3 Orifice::get_entry_axis() const { return entry_axis; }
 
+// -- Host bone (slice 5B) --------------------------------------------------
+
+void Orifice::set_skeleton_path(const NodePath &p_path) {
+	if (skeleton_path == p_path) return;
+	skeleton_path = p_path;
+	_host_bone_dirty = true;
+}
+
+NodePath Orifice::get_skeleton_path() const { return skeleton_path; }
+
+void Orifice::set_bone_name(const StringName &p_name) {
+	if (bone_name == p_name) return;
+	bone_name = p_name;
+	_host_bone_dirty = true;
+}
+
+StringName Orifice::get_bone_name() const { return bone_name; }
+
+void Orifice::set_host_bone_offset(const Transform3D &p_offset) {
+	host_bone_offset = p_offset;
+}
+
+Transform3D Orifice::get_host_bone_offset() const { return host_bone_offset; }
+
+bool Orifice::set_host_bone(const NodePath &p_skeleton_path, const StringName &p_bone_name) {
+	skeleton_path = p_skeleton_path;
+	bone_name = p_bone_name;
+	_host_bone_dirty = true;
+	_resolve_host_bone_lazy();
+	_refresh_center_frame_cache();
+	return _host_bone_active;
+}
+
+void Orifice::_resolve_host_bone_lazy() const {
+	// The dirty flag is a "config might have changed" hint; we ALSO
+	// re-validate the cached skeleton pointer against the current tree
+	// state on every call so a freed Skeleton3D doesn't dangle. NodePath
+	// resolution + find_bone are both fast (a few hundred ns) so the
+	// once-per-tick cost is negligible.
+	if (skeleton_path.is_empty() || bone_name == StringName()) {
+		_skeleton_cached = nullptr;
+		_bone_index_cached = -1;
+		_host_bone_active = false;
+		_host_bone_dirty = false;
+		return;
+	}
+	// `--script` SceneTrees can report `is_inside_tree() == false` even
+	// after `add_child`. Both `Node::get_node_or_null` and `get_path_to`
+	// fail in that state (Godot guards them behind `data.tree != nullptr`
+	// or "active scene tree"). Try `get_node_or_null` first (covers normal
+	// runtime use), then fall back to a manual recursive walk from the
+	// SceneTree root that doesn't depend on the caller node being marked
+	// in-tree (covers `--script` headless tests).
+	Node *node = nullptr;
+	if (is_inside_tree()) {
+		node = get_node_or_null(skeleton_path);
+	}
+	if (node == nullptr) {
+		SceneTree *tree = get_tree();
+		Window *root = (tree != nullptr) ? tree->get_root() : nullptr;
+		if (root != nullptr) {
+			// `skeleton_path` is typically `/root/Foo/Bar` (absolute) or
+			// `Foo/Bar` (relative-to-root). Strip a leading "/root/"
+			// prefix if present, then walk children by name.
+			String path_str = String(skeleton_path);
+			const String root_prefix = "/root/";
+			if (path_str.begins_with(root_prefix)) {
+				path_str = path_str.substr(root_prefix.length());
+			}
+			Node *cursor = root;
+			PackedStringArray segments = path_str.split("/", false);
+			for (int i = 0; i < segments.size() && cursor != nullptr; i++) {
+				const String &seg = segments[i];
+				Node *next = nullptr;
+				int child_count = cursor->get_child_count();
+				for (int c = 0; c < child_count; c++) {
+					Node *child = cursor->get_child(c);
+					if (child != nullptr && String(child->get_name()) == seg) {
+						next = child;
+						break;
+					}
+				}
+				cursor = next;
+			}
+			node = cursor;
+		}
+	}
+	Skeleton3D *skel = Object::cast_to<Skeleton3D>(node);
+	if (skel == nullptr) {
+		_skeleton_cached = nullptr;
+		_bone_index_cached = -1;
+		_host_bone_active = false;
+		_host_bone_dirty = false;
+		return;
+	}
+	// Re-look-up the bone if the skeleton pointer changed OR we were
+	// dirty (config changed) OR the cached index is now out of range
+	// (skeleton bone list mutated).
+	if (_host_bone_dirty || skel != _skeleton_cached || _bone_index_cached < 0 ||
+			_bone_index_cached >= skel->get_bone_count()) {
+		int idx = skel->find_bone(bone_name);
+		_skeleton_cached = skel;
+		_bone_index_cached = idx;
+		_host_bone_active = (idx >= 0);
+		_host_bone_dirty = false;
+		return;
+	}
+	_skeleton_cached = skel;
+	_host_bone_active = true;
+}
+
+void Orifice::_refresh_center_frame_cache() {
+	// Already-resolved? Just compose. Resolver is cheap; we leave the
+	// call to `tick()`'s caller so this helper is purely "compose the
+	// final frame from current resolver output".
+	if (_host_bone_active) {
+		_center_frame_cached = _read_host_bone_world_transform() * host_bone_offset;
+		return;
+	}
+	// No host bone — fall back to the orifice node's own transform.
+	// When in tree we use the global transform (correct under any
+	// nesting). In `--script` mode the SceneTree often reports
+	// `is_inside_tree() == false` even after `add_child`, so we use
+	// the node's local transform instead — equivalent to the global
+	// one when the orifice is parented directly under the SceneTree
+	// root, which is the headless-test layout.
+	if (is_inside_tree()) {
+		_center_frame_cached = get_global_transform();
+	} else {
+		_center_frame_cached = get_transform();
+	}
+}
+
+Transform3D Orifice::get_center_frame_world() const {
+	// Returns the cache populated by the most recent `tick()` /
+	// `add_rim_loop` / `set_host_bone`. Callers that need a fresh
+	// frame after authoring changes (skeleton path, bone name, offset)
+	// without ticking should call `tick(0)` — actually the dt floor
+	// rejects that, so use a small dt. In practice only tests hit this
+	// edge case, and they always tick at least once before reading.
+	return _center_frame_cached;
+}
+
+Transform3D Orifice::_read_host_bone_world_transform() const {
+	if (!_host_bone_active || _skeleton_cached == nullptr || _bone_index_cached < 0) {
+		return Transform3D();
+	}
+	return _skeleton_cached->get_global_transform() *
+			_skeleton_cached->get_bone_global_pose(_bone_index_cached);
+}
+
+Dictionary Orifice::get_host_bone_state() const {
+	_resolve_host_bone_lazy();
+	Dictionary d;
+	d["has_host_bone"] = _host_bone_active;
+	d["skeleton_path"] = skeleton_path;
+	d["bone_name"] = bone_name;
+	d["bone_index"] = _bone_index_cached;
+	d["current_world_transform"] = _read_host_bone_world_transform();
+	return d;
+}
+
 // -- Authoring API ---------------------------------------------------------
 
 int Orifice::add_rim_loop(
@@ -290,13 +470,15 @@ int Orifice::add_rim_loop(
 	const Vector3 *rp = p_rest_positions_in_center_frame.ptr();
 	const float *segs = p_segment_rest_lengths.ptr();
 	const float *stf = p_rest_stiffness_per_k.ptr();
-	// Use the node's global_transform when wired into the tree; fall back
-	// to identity otherwise. This keeps headless tests (--script mode,
-	// where `is_inside_tree` can return false even after add_child) silent
-	// without affecting in-game behavior. The Center frame in 5A is just
-	// the orifice node's transform; once host-bone soft attachment lands
-	// in 5B the lookup moves to the bone's global xform.
-	const Transform3D xform = is_inside_tree() ? get_global_transform() : Transform3D();
+	// Slice 5B — Center frame is bone-driven when host bone is active,
+	// else falls back to the orifice node's own transform (which itself
+	// falls back to identity in `--script` mode where `is_inside_tree`
+	// returns false even after `add_child`). Refresh the cache before
+	// reading so authoring before the first tick still picks up the
+	// host bone configured via `set_host_bone`.
+	_resolve_host_bone_lazy();
+	_refresh_center_frame_cache();
+	const Transform3D xform = get_center_frame_world();
 	for (int k = 0; k < n; k++) {
 		loop.rim_particles[k].rest_position_in_center_frame = rp[k];
 		Vector3 world = xform.xform(rp[k]);
@@ -384,13 +566,13 @@ Array Orifice::get_rim_loop_state(int p_loop_index) const {
 	}
 	const RimLoopState &loop = rim_loops[p_loop_index];
 	int n = (int)loop.rim_particles.size();
-	// Use the node's global_transform when wired into the tree; fall back
-	// to identity otherwise. This keeps headless tests (--script mode,
-	// where `is_inside_tree` can return false even after add_child) silent
-	// without affecting in-game behavior. The Center frame in 5A is just
-	// the orifice node's transform; once host-bone soft attachment lands
-	// in 5B the lookup moves to the bone's global xform.
-	const Transform3D xform = is_inside_tree() ? get_global_transform() : Transform3D();
+	// Slice 5B — Center frame is bone-driven when host bone is active,
+	// else falls back to the orifice node's own transform (which itself
+	// falls back to identity in `--script` mode where `is_inside_tree`
+	// returns false even after `add_child`). Either way `get_center_
+	// frame_world()` returns the right thing for the rim's rest-world
+	// projection — no warnings, no special-casing in callers.
+	const Transform3D xform = get_center_frame_world();
 	for (int k = 0; k < n; k++) {
 		const RimParticle &p = loop.rim_particles[k];
 		Vector3 rest_world = xform.xform(p.rest_position_in_center_frame);
@@ -503,6 +685,17 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_particle_inv_mass", "loop_index", "particle_index", "inv_mass"), &Orifice::set_particle_inv_mass);
 	ClassDB::bind_method(D_METHOD("set_loop_target_enclosed_area", "loop_index", "target"), &Orifice::set_loop_target_enclosed_area);
 
+	// Slice 5B — host bone soft attachment.
+	ClassDB::bind_method(D_METHOD("set_skeleton_path", "path"), &Orifice::set_skeleton_path);
+	ClassDB::bind_method(D_METHOD("get_skeleton_path"), &Orifice::get_skeleton_path);
+	ClassDB::bind_method(D_METHOD("set_bone_name", "name"), &Orifice::set_bone_name);
+	ClassDB::bind_method(D_METHOD("get_bone_name"), &Orifice::get_bone_name);
+	ClassDB::bind_method(D_METHOD("set_host_bone_offset", "offset"), &Orifice::set_host_bone_offset);
+	ClassDB::bind_method(D_METHOD("get_host_bone_offset"), &Orifice::get_host_bone_offset);
+	ClassDB::bind_method(D_METHOD("set_host_bone", "skeleton_path", "bone_name"), &Orifice::set_host_bone);
+	ClassDB::bind_method(D_METHOD("get_host_bone_state"), &Orifice::get_host_bone_state);
+	ClassDB::bind_method(D_METHOD("get_center_frame_world"), &Orifice::get_center_frame_world);
+
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iteration_count",
 						 PROPERTY_HINT_RANGE, "1,8,1"),
 			"set_iteration_count", "get_iteration_count");
@@ -516,4 +709,13 @@ void Orifice::_bind_methods() {
 			"set_gravity", "get_gravity");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "entry_axis"),
 			"set_entry_axis", "get_entry_axis");
+
+	ADD_GROUP("Host Bone", "");
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "skeleton_path",
+						 PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Skeleton3D"),
+			"set_skeleton_path", "get_skeleton_path");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "bone_name"),
+			"set_bone_name", "get_bone_name");
+	ADD_PROPERTY(PropertyInfo(Variant::TRANSFORM3D, "host_bone_offset"),
+			"set_host_bone_offset", "get_host_bone_offset");
 }
