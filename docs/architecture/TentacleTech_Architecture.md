@@ -605,6 +605,22 @@ Per orifice on the hero, the rim is an edge loop of the continuous hero mesh at 
 - **Z** — along the opening axis (outward from the cavity).
 - **X** — tangent along the rim loop.
 
+> **Implementation note (slice 5C-B, 2026-05-04).** The runtime
+> `EntryInteraction` engagement test internally uses the convention
+> `+entry_axis = INTO cavity` (signed_distance > 0 means cavity-interior),
+> which is the *opposite* of the Blender authoring convention above.
+> The §6.3 reaction-on-host-bone wedge math is sign-symmetric
+> (`drds_outward = drds_intrinsic × sign(dot(t_hat, entry_axis))`), so
+> both forms are functionally equivalent — the inverted sign just
+> propagates through the formulas. The two conventions coexist
+> because the authoring frame is what artists see in Blender (where
+> "+Z away from the body" is the intuitive default) and the runtime
+> frame is what reads naturally in C++ (where "engagement = entering
+> the cavity" maps to a positive signed distance). Future readers of
+> the EI source: don't assume the §6.1 sign convention applies inside
+> `EntryInteraction` lifecycle code; check `_tentacle_crosses_entry_plane`
+> for the runtime sign.
+
 Skin around the opening is weight-painted (also in Blender) to the rim anchors with angular interpolation between the two bracketing anchors and radial falloff outward. See §10.4 for the Godot-side import workflow and §10.6 for the full Blender → Godot authoring pipeline.
 
 **Multi-loop support.** An orifice can own multiple rim loops, each a fully independent particle loop with its own constraints. Loop 0 is the canonical "primary rim" used by EntryInteraction geometry checks (entry plane, tunnel projection); additional loops are visual / secondary contact surfaces. Common configurations:

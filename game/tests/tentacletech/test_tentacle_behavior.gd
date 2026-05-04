@@ -45,7 +45,15 @@ func _init() -> void:
 # Minimal Tentacle + TentacleBehavior tree under root. Behavior auto-resolves
 # parent via `tentacle_path = ".."`. randomize_phase_on_ready disabled for
 # determinism.
-func _make_setup() -> Dictionary:
+#
+# Behavior @exports must be set BEFORE `add_child(b)` triggers `_ready` so
+# the `_smoothed_*` amplitude mirrors snap to the test-configured values.
+# Setting them after `_ready` leaves the mirrors at class defaults and the
+# subsequent smoothing across one tick can't bring them to the test target —
+# this is what produced the 2 long-standing test failures (test_amplitude_
+# zero and test_strike_share_zero) before 2026-05-04. Pass overrides via the
+# `behavior_overrides` dict.
+func _make_setup(behavior_overrides: Dictionary = {}) -> Dictionary:
 	var root := Node3D.new()
 	get_root().add_child(root)
 	var t: Object = ClassDB.instantiate("Tentacle")
@@ -57,8 +65,25 @@ func _make_setup() -> Dictionary:
 	# force in the test — pose-target convergence is what we're checking.
 	t.set_gravity(Vector3.ZERO)
 	var b = _Behavior.new()
-	(t as Node).add_child(b)
+	# Pre-`_ready` configuration: randomize_phase_on_ready off (otherwise
+	# `_ready` seeds random phases), plus any test-supplied overrides so
+	# the smoothing mirrors snap to the right values when `_ready` runs.
 	b.randomize_phase_on_ready = false
+	for key in behavior_overrides:
+		b.set(key, behavior_overrides[key])
+	(t as Node).add_child(b)
+	# `--script` SceneTree quirk: `add_child` doesn't fire `_ready`
+	# synchronously when the parent reports `is_inside_tree() == false`
+	# (which happens in `_init`-mode tests even after `get_root().add_child`).
+	# When the test passes overrides, call `_ready` manually so the
+	# `_smoothed_*` mirrors snap to the @export values instead of
+	# class defaults (0.0). Tests that pass no overrides historically
+	# rely on the un-snapped behavior — `_smoothed_rest_extent` ramps
+	# from 0.0 toward 0.92 across ticks and provides the "evolution"
+	# that test_target_evolves_over_time and test_thrust_modulates_
+	# axial_extent assert; calling `_ready` there would defeat them.
+	if not behavior_overrides.is_empty():
+		b._ready()
 	b.refresh_wiring()
 	return {"root": root, "tentacle": t, "behavior": b}
 
@@ -107,12 +132,13 @@ func test_target_evolves_over_time() -> bool:
 # rest_extent). Verifies the synthesis simplifies cleanly when knobs are
 # zeroed.
 func test_amplitude_zero_produces_rest_pose() -> bool:
-	var s := _make_setup()
+	var s := _make_setup({
+		"wave_amplitude_scale": 0.0,
+		"thrust_amplitude": 0.0,
+		"coil_amplitude": 0.0,
+	})
 	var t = s["tentacle"]
 	var b = s["behavior"]
-	b.wave_amplitude_scale = 0.0
-	b.thrust_amplitude = 0.0
-	b.coil_amplitude = 0.0
 	b._physics_process(0.016)
 	var positions: PackedVector3Array = t.get_solver().get_pose_target_positions()
 	var n: int = t.particle_count
@@ -273,16 +299,24 @@ func test_tip_rigid_zone_quiets_tip() -> bool:
 # strong amplitude. Body axial projection should still swing. This is
 # the "tip balanced in place" extreme.
 func test_strike_share_zero_pins_tip_axially() -> bool:
-	var s := _make_setup()
+	# tip_strike_share only takes effect in the `has_lateral_release`
+	# branch (coil_amplitude > 1e-4) per behavior_driver's body/tip split
+	# logic — without a lateral-release path the body/tip factors collapse
+	# to one shared `rest_extent + pulse` formula and tip_strike_share is
+	# ignored. So we author a small coil to enable the split. Pre-`_ready`
+	# overrides keep the smoothing mirrors snapped to these values.
+	var s := _make_setup({
+		"wave_amplitude_scale": 0.0,
+		"thrust_frequency": 1.0,
+		"thrust_amplitude": 0.2,
+		"thrust_bias": 0.0,
+		"rest_extent": 0.85,
+		"tip_rigid_length": 0.10,
+		"tip_strike_share": 0.0,
+		"coil_amplitude": 0.05,
+	})
 	var t = s["tentacle"]
 	var b = s["behavior"]
-	b.wave_amplitude_scale = 0.0
-	b.thrust_frequency = 1.0
-	b.thrust_amplitude = 0.2
-	b.thrust_bias = 0.0
-	b.rest_extent = 0.85
-	b.tip_rigid_length = 0.10
-	b.tip_strike_share = 0.0
 
 	var rest_dir: Vector3 = b.rest_direction.normalized()
 	var tip_min := INF
