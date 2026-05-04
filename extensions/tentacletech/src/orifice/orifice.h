@@ -15,6 +15,8 @@
 
 #include <vector>
 
+#include "entry_interaction.h"
+
 class Tentacle;
 
 // Phase-5 slice 5A primitive. Spec:
@@ -221,6 +223,17 @@ public:
 	// the value that drives this to zero across iters).
 	godot::Array get_type2_contacts_snapshot() const;
 
+	// EntryInteraction lifecycle (slice 5C-B). EIs are created when a
+	// registered tentacle's chain crosses the entry plane on the
+	// cavity-interior side, refreshed each tick with new geometry, and
+	// retired once disengaged for longer than `entry_interaction_grace_period`.
+	// Persistent slots (grip_engagement, in_stick_phase, ejection_velocity,
+	// per-loop_k arrays) are reserved in this slice — 5C-C drives them.
+	void set_entry_interaction_grace_period(float p_seconds);
+	float get_entry_interaction_grace_period() const;
+	int get_entry_interaction_count() const; // active + still-in-grace
+	godot::Array get_entry_interactions_snapshot() const;
+
 	// Authoring API --------------------------------------------------------
 
 	// Append a new rim loop. Returns the loop index, or -1 on invalid
@@ -360,6 +373,15 @@ private:
 	// XPBD bilateral projection.
 	std::vector<Type2Contact> _type2_contacts;
 
+	// Slice 5C-B — EntryInteraction list. Persistent across ticks (so
+	// hysteretic state survives momentary disengagement); refreshed
+	// per-tick with new geometry. `entry_interaction_grace_period` (s)
+	// is the lifetime allowance after disengagement before purging —
+	// keeps the persistent slots alive across brief retreats so 5C-C's
+	// grip_engagement doesn't reset on every micro-glitch.
+	std::vector<EntryInteraction> _entry_interactions;
+	float entry_interaction_grace_period = 0.5f;
+
 	// Tick stages — per-loop.
 	void _predict_loop(RimLoopState &loop, float p_dt);
 	// Slice 5C-A — single-iteration body extracted from the previous
@@ -374,6 +396,36 @@ private:
 	Tentacle *_resolve_node_to_tentacle(const godot::NodePath &p_path) const;
 	void _collect_type2_contacts();
 	void _iterate_type2_contacts(float p_dt);
+
+	// Slice 5C-B — EntryInteraction lifecycle + per-tick geometric
+	// refresh. Runs after `_resolve_tentacles_lazy` /
+	// `_refresh_center_frame_cache` and BEFORE `_collect_type2_contacts`
+	// so later slices can gate contact collection by EI presence.
+	void _update_entry_interactions(float p_dt);
+	// Engagement test: does the tentacle's chain currently cross the
+	// orifice's entry plane on the cavity-interior side? Returns true +
+	// fills out the first-crossing geometry (`out_seg_idx`,
+	// `out_t`, `out_signed_distances` per particle) on success. Returns
+	// false otherwise (no crossing, or tentacle entirely on outward side).
+	bool _tentacle_crosses_entry_plane(
+			Tentacle *p_tentacle,
+			int &out_seg_idx,
+			float &out_t,
+			std::vector<float> &out_signed_distances) const;
+	// Refresh the per-tick geometric fields of an active EI. Called
+	// every tick the EI is engaged. Defensively resizes per-loop_k
+	// arrays to the current rim-loop layout so authoring changes
+	// (`add_rim_loop` / `clear_rim_loops`) don't dangle.
+	void _refresh_entry_interaction_geometry(
+			EntryInteraction &p_ei,
+			int p_seg_idx,
+			float p_t,
+			const std::vector<float> &p_signed_distances,
+			float p_dt);
+	// Sized-and-zeroed per-loop_k arrays for an EI given the current
+	// rim_loops layout. Cheap O(N×L); called on EI creation and per
+	// refresh tick.
+	void _resize_per_loop_k_arrays(EntryInteraction &p_ei) const;
 
 	// Jacobi delta helpers, scoped per loop (each loop owns its own
 	// scratch buffers — no cross-loop interference).

@@ -19,6 +19,8 @@ const _Colors := preload("res://addons/tentacletech/scripts/debug/colors.gd")
 const RIM_PARTICLE_SIZE := 0.012
 const REST_MARKER_SIZE := 0.006
 const HOST_BONE_MARKER_SIZE := 0.018
+const ENTRY_INTERACTION_MARKER_SIZE := 0.014
+const ENTRY_INTERACTION_AXIS_MIN_LENGTH := 0.05
 
 # Bright cyan — distinct from particle layer's white crosses and the
 # constraint layer's rest-color (also white). Picks up "this segment is
@@ -37,6 +39,13 @@ const HOST_BONE_COLOR := Color(0.95, 0.35, 0.85, 0.95)
 # environment magenta — chosen so a glance separates contact pairs from
 # rim deformation.
 const TYPE2_CONTACT_COLOR := Color(1.0, 0.7, 0.25, 0.95)
+# Purple for slice 5C-B EntryInteraction markers — entry_point cross +
+# entry_axis arrow. Distinct from cyan rim / mint rest / red-purple host
+# bone / orange contacts.
+const ENTRY_INTERACTION_COLOR := Color(0.7, 0.4, 1.0, 0.95)
+# Slightly muted variant for the inactive-but-still-in-grace EIs so the
+# user can tell at a glance which are live vs winding down.
+const ENTRY_INTERACTION_INACTIVE_COLOR := Color(0.45, 0.3, 0.6, 0.7)
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -117,6 +126,29 @@ func update_from(p_orifice: Node3D) -> void:
 		var bone_xform: Transform3D = host_state.get("current_world_transform", Transform3D())
 		var bone_world: Vector3 = bone_xform.origin
 		_draw_cross(inv * bone_world, HOST_BONE_MARKER_SIZE, HOST_BONE_COLOR)
+
+	# Slice 5C-B — EntryInteraction markers. One small purple cross at
+	# the EI's `entry_point` plus a short arrow along `entry_axis`. Arrow
+	# length scales with `penetration_depth / 4` so a deep insertion reads
+	# distinctly from a glancing one, with a 0.05 m minimum so shallow EIs
+	# don't disappear. Inactive-but-still-in-grace EIs are drawn in a
+	# muted shade.
+	var ei_list: Array = p_orifice.call(&"get_entry_interactions_snapshot")
+	if ei_list.size() > 0:
+		for ei_idx in ei_list.size():
+			var ei: Dictionary = ei_list[ei_idx]
+			var entry_point: Vector3 = ei.get("entry_point", Vector3.ZERO)
+			var axis: Vector3 = ei.get("entry_axis", Vector3.UP)
+			var depth: float = ei.get("penetration_depth", 0.0)
+			var ei_active: bool = ei.get("active", true)
+			var c: Color = ENTRY_INTERACTION_COLOR if ei_active else ENTRY_INTERACTION_INACTIVE_COLOR
+			_draw_cross(inv * entry_point, ENTRY_INTERACTION_MARKER_SIZE, c)
+			var arrow_len: float = max(ENTRY_INTERACTION_AXIS_MIN_LENGTH, depth * 0.25)
+			var axis_world_end: Vector3 = entry_point + axis.normalized() * arrow_len
+			_imesh.surface_set_color(c)
+			_imesh.surface_add_vertex(inv * entry_point)
+			_imesh.surface_set_color(c)
+			_imesh.surface_add_vertex(inv * axis_world_end)
 
 	# Slice 5C-A — type-2 contact lines. One short orange segment per
 	# contact, from the tentacle particle's world position to the rim

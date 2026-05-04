@@ -64,6 +64,17 @@ func _run_tests() -> void:
 		"test_type2_contact_resets_per_tick",
 		"test_type2_no_contact_outside_radius",
 		"test_type2_pinned_rim_particle_only_pushes_tentacle",
+		# Slice 5C-B — EntryInteraction lifecycle + geometric tracking.
+		"test_ei_created_on_first_crossing",
+		"test_ei_geometric_state_updates_each_tick",
+		"test_ei_axial_velocity_sign",
+		"test_ei_approach_angle_cos",
+		"test_ei_particles_in_tunnel",
+		"test_ei_retirement_after_grace_period",
+		"test_ei_persistent_slots_initialized",
+		"test_ei_persistent_slots_not_driven",
+		"test_ei_multi_tentacle_coexist",
+		"test_ei_unregistered_tentacle_retires_immediately",
 	]:
 		_reset_root()
 		if call(test_name):
@@ -749,6 +760,284 @@ func test_type2_pinned_rim_particle_only_pushes_tentacle() -> bool:
 	var t_moved: float = (t_after - t_initial).length()
 	if t_moved < 0.5 * penetration:
 		push_error("tentacle barely moved despite pinned rim: moved=%e expected≈%e" % [t_moved, penetration])
+		return false
+	return true
+
+
+# ---------------------------------------------------------------------------
+# Slice 5C-B — EntryInteraction lifecycle + per-tick geometric tracking.
+# Force routing slots (grip_engagement, friction, reaction-on-host-bone)
+# are initialized but NOT driven in 5C-B; tests verify they remain at zero.
+
+# Build a tentacle whose anchor sits at p_anchor world; the chain hangs
+# in -p_axis direction with zero gravity so we can reposition particles
+# arbitrarily without the solver fighting back.
+func _make_tentacle_for_ei(p_anchor: Vector3 = Vector3.ZERO,
+		p_axis: Vector3 = Vector3(0.0, 0.0, 1.0),
+		p_n: int = 4, p_seg: float = 0.05, p_radius: float = 0.04) -> Node3D:
+	var t: Node3D = ClassDB.instantiate("Tentacle")
+	t.particle_count = p_n
+	t.segment_length = p_seg
+	t.particle_collision_radius = p_radius
+	t.gravity = Vector3.ZERO
+	t.environment_probe_distance = 0.0
+	t.position = p_anchor
+	t.name = "TestTentacleEI"
+	get_root().add_child(t)
+	# Lay the chain along p_axis manually so particle 0 sits at anchor
+	# and successive particles step forward along p_axis.
+	var sol: Object = t.get_solver()
+	for i in p_n:
+		sol.set_particle_position(i, p_anchor + p_axis * (p_seg * float(i)))
+	return t
+
+
+# Tentacle anchored OUTSIDE the orifice's entry plane with the tip pushed
+# through. After one tick, EI count goes from 0 to 1 and the geometric
+# fields populate plausibly.
+func test_ei_created_on_first_crossing() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	# Tentacle anchored at -Z (cavity-EXTERIOR side per our entry_axis=+Z),
+	# pushing toward +Z so particle N-1 ends up at +Z (cavity-INTERIOR).
+	# Chain length = (n-1) * seg = 3 * 0.05 = 0.15. Anchor -0.05 → tip +0.10.
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	if int(o.get_entry_interaction_count()) != 0:
+		push_error("expected 0 EIs before first tick, got %d" % int(o.get_entry_interaction_count()))
+		return false
+	o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 1:
+		push_error("expected 1 EI after first crossing, got %d" % int(o.get_entry_interaction_count()))
+		return false
+	var snap: Array = o.get_entry_interactions_snapshot()
+	var ei: Dictionary = snap[0]
+	if not ei.get("active", false):
+		push_error("EI not flagged active after engagement")
+		return false
+	if ei.get("arc_length_at_entry", -1.0) <= 0.0:
+		push_error("arc_length_at_entry not positive: %f" % ei.get("arc_length_at_entry", -1.0))
+		return false
+	if ei.get("penetration_depth", -1.0) <= 0.0:
+		push_error("penetration_depth not positive: %f" % ei.get("penetration_depth", -1.0))
+		return false
+	return true
+
+
+# Push the tentacle deeper between ticks; penetration_depth strictly
+# increases.
+func test_ei_geometric_state_updates_each_tick() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	var depth_first: float = float(o.get_entry_interactions_snapshot()[0].get("penetration_depth", 0.0))
+	# Push the tentacle anchor 5 cm further into the cavity (toward +Z).
+	t.position = Vector3(0.0, 0.0, 0.0)
+	# Reposition every particle so the chain sits in its new pose without
+	# solver lag (test isolates the EI refresh, not solver dynamics).
+	var sol: Object = t.get_solver()
+	for i in 4:
+		sol.set_particle_position(i, t.position + Vector3(0.0, 0.0, 0.05) * float(i))
+	o.tick(DT)
+	var depth_second: float = float(o.get_entry_interactions_snapshot()[0].get("penetration_depth", 0.0))
+	if depth_second <= depth_first + 1e-5:
+		push_error("penetration_depth didn't increase: %f -> %f" % [depth_first, depth_second])
+		return false
+	return true
+
+
+# Push inward → positive axial_velocity; pull outward → negative.
+# `axial_velocity = (penetration_depth − prev_penetration_depth) / dt`.
+func test_ei_axial_velocity_sign() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)  # creation tick — axial_velocity reads 0 by design
+	var sol: Object = t.get_solver()
+	# Push deeper.
+	for i in 4:
+		sol.set_particle_position(i, Vector3(0.0, 0.0, -0.05 + 0.05 + 0.05 * float(i)))
+	o.tick(DT)
+	var v_inward: float = float(o.get_entry_interactions_snapshot()[0].get("axial_velocity", 0.0))
+	if v_inward <= 1e-5:
+		push_error("expected positive axial_velocity on push-inward, got %f" % v_inward)
+		return false
+	# Pull back outward.
+	for i in 4:
+		sol.set_particle_position(i, Vector3(0.0, 0.0, -0.05 + 0.05 * float(i)))
+	o.tick(DT)
+	var v_outward: float = float(o.get_entry_interactions_snapshot()[0].get("axial_velocity", 0.0))
+	if v_outward >= -1e-5:
+		push_error("expected negative axial_velocity on pull-outward, got %f" % v_outward)
+		return false
+	return true
+
+
+# Straight-on insertion (tentacle tangent aligned with entry_axis): cos ≈ 1.
+# Oblique 45°: cos ≈ 0.707.
+func test_ei_approach_angle_cos() -> bool:
+	# Straight-on: tentacle along +Z, entry_axis +Z.
+	var o1: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t1: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o1.register_tentacle(NodePath("/root/" + str(t1.name)))
+	o1.tick(DT)
+	var cos1: float = float(o1.get_entry_interactions_snapshot()[0].get("approach_angle_cos", 0.0))
+	if absf(cos1 - 1.0) > 0.05:
+		push_error("straight-on cos ≈ 1 expected, got %f" % cos1)
+		return false
+	# Reset root for the 45° case.
+	_reset_root()
+	var o2: Node3D = _make_orifice_for_contact(0.10, 8, 0.5)  # bigger rim so 45° chain fits
+	var diag := Vector3(1.0, 0.0, 1.0).normalized()
+	var t2: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, 0.0) - diag * 0.05, diag, 4, 0.05, 0.04)
+	# Place anchor outside (negative Z half-space) and chain crossing into +Z.
+	# Manually move particles so the chain crosses at ~45° to the +Z plane.
+	var sol2: Object = t2.get_solver()
+	for i in 4:
+		sol2.set_particle_position(i, Vector3(0.0, 0.0, 0.0) - diag * 0.05 + diag * (0.05 * float(i)))
+	o2.register_tentacle(NodePath("/root/" + str(t2.name)))
+	o2.tick(DT)
+	var cos2: float = float(o2.get_entry_interactions_snapshot()[0].get("approach_angle_cos", 0.0))
+	if absf(cos2 - sqrt(0.5)) > 0.10:
+		push_error("45° cos ≈ 0.707 expected, got %f" % cos2)
+		return false
+	return true
+
+
+# `particles_in_tunnel` lists exactly the cavity-side particle indices.
+# With the tentacle at anchor -0.05, particles step at +0.05Z each, so
+# particle 0 is at z=-0.05 (out), particle 1 at z=0 (boundary, treated
+# as "out" since signed_distance >= 0), particle 2 at z=+0.05 (in),
+# particle 3 at z=+0.10 (in).
+func test_ei_particles_in_tunnel() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	var pit: PackedInt32Array = o.get_entry_interactions_snapshot()[0].get("particles_in_tunnel", PackedInt32Array())
+	# Expect particles 2 and 3 in tunnel (z > 0). Particle 1 sits exactly
+	# on the plane (signed_distance = 0) which the spec treats as outside.
+	if pit.size() != 2:
+		push_error("expected 2 particles in tunnel, got %d (%s)" % [pit.size(), pit])
+		return false
+	if not (pit.has(2) and pit.has(3)):
+		push_error("expected indices [2, 3] in tunnel, got %s" % str(pit))
+		return false
+	return true
+
+
+# Engage → fully withdraw → tick for grace_period + epsilon → EI removed.
+func test_ei_retirement_after_grace_period() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	# Use a tight grace period so the test runs fast.
+	o.entry_interaction_grace_period = 0.05  # 50 ms
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 1:
+		push_error("EI not created on engagement")
+		return false
+	# Withdraw fully — pull the chain entirely to the cavity-EXTERIOR side.
+	var sol: Object = t.get_solver()
+	for i in 4:
+		sol.set_particle_position(i, Vector3(0.0, 0.0, -0.20 - 0.05 * float(i)))
+	# Tick one frame to register disengagement.
+	o.tick(DT)
+	# EI should still exist (in grace period) but inactive.
+	if int(o.get_entry_interaction_count()) != 1:
+		push_error("EI purged before grace period elapsed")
+		return false
+	if bool(o.get_entry_interactions_snapshot()[0].get("active", true)):
+		push_error("EI still flagged active after withdrawal")
+		return false
+	# Tick past the grace period (50 ms = ~3 frames at 60Hz).
+	for _i in 8:
+		o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 0:
+		push_error("EI not purged after grace period: count=%d" % int(o.get_entry_interaction_count()))
+		return false
+	return true
+
+
+# Persistent slots zero on creation. grip_engagement = 0, in_stick_phase
+# = false, ejection_velocity = 0.
+func test_ei_persistent_slots_initialized() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	var ei: Dictionary = o.get_entry_interactions_snapshot()[0]
+	if absf(float(ei.get("grip_engagement", -1.0))) > 1e-9:
+		push_error("grip_engagement not zero on creation: %f" % ei.get("grip_engagement"))
+		return false
+	if bool(ei.get("in_stick_phase", true)):
+		push_error("in_stick_phase not false on creation")
+		return false
+	if absf(float(ei.get("ejection_velocity", -1.0))) > 1e-9:
+		push_error("ejection_velocity not zero on creation: %f" % ei.get("ejection_velocity"))
+		return false
+	return true
+
+
+# Persistent slots stay at zero across many steady ticks. 5C-B does NOT
+# drive them — 5C-C will. Smoke check that the lifecycle doesn't write
+# accidentally.
+func test_ei_persistent_slots_not_driven() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	for _i in 60:
+		o.tick(DT)
+	var ei: Dictionary = o.get_entry_interactions_snapshot()[0]
+	if absf(float(ei.get("grip_engagement", -1.0))) > 1e-9:
+		push_error("grip_engagement drifted in 5C-B: %f" % ei.get("grip_engagement"))
+		return false
+	if bool(ei.get("in_stick_phase", true)):
+		push_error("in_stick_phase flipped in 5C-B")
+		return false
+	return true
+
+
+# Two tentacles engaging the same orifice produce two EIs with
+# independent state.
+func test_ei_multi_tentacle_coexist() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.10, 8, 0.5)
+	var t1: Node3D = _make_tentacle_for_ei(Vector3(0.04, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	t1.name = "Tentacle1"
+	var t2: Node3D = _make_tentacle_for_ei(Vector3(-0.04, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	t2.name = "Tentacle2"
+	o.register_tentacle(NodePath("/root/" + str(t1.name)))
+	o.register_tentacle(NodePath("/root/" + str(t2.name)))
+	o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 2:
+		push_error("expected 2 EIs (one per tentacle), got %d" % int(o.get_entry_interaction_count()))
+		return false
+	var snap: Array = o.get_entry_interactions_snapshot()
+	var idx_set := {}
+	for ei_idx in snap.size():
+		var ei: Dictionary = snap[ei_idx]
+		idx_set[int(ei.get("tentacle_index", -1))] = true
+	if not (idx_set.has(0) and idx_set.has(1)):
+		push_error("EIs missing tentacle indices: %s" % str(idx_set))
+		return false
+	return true
+
+
+# Engaging tentacle gets unregistered → its EI fast-purges on the next
+# tick (regardless of grace period).
+func test_ei_unregistered_tentacle_retires_immediately() -> bool:
+	var o: Node3D = _make_orifice_for_contact(0.05, 8, 0.5)
+	o.entry_interaction_grace_period = 1.0  # generous, but unregister should bypass it
+	var t: Node3D = _make_tentacle_for_ei(Vector3(0.0, 0.0, -0.05), Vector3(0.0, 0.0, 1.0))
+	o.register_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 1:
+		push_error("EI not created before unregister")
+		return false
+	o.unregister_tentacle(NodePath("/root/" + str(t.name)))
+	o.tick(DT)
+	if int(o.get_entry_interaction_count()) != 0:
+		push_error("EI not fast-purged after unregister, count=%d" % int(o.get_entry_interaction_count()))
 		return false
 	return true
 

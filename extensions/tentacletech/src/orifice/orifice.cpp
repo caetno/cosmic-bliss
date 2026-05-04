@@ -123,6 +123,14 @@ void Orifice::tick(float p_dt) {
 		_predict_loop(loop, p_dt);
 	}
 
+	// Slice 5C-B — refresh EntryInteraction lifecycle BEFORE contact
+	// collection so 5C-C / later slices can gate contact handling by EI
+	// presence. In 5C-B itself contact collection still walks every
+	// registered tentacle; the EI list is consumed by the snapshot
+	// accessor + gizmo only.
+	_resolve_tentacles_lazy();
+	_update_entry_interactions(p_dt);
+
 	_collect_type2_contacts();
 
 	for (int iter = 0; iter < iteration_count; iter++) {
@@ -921,6 +929,336 @@ void Orifice::_iterate_type2_contacts(float /*p_dt*/) {
 	}
 }
 
+// -- EntryInteraction lifecycle + geometric refresh (slice 5C-B) ----------
+
+void Orifice::set_entry_interaction_grace_period(float p_seconds) {
+	if (p_seconds < 0.0f) p_seconds = 0.0f;
+	entry_interaction_grace_period = p_seconds;
+}
+
+float Orifice::get_entry_interaction_grace_period() const {
+	return entry_interaction_grace_period;
+}
+
+int Orifice::get_entry_interaction_count() const {
+	return (int)_entry_interactions.size();
+}
+
+void Orifice::_resize_per_loop_k_arrays(EntryInteraction &p_ei) const {
+	int loop_count = (int)rim_loops.size();
+	p_ei.orifice_radius_per_loop_k.resize(loop_count);
+	p_ei.orifice_radius_velocity_per_loop_k.resize(loop_count);
+	p_ei.damage_accumulated_per_loop_k.resize(loop_count);
+	p_ei.radial_pressure_per_loop_k.resize(loop_count);
+	p_ei.tangential_friction_per_loop_k.resize(loop_count);
+	for (int l = 0; l < loop_count; l++) {
+		int n = (int)rim_loops[l].rim_particles.size();
+		// Resize-and-zero. If the loop's particle count changed since
+		// the last refresh, this drops any partial state — acceptable
+		// because authoring-time edits are rare and 5C-B doesn't drive
+		// these slots anyway.
+		p_ei.orifice_radius_per_loop_k[l].assign((size_t)n, 0.0f);
+		p_ei.orifice_radius_velocity_per_loop_k[l].assign((size_t)n, 0.0f);
+		p_ei.damage_accumulated_per_loop_k[l].assign((size_t)n, 0.0f);
+		p_ei.radial_pressure_per_loop_k[l].assign((size_t)n, 0.0f);
+		p_ei.tangential_friction_per_loop_k[l].assign((size_t)n, 0.0f);
+	}
+}
+
+bool Orifice::_tentacle_crosses_entry_plane(
+		Tentacle *p_tentacle,
+		int &out_seg_idx,
+		float &out_t,
+		std::vector<float> &out_signed_distances) const {
+	out_seg_idx = -1;
+	out_t = 0.0f;
+	out_signed_distances.clear();
+	if (p_tentacle == nullptr) return false;
+	Ref<PBDSolver> sol = p_tentacle->get_solver();
+	if (sol.is_null()) return false;
+	int n = sol->get_particle_count();
+	if (n < 2) return false;
+
+	// Entry plane: passes through the orifice Center (origin in the
+	// cached Center frame) with normal = entry_axis transformed to
+	// world via the Center frame basis. Signed distance > 0 = outward
+	// from cavity (per §6.1 local frame convention); < 0 = inward.
+	const Transform3D xform = _center_frame_cached;
+	Vector3 plane_origin = xform.origin;
+	Vector3 axis_local = entry_axis;
+	if (axis_local.length_squared() < 1e-10f) {
+		axis_local = Vector3(0.0f, 0.0f, 1.0f);
+	}
+	Vector3 plane_normal = xform.basis.xform(axis_local).normalized();
+
+	// Sign convention: signed_distance > 0 means the particle is on the
+	// cavity-INTERIOR side (along +entry_axis from the orifice Center);
+	// signed_distance ≤ 0 is on the cavity-EXTERIOR side. This matches
+	// the test prompt's "anchor outside (negative half-space), chain
+	// crossing into +entry_axis" framing — entering the orifice means
+	// pushing in the +entry_axis direction.
+	out_signed_distances.resize((size_t)n);
+	bool any_inside = false;
+	for (int i = 0; i < n; i++) {
+		Vector3 p = sol->get_particle_position(i);
+		float sd = (p - plane_origin).dot(plane_normal);
+		out_signed_distances[i] = sd;
+		if (sd > 0.0f) any_inside = true;
+	}
+	if (!any_inside) return false;
+
+	// Walk segments looking for the FIRST crossing (first segment whose
+	// endpoints have opposite signs OR exactly one endpoint at zero).
+	// "First" is defined as lowest particle index — the deepest insertion
+	// crossing (anchor side first) is what defines `arc_length_at_entry`.
+	for (int i = 0; i + 1 < n; i++) {
+		float sa = out_signed_distances[i];
+		float sb = out_signed_distances[i + 1];
+		// One endpoint must be on the interior side (sd > 0) and the
+		// other on the exterior side (sd <= 0). `sd == 0` is treated as
+		// exterior to give `particles_in_tunnel` the same boundary
+		// semantics ("on the plane" = not yet in tunnel).
+		bool a_in = (sa > 0.0f);
+		bool b_in = (sb > 0.0f);
+		if (a_in != b_in) {
+			out_seg_idx = i;
+			float denom = sa - sb;
+			if (Math::abs(denom) < 1e-8f) {
+				out_t = 0.5f;
+			} else {
+				out_t = sa / denom;
+			}
+			if (out_t < 0.0f) out_t = 0.0f;
+			if (out_t > 1.0f) out_t = 1.0f;
+			return true;
+		}
+	}
+	// All-inside chain (no crossing but `any_inside` true). Treat as
+	// "anchor-side already inside" — uncommon for an authored setup but
+	// guarded against.
+	return false;
+}
+
+void Orifice::_refresh_entry_interaction_geometry(
+		EntryInteraction &p_ei,
+		int p_seg_idx,
+		float p_t,
+		const std::vector<float> &p_signed_distances,
+		float p_dt) {
+	Tentacle *t = p_ei.tentacle;
+	if (t == nullptr) return;
+	Ref<PBDSolver> sol = t->get_solver();
+	if (sol.is_null()) return;
+	int n = sol->get_particle_count();
+	if (n < 2 || p_seg_idx < 0 || p_seg_idx + 1 >= n) return;
+
+	const Transform3D xform = _center_frame_cached;
+	Vector3 plane_origin = xform.origin;
+	Vector3 axis_local = entry_axis;
+	if (axis_local.length_squared() < 1e-10f) {
+		axis_local = Vector3(0.0f, 0.0f, 1.0f);
+	}
+	Vector3 plane_normal = xform.basis.xform(axis_local).normalized();
+
+	Vector3 p_a = sol->get_particle_position(p_seg_idx);
+	Vector3 p_b = sol->get_particle_position(p_seg_idx + 1);
+	Vector3 entry_point = p_a + (p_b - p_a) * p_t;
+
+	// arc_length_at_entry: sum rest-segment lengths up to the crossing,
+	// plus the interpolated fraction × that segment's rest length.
+	float arc = 0.0f;
+	for (int i = 0; i < p_seg_idx; i++) {
+		arc += sol->get_rest_length(i);
+	}
+	arc += sol->get_rest_length(p_seg_idx) * p_t;
+	p_ei.arc_length_at_entry = arc;
+	p_ei.entry_point = entry_point;
+	p_ei.entry_axis = plane_normal;
+	// `center_offset_in_orifice` is the entry point relative to the
+	// orifice Center, expressed in Center-frame coordinates so multi-
+	// tentacle aggregation later (§6.5) can compare offsets without
+	// reapplying the Center transform.
+	p_ei.center_offset_in_orifice = xform.affine_inverse().xform(entry_point);
+
+	// Tangent at entry — segment direction. dot with `entry_axis` gives
+	// the cosine of the approach angle. A tentacle threading inward has
+	// tangent · entry_axis < 0 (anchor side outward, tip side inward).
+	Vector3 seg = (p_b - p_a);
+	if (seg.length_squared() > 1e-12f) {
+		Vector3 tangent = seg.normalized();
+		p_ei.approach_angle_cos = tangent.dot(plane_normal);
+	} else {
+		p_ei.approach_angle_cos = 0.0f;
+	}
+
+	float girth_a = sol->get_particle_girth_scale(p_seg_idx);
+	float girth_b = sol->get_particle_girth_scale(p_seg_idx + 1);
+	p_ei.tentacle_girth_here = girth_a + (girth_b - girth_a) * p_t;
+	Vector2 asym_a = sol->get_particle_asymmetry(p_seg_idx);
+	Vector2 asym_b = sol->get_particle_asymmetry(p_seg_idx + 1);
+	p_ei.tentacle_asymmetry_here = asym_a + (asym_b - asym_a) * p_t;
+
+	// penetration_depth: arc length on the cavity-interior side
+	// (signed_distance > 0 per the new convention). Crossing segment
+	// contributes its partial fraction on the interior side; subsequent
+	// segments contribute their full rest length while both endpoints
+	// stay inside; once the chain crosses back out, stop.
+	float depth = 0.0f;
+	int seg_count = sol->get_segment_count();
+	bool inside_side_a = (p_signed_distances[p_seg_idx] > 0.0f);
+	if (inside_side_a) {
+		// Anchor side of the crossing segment is inside.
+		depth += sol->get_rest_length(p_seg_idx) * p_t;
+	} else {
+		// Tip side of the crossing segment is inside (typical for the
+		// canonical "anchor outside, tip pushed inward" geometry).
+		depth += sol->get_rest_length(p_seg_idx) * (1.0f - p_t);
+	}
+	int dir = inside_side_a ? -1 : 1;
+	int j = p_seg_idx + (dir > 0 ? 1 : 0);
+	int j_end = (dir > 0) ? n : -1;
+	for (j += dir; j != j_end; j += dir) {
+		if (j < 0 || j >= n) break;
+		if (p_signed_distances[j] <= 0.0f) break;
+		int seg = (dir > 0) ? j - 1 : j;
+		if (seg < 0 || seg >= seg_count) break;
+		depth += sol->get_rest_length(seg);
+	}
+	p_ei.penetration_depth = depth;
+
+	// axial_velocity = d(penetration_depth)/dt. First refresh: report 0
+	// instead of (depth - 0)/dt to avoid a creation-tick spike.
+	if (p_ei.first_refresh_done) {
+		p_ei.axial_velocity = (depth - p_ei.prev_penetration_depth) / p_dt;
+	} else {
+		p_ei.axial_velocity = 0.0f;
+		p_ei.first_refresh_done = true;
+	}
+	p_ei.prev_penetration_depth = depth;
+
+	// particles_in_tunnel: indices with signed_distance > 0 (cavity-
+	// interior side per the implementation convention — see
+	// `_tentacle_crosses_entry_plane`).
+	p_ei.particles_in_tunnel.clear();
+	for (int i = 0; i < n; i++) {
+		if (p_signed_distances[i] > 0.0f) {
+			p_ei.particles_in_tunnel.push_back(i);
+		}
+	}
+
+	// Defensive resize of per-loop_k arrays — `add_rim_loop` /
+	// `clear_rim_loops` between ticks would otherwise leave the EI's
+	// buffers misaligned. Cheap O(N×L); 5C-C reads these during the
+	// reaction-on-host-bone pass.
+	_resize_per_loop_k_arrays(p_ei);
+}
+
+void Orifice::_update_entry_interactions(float p_dt) {
+	// First, mark every existing EI as inactive-pending. We re-flag
+	// `active = true` below for tentacles still engaging. After the
+	// loop, EIs that didn't get re-flagged accumulate
+	// `retirement_timer` and get purged once it exceeds the grace
+	// period.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		_entry_interactions[i].active = false;
+	}
+
+	int t_count = (int)_tentacles_resolved.size();
+	for (int t_idx = 0; t_idx < t_count; t_idx++) {
+		Tentacle *t = _tentacles_resolved[t_idx];
+		if (t == nullptr) continue;
+
+		int seg_idx = -1;
+		float t_param = 0.0f;
+		std::vector<float> signed_distances;
+		bool engaged = _tentacle_crosses_entry_plane(t, seg_idx, t_param, signed_distances);
+		if (!engaged) continue;
+
+		// Find existing EI by tentacle_idx; create new if absent.
+		EntryInteraction *ei = nullptr;
+		for (size_t i = 0; i < _entry_interactions.size(); i++) {
+			if (_entry_interactions[i].tentacle_idx == t_idx) {
+				ei = &_entry_interactions[i];
+				break;
+			}
+		}
+		if (ei == nullptr) {
+			EntryInteraction fresh;
+			fresh.tentacle_idx = t_idx;
+			fresh.tentacle = t;
+			fresh.active = true;
+			fresh.retirement_timer = 0.0f;
+			_resize_per_loop_k_arrays(fresh);
+			_entry_interactions.push_back(fresh);
+			ei = &_entry_interactions.back();
+		} else {
+			// Refresh the cached pointer — `_resolve_tentacles_lazy`
+			// could have re-resolved to a different Tentacle instance.
+			ei->tentacle = t;
+			ei->active = true;
+			ei->retirement_timer = 0.0f;
+		}
+		_refresh_entry_interaction_geometry(*ei, seg_idx, t_param, signed_distances, p_dt);
+	}
+
+	// Sweep: accumulate retirement timer on inactive EIs; purge once
+	// past the grace period. EIs whose tentacle_idx now points outside
+	// the resolved list (path freed / unregistered) get fast-purged by
+	// pre-setting their timer past the grace period.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		EntryInteraction &ei = _entry_interactions[i];
+		if (!ei.active) {
+			bool tentacle_gone = (ei.tentacle_idx < 0 ||
+					ei.tentacle_idx >= t_count ||
+					_tentacles_resolved[ei.tentacle_idx] == nullptr);
+			if (tentacle_gone) {
+				ei.retirement_timer = entry_interaction_grace_period + 1.0f;
+				ei.tentacle = nullptr;
+			} else {
+				ei.retirement_timer += p_dt;
+			}
+		}
+	}
+	for (auto it = _entry_interactions.begin(); it != _entry_interactions.end();) {
+		if (!it->active && it->retirement_timer > entry_interaction_grace_period) {
+			it = _entry_interactions.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+Array Orifice::get_entry_interactions_snapshot() const {
+	Array out;
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		const EntryInteraction &ei = _entry_interactions[i];
+		Dictionary d;
+		NodePath path;
+		if (ei.tentacle_idx >= 0 && ei.tentacle_idx < tentacle_paths.size()) {
+			path = tentacle_paths[ei.tentacle_idx];
+		}
+		d["tentacle_index"] = ei.tentacle_idx;
+		d["tentacle_path"] = path;
+		d["active"] = ei.active;
+		d["retirement_timer"] = ei.retirement_timer;
+		d["arc_length_at_entry"] = ei.arc_length_at_entry;
+		d["entry_point"] = ei.entry_point;
+		d["entry_axis"] = ei.entry_axis;
+		d["center_offset_in_orifice"] = ei.center_offset_in_orifice;
+		d["approach_angle_cos"] = ei.approach_angle_cos;
+		d["tentacle_girth_here"] = ei.tentacle_girth_here;
+		d["tentacle_asymmetry_here"] = ei.tentacle_asymmetry_here;
+		d["penetration_depth"] = ei.penetration_depth;
+		d["axial_velocity"] = ei.axial_velocity;
+		d["particles_in_tunnel"] = ei.particles_in_tunnel;
+		d["grip_engagement"] = ei.grip_engagement;
+		d["in_stick_phase"] = ei.in_stick_phase;
+		d["ejection_velocity"] = ei.ejection_velocity;
+		out.push_back(d);
+	}
+	return out;
+}
+
 // -- Type-2 contact snapshot (slice 5C-A) ---------------------------------
 
 Array Orifice::get_type2_contacts_snapshot() const {
@@ -1039,6 +1377,12 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_rim_contact_radius", "loop_index", "particle_index", "radius"), &Orifice::set_rim_contact_radius);
 	ClassDB::bind_method(D_METHOD("get_rim_contact_radius", "loop_index", "particle_index"), &Orifice::get_rim_contact_radius);
 
+	// Slice 5C-B — EntryInteraction lifecycle.
+	ClassDB::bind_method(D_METHOD("set_entry_interaction_grace_period", "seconds"), &Orifice::set_entry_interaction_grace_period);
+	ClassDB::bind_method(D_METHOD("get_entry_interaction_grace_period"), &Orifice::get_entry_interaction_grace_period);
+	ClassDB::bind_method(D_METHOD("get_entry_interaction_count"), &Orifice::get_entry_interaction_count);
+	ClassDB::bind_method(D_METHOD("get_entry_interactions_snapshot"), &Orifice::get_entry_interactions_snapshot);
+
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iteration_count",
 						 PROPERTY_HINT_RANGE, "1,8,1"),
 			"set_iteration_count", "get_iteration_count");
@@ -1068,4 +1412,7 @@ void Orifice::_bind_methods() {
 	// — same fall-back discipline as the host-bone resolver).
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "tentacle_paths"),
 			"set_tentacle_paths", "get_tentacle_paths");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "entry_interaction_grace_period",
+						 PROPERTY_HINT_RANGE, "0.0,5.0,0.05,suffix:s"),
+			"set_entry_interaction_grace_period", "get_entry_interaction_grace_period");
 }
