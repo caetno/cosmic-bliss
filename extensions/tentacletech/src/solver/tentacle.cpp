@@ -566,6 +566,59 @@ void Tentacle::flush_external_position_deltas() {
 	solver->apply_external_position_deltas();
 }
 
+// Slice 5C-C — chain-arc-length sampling helpers. `s` walks the chain
+// rest-length array to find the containing segment, then interpolates.
+// Both helpers clamp into the valid range so callers don't have to
+// guard against overshoot — the §6.3 wedge math still works on a clamped
+// sample, just with zero gradient at the tip.
+float Tentacle::get_total_chain_arc_length() const {
+	if (solver.is_null()) return 0.0f;
+	int seg_count = solver->get_segment_count();
+	float total = 0.0f;
+	for (int i = 0; i < seg_count; i++) {
+		total += solver->get_rest_length(i);
+	}
+	return total;
+}
+
+float Tentacle::get_signed_girth_gradient_at_arc_length(float p_s) const {
+	if (solver.is_null()) return 0.0f;
+	int seg_count = solver->get_segment_count();
+	if (seg_count <= 0) return 0.0f;
+	float arc = 0.0f;
+	for (int i = 0; i < seg_count; i++) {
+		float seg_len = solver->get_rest_length(i);
+		if (p_s <= arc + seg_len || i == seg_count - 1) {
+			if (seg_len < 1e-8f) return 0.0f;
+			float r_a = particle_collision_radius * solver->get_particle_girth_scale(i);
+			float r_b = particle_collision_radius * solver->get_particle_girth_scale(i + 1);
+			return (r_b - r_a) / seg_len;
+		}
+		arc += seg_len;
+	}
+	return 0.0f;
+}
+
+Vector3 Tentacle::get_tangent_at_arc_length(float p_s) const {
+	if (solver.is_null()) return Vector3(0.0f, 0.0f, 1.0f);
+	int seg_count = solver->get_segment_count();
+	if (seg_count <= 0) return Vector3(0.0f, 0.0f, 1.0f);
+	float arc = 0.0f;
+	for (int i = 0; i < seg_count; i++) {
+		float seg_len = solver->get_rest_length(i);
+		if (p_s <= arc + seg_len || i == seg_count - 1) {
+			Vector3 a = solver->get_particle_position(i);
+			Vector3 b = solver->get_particle_position(i + 1);
+			Vector3 d = b - a;
+			float dl = d.length();
+			if (dl < 1e-8f) return Vector3(0.0f, 0.0f, 1.0f);
+			return d / dl;
+		}
+		arc += seg_len;
+	}
+	return Vector3(0.0f, 0.0f, 1.0f);
+}
+
 // -- Snapshots --------------------------------------------------------------
 
 PackedVector3Array Tentacle::get_particle_positions() const {
@@ -1328,6 +1381,12 @@ void Tentacle::_bind_methods() {
 			&Tentacle::add_external_position_delta);
 	ClassDB::bind_method(D_METHOD("flush_external_position_deltas"),
 			&Tentacle::flush_external_position_deltas);
+	ClassDB::bind_method(D_METHOD("get_signed_girth_gradient_at_arc_length", "s"),
+			&Tentacle::get_signed_girth_gradient_at_arc_length);
+	ClassDB::bind_method(D_METHOD("get_tangent_at_arc_length", "s"),
+			&Tentacle::get_tangent_at_arc_length);
+	ClassDB::bind_method(D_METHOD("get_total_chain_arc_length"),
+			&Tentacle::get_total_chain_arc_length);
 
 	ClassDB::bind_method(D_METHOD("get_particle_positions"), &Tentacle::get_particle_positions);
 	ClassDB::bind_method(D_METHOD("get_particle_inv_masses"), &Tentacle::get_particle_inv_masses);

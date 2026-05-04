@@ -819,6 +819,11 @@ Vector3 PBDSolver::get_particle_position(int i) const {
 	return particles[i].position;
 }
 
+Vector3 PBDSolver::get_particle_prev_position(int i) const {
+	if (i < 0 || i >= (int)particles.size()) return Vector3();
+	return particles[i].prev_position;
+}
+
 void PBDSolver::set_particle_position(int i, const Vector3 &p) {
 	if (i < 0 || i >= (int)particles.size()) return;
 	particles[i].position = p;
@@ -1174,6 +1179,7 @@ void PBDSolver::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_particle_position", "index"), &PBDSolver::get_particle_position);
 	ClassDB::bind_method(D_METHOD("set_particle_position", "index", "position"), &PBDSolver::set_particle_position);
+	ClassDB::bind_method(D_METHOD("get_particle_prev_position", "index"), &PBDSolver::get_particle_prev_position);
 	ClassDB::bind_method(D_METHOD("get_particle_inv_mass", "index"), &PBDSolver::get_particle_inv_mass);
 	ClassDB::bind_method(D_METHOD("set_particle_inv_mass", "index", "inv_mass"), &PBDSolver::set_particle_inv_mass);
 	ClassDB::bind_method(D_METHOD("get_particle_asymmetry", "index"), &PBDSolver::get_particle_asymmetry);

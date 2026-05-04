@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/physics_server3d.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/classes/skeleton3d.hpp>
 #include <godot_cpp/classes/window.hpp>
@@ -140,7 +141,22 @@ void Orifice::tick(float p_dt) {
 			_iterate_loop_one_pass(loop, p_dt);
 		}
 		_iterate_type2_contacts(p_dt);
+		// Slice 5C-C — friction projection runs AFTER the normal-contact
+		// step in the same iter pass. Cone size scales with the
+		// just-updated `normal_lambda`, so the friction step never
+		// over-cancels in a free-falling iter. Same Jacobi+SOR
+		// flush at the end (rim deltas + tentacle deltas).
+		_iterate_type2_friction(p_dt);
 	}
+
+	// Slice 5C-C — populate EI per-loop_k arrays (radial pressure +
+	// tangential friction) from the settled contact lambdas, ramp
+	// grip_engagement / accumulate damage / flip in_stick_phase, then
+	// apply the §6.3 reaction-on-host-bone closure. All three steps
+	// run after the iter loop so they read post-converged contact
+	// state.
+	_populate_entry_interaction_pressures(p_dt);
+	_apply_reaction_on_host_bone(p_dt);
 
 	for (size_t li = 0; li < rim_loops.size(); li++) {
 		RimLoopState &loop = rim_loops[li];
@@ -853,6 +869,9 @@ void Orifice::_collect_type2_contacts() {
 					c.normal = normal;
 					c.radii_sum = radii_sum;
 					c.normal_lambda = 0.0f;
+					// Slice 5C-C — fresh per-tick friction accumulators.
+					c.tangent_lambda = Vector3();
+					c.friction_applied = Vector3();
 					_type2_contacts.push_back(c);
 				}
 			}
@@ -929,6 +948,108 @@ void Orifice::_iterate_type2_contacts(float /*p_dt*/) {
 	}
 }
 
+// -- Type-2 friction iteration (slice 5C-C) -------------------------------
+
+void Orifice::_iterate_type2_friction(float /*p_dt*/) {
+	if (_type2_contacts.empty()) return;
+	// Bilateral lambda-bounded friction cone (Obi
+	// `ContactHandling.cginc::SolveFriction` adapted to bilateral mass
+	// split). Cone size scales with the contact's already-accumulated
+	// `normal_lambda`; per-iter tangent motion below the static cone
+	// is fully canceled, motion above is capped at the kinetic cone.
+	// `tangent_lambda` accumulates the canceled motion across iters
+	// within a tick (reset per-tick by `_collect_type2_contacts`).
+	//
+	// Friction-coefficient composition for 5C-C is the simplest form
+	// that matches the chain solver: `mu_s = base_static_friction ×
+	// (1 - tentacle_lubricity)`. The full §4.4 modulator stack (rib,
+	// anisotropy, adhesion) is deferred.
+	for (size_t i = 0; i < _type2_contacts.size(); i++) {
+		Type2Contact &c = _type2_contacts[i];
+		if (c.normal_lambda <= 0.0f) continue;
+		Tentacle *t = (c.tentacle_idx >= 0 && c.tentacle_idx < (int)_tentacles_resolved.size())
+				? _tentacles_resolved[c.tentacle_idx]
+				: nullptr;
+		if (t == nullptr) continue;
+		Ref<PBDSolver> sol = t->get_solver();
+		if (sol.is_null()) continue;
+		if (c.loop_idx < 0 || c.loop_idx >= (int)rim_loops.size()) continue;
+		RimLoopState &loop = rim_loops[c.loop_idx];
+		if (c.rim_particle_idx < 0 || c.rim_particle_idx >= (int)loop.rim_particles.size()) continue;
+		RimParticle &rp = loop.rim_particles[c.rim_particle_idx];
+
+		float w_t = sol->get_particle_inv_mass(c.particle_idx);
+		float w_r = rp.inv_mass;
+		float w_sum = w_t + w_r;
+		if (w_sum <= 0.0f) continue;
+
+		// Tangential relative slip: tentacle's per-tick displacement
+		// minus the rim's, projected onto the tangent plane (orthogonal
+		// to the contact normal). This is the slip the friction cone
+		// is meant to cancel — NOT the current separation. Slice 5C-C
+		// added `PBDSolver::get_particle_prev_position` so we can read
+		// the tentacle's pre-tick position directly instead of using
+		// the rim's prev_position as a proxy (which conflated current
+		// separation with slip and over-amplified the rim deltas).
+		Vector3 t_pos = sol->get_particle_position(c.particle_idx);
+		Vector3 t_prev = sol->get_particle_prev_position(c.particle_idx);
+		Vector3 tentacle_motion = t_pos - t_prev;
+		Vector3 rim_motion = rp.position - rp.prev_position;
+		Vector3 dx_t = tentacle_motion - rim_motion;
+		Vector3 dx_tan = dx_t - c.normal * dx_t.dot(c.normal);
+		float tan_mag = dx_tan.length();
+		if (tan_mag < 1e-8f) continue;
+		Vector3 dx_tan_dir = dx_tan / tan_mag;
+
+		// Friction coefficients (per-tentacle). Composition
+		// `mu_s = base × (1 - lubricity)` matches the chain solver's
+		// existing form so authoring intuition carries over.
+		float mu_s = sol->get_static_friction(); // already composed by caller
+		float mu_k = mu_s * sol->get_kinetic_friction_ratio();
+		float static_cone = mu_s * c.normal_lambda;  // m·kg
+		float kinetic_cone = mu_k * c.normal_lambda; // m·kg
+
+		// Lambda-bounded cancellation. `tan_mag_kgm = tan_mag / w_sum`
+		// converts position-space slip to lambda-space (m·kg) so the
+		// cone comparison units match.
+		float tan_mag_kgm = tan_mag / w_sum;
+		float lambda_t_delta;
+		if (tan_mag_kgm <= static_cone) {
+			lambda_t_delta = -tan_mag_kgm; // full static cancel
+		} else {
+			lambda_t_delta = -kinetic_cone; // kinetic cap
+		}
+
+		// Bilateral position deltas: each side moves `Δλ × w` along
+		// the tangent direction toward (or against) closing the slip.
+		// Tentacle moves with the slip-cancel direction (its motion is
+		// what we're canceling); rim moves opposite.
+		Vector3 friction_delta = dx_tan_dir * lambda_t_delta;
+		if (w_t > 0.0f) {
+			Vector3 t_delta = friction_delta * w_t;
+			t->add_external_position_delta(c.particle_idx, t_delta);
+		}
+		if (w_r > 0.0f) {
+			Vector3 r_delta = -friction_delta * w_r;
+			_add_delta(loop, c.rim_particle_idx, r_delta);
+		}
+		c.tangent_lambda += dx_tan_dir * lambda_t_delta;
+		// Aggregate friction the rim received from this contact (sum
+		// of `−r_delta` across iters; equivalent to the friction force
+		// vector times effective mass / dt). Used by the EI population
+		// step + §6.3 reaction-on-host-bone.
+		c.friction_applied -= friction_delta * w_t;
+	}
+	// Same Jacobi+SOR flush as the normal-contact step.
+	for (size_t li = 0; li < rim_loops.size(); li++) {
+		_apply_deltas_all(rim_loops[li]);
+	}
+	for (size_t ti = 0; ti < _tentacles_resolved.size(); ti++) {
+		Tentacle *t = _tentacles_resolved[ti];
+		if (t != nullptr) t->flush_external_position_deltas();
+	}
+}
+
 // -- EntryInteraction lifecycle + geometric refresh (slice 5C-B) ----------
 
 void Orifice::set_entry_interaction_grace_period(float p_seconds) {
@@ -953,15 +1074,19 @@ void Orifice::_resize_per_loop_k_arrays(EntryInteraction &p_ei) const {
 	p_ei.tangential_friction_per_loop_k.resize(loop_count);
 	for (int l = 0; l < loop_count; l++) {
 		int n = (int)rim_loops[l].rim_particles.size();
-		// Resize-and-zero. If the loop's particle count changed since
-		// the last refresh, this drops any partial state — acceptable
-		// because authoring-time edits are rare and 5C-B doesn't drive
-		// these slots anyway.
+		// Per-tick arrays: `assign` (zero out — re-populated each tick
+		// by `_populate_entry_interaction_pressures`).
 		p_ei.orifice_radius_per_loop_k[l].assign((size_t)n, 0.0f);
 		p_ei.orifice_radius_velocity_per_loop_k[l].assign((size_t)n, 0.0f);
-		p_ei.damage_accumulated_per_loop_k[l].assign((size_t)n, 0.0f);
 		p_ei.radial_pressure_per_loop_k[l].assign((size_t)n, 0.0f);
 		p_ei.tangential_friction_per_loop_k[l].assign((size_t)n, 0.0f);
+		// Slice 5C-C — `damage_accumulated_per_loop_k` accumulates across
+		// ticks. Use `resize` (preserves existing entries on growth /
+		// truncates on shrink) instead of `assign` so damage state
+		// survives the per-tick refresh. If the loop's particle count
+		// CHANGES (rare authoring-time edit), the partial state past the
+		// new size is dropped.
+		p_ei.damage_accumulated_per_loop_k[l].resize((size_t)n, 0.0f);
 	}
 }
 
@@ -1228,6 +1353,296 @@ void Orifice::_update_entry_interactions(float p_dt) {
 	}
 }
 
+// -- EI per-loop_k populating + grip + damage (slice 5C-C) ----------------
+
+void Orifice::_populate_entry_interaction_pressures(float p_dt) {
+	// Zero the per-tick arrays first (radial pressure + tangential
+	// friction are per-tick; damage accumulates across ticks).
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		EntryInteraction &ei = _entry_interactions[i];
+		for (size_t l = 0; l < ei.radial_pressure_per_loop_k.size(); l++) {
+			std::vector<float> &arr = ei.radial_pressure_per_loop_k[l];
+			for (size_t k = 0; k < arr.size(); k++) arr[k] = 0.0f;
+		}
+		for (size_t l = 0; l < ei.tangential_friction_per_loop_k.size(); l++) {
+			std::vector<float> &arr = ei.tangential_friction_per_loop_k[l];
+			for (size_t k = 0; k < arr.size(); k++) arr[k] = 0.0f;
+		}
+		ei.reaction_on_ragdoll = Vector3();
+		ei.axial_friction_force = 0.0f;
+	}
+
+	// Walk type-2 contacts; route each contact's normal_lambda +
+	// friction magnitude into the matching EI's per-loop_k slots.
+	for (size_t i = 0; i < _type2_contacts.size(); i++) {
+		const Type2Contact &c = _type2_contacts[i];
+		EntryInteraction *ei = nullptr;
+		for (size_t e = 0; e < _entry_interactions.size(); e++) {
+			if (_entry_interactions[e].tentacle_idx == c.tentacle_idx &&
+					_entry_interactions[e].active) {
+				ei = &_entry_interactions[e];
+				break;
+			}
+		}
+		if (ei == nullptr) continue;
+		if (c.loop_idx < 0 || c.loop_idx >= (int)ei->radial_pressure_per_loop_k.size()) continue;
+		std::vector<float> &press_arr = ei->radial_pressure_per_loop_k[c.loop_idx];
+		std::vector<float> &fric_arr = ei->tangential_friction_per_loop_k[c.loop_idx];
+		if (c.rim_particle_idx < 0 || c.rim_particle_idx >= (int)press_arr.size()) continue;
+		press_arr[c.rim_particle_idx] += c.normal_lambda;
+		fric_arr[c.rim_particle_idx] += c.friction_applied.length();
+	}
+
+	// Damage accumulation: each rim particle's pressure × dt × rate
+	// builds toward `damage_failure_threshold`. Damage degrades grip
+	// gradient via §6.3 smoothstep — stored on the EI for the snapshot.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		EntryInteraction &ei = _entry_interactions[i];
+		if (!ei.active) continue;
+		for (size_t l = 0; l < ei.radial_pressure_per_loop_k.size(); l++) {
+			const std::vector<float> &press_arr = ei.radial_pressure_per_loop_k[l];
+			std::vector<float> &dmg_arr = ei.damage_accumulated_per_loop_k[l];
+			for (size_t k = 0; k < press_arr.size() && k < dmg_arr.size(); k++) {
+				dmg_arr[k] += press_arr[k] * p_dt * damage_rate;
+			}
+		}
+	}
+
+	// Grip engagement ramp + in_stick_phase flip.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		EntryInteraction &ei = _entry_interactions[i];
+		if (!ei.active) {
+			// Don't touch grip_engagement on disengaged EIs — hysteretic
+			// state survives the inactive→active cycle.
+			continue;
+		}
+		bool stationary = Math::abs(ei.axial_velocity) <= grip_stationarity_threshold;
+		float ramp_per_tick = (grip_onset_time > 1e-6f) ? (p_dt / grip_onset_time) : 1.0f;
+		if (stationary) {
+			ei.grip_engagement += ramp_per_tick;
+			if (ei.grip_engagement > 1.0f) ei.grip_engagement = 1.0f;
+		} else {
+			// Decay toward zero when the tentacle is actively moving
+			// axially. Same time-constant for symmetry — drivers can
+			// extend with separate onset/release knobs in a later
+			// slice if needed.
+			ei.grip_engagement -= ramp_per_tick;
+			if (ei.grip_engagement < 0.0f) ei.grip_engagement = 0.0f;
+		}
+
+		// in_stick_phase flips true when grip is high AND every contact
+		// for this EI is inside the static cone (tan_mag_kgm <=
+		// static_cone). Flips false if any contact entered the kinetic
+		// regime this tick. Hysteresis tuning is deferred.
+		if (ei.grip_engagement > 0.5f) {
+			bool all_static = true;
+			bool any_contact = false;
+			Tentacle *t = ei.tentacle;
+			Ref<PBDSolver> sol = (t != nullptr) ? t->get_solver() : Ref<PBDSolver>();
+			float mu_s = (sol.is_valid()) ? sol->get_static_friction() : 0.0f;
+			for (size_t ci = 0; ci < _type2_contacts.size(); ci++) {
+				const Type2Contact &c = _type2_contacts[ci];
+				if (c.tentacle_idx != ei.tentacle_idx) continue;
+				if (c.normal_lambda <= 0.0f) continue;
+				any_contact = true;
+				float static_cone = mu_s * c.normal_lambda;
+				float applied_mag = c.tangent_lambda.length();
+				// If the canceled tangent magnitude reached the kinetic
+				// cap (i.e., applied = kinetic_cone < dx_tan), then we
+				// were in the kinetic regime — break stick.
+				if (applied_mag > static_cone + 1e-7f) {
+					all_static = false;
+					break;
+				}
+			}
+			ei.in_stick_phase = (any_contact && all_static);
+		} else {
+			ei.in_stick_phase = false;
+		}
+	}
+}
+
+// -- §6.3 reaction-on-host-bone (slice 5C-C) ------------------------------
+
+Object *Orifice::_resolve_path_to_physical_bone(const NodePath &p_path) const {
+	if (p_path.is_empty()) return nullptr;
+	Node *node = nullptr;
+	if (is_inside_tree()) {
+		node = get_node_or_null(p_path);
+	}
+	if (node == nullptr) {
+		SceneTree *tree = get_tree();
+		Window *root = (tree != nullptr) ? tree->get_root() : nullptr;
+		if (root != nullptr) {
+			String path_str = String(p_path);
+			const String root_prefix = "/root/";
+			if (path_str.begins_with(root_prefix)) {
+				path_str = path_str.substr(root_prefix.length());
+			}
+			Node *cursor = root;
+			PackedStringArray segments = path_str.split("/", false);
+			for (int i = 0; i < segments.size() && cursor != nullptr; i++) {
+				const String &seg = segments[i];
+				Node *next = nullptr;
+				int child_count = cursor->get_child_count();
+				for (int c = 0; c < child_count; c++) {
+					Node *child = cursor->get_child(c);
+					if (child != nullptr && String(child->get_name()) == seg) {
+						next = child;
+						break;
+					}
+				}
+				cursor = next;
+			}
+			node = cursor;
+		}
+	}
+	// Cast via class name lookup — `PhysicalBone3D` is in
+	// `godot_cpp/classes/`, but we accept any Node3D-derived collider
+	// here so test scaffolding can use a simpler stand-in (e.g.
+	// `RigidBody3D`) when wiring up. The runtime check uses
+	// `is_class("PhysicalBone3D")` AND `is_class("RigidBody3D")` since
+	// `PhysicalBone3D extends PhysicsBody3D` (NOT RigidBody3D in 4.x).
+	// We resolve to the broader `CollisionObject3D` interface via
+	// duck-typing on `get_rid`.
+	if (node == nullptr) return nullptr;
+	if (node->has_method("get_rid")) {
+		return node;
+	}
+	return nullptr;
+}
+
+void Orifice::_resolve_host_body_lazy() const {
+	_host_body_cached = nullptr;
+	_host_body_rid = RID();
+	_host_body_active = false;
+
+	// Explicit override path takes precedence.
+	if (!host_physical_bone_path.is_empty()) {
+		Object *obj = _resolve_path_to_physical_bone(host_physical_bone_path);
+		if (obj != nullptr) {
+			_host_body_cached = obj;
+			Variant rid_v = obj->call("get_rid");
+			if (rid_v.get_type() == Variant::RID) {
+				_host_body_rid = rid_v;
+				_host_body_active = true;
+			}
+		}
+		_host_body_dirty = false;
+		return;
+	}
+
+	// Auto-resolve: walk skeleton children for a PhysicalBone3D whose
+	// `get_bone_id() == _bone_index_cached`. The 5B host-bone resolver
+	// has already populated `_skeleton_cached` + `_bone_index_cached`.
+	if (_skeleton_cached == nullptr || _bone_index_cached < 0) {
+		_host_body_dirty = false;
+		return;
+	}
+	int child_count = _skeleton_cached->get_child_count();
+	for (int c = 0; c < child_count; c++) {
+		Node *child = _skeleton_cached->get_child(c);
+		if (child == nullptr) continue;
+		if (!child->is_class("PhysicalBone3D")) continue;
+		Variant bone_id_v = child->call("get_bone_id");
+		if (bone_id_v.get_type() != Variant::INT) continue;
+		if ((int)bone_id_v != _bone_index_cached) continue;
+		if (!child->has_method("get_rid")) continue;
+		Variant rid_v = child->call("get_rid");
+		if (rid_v.get_type() != Variant::RID) continue;
+		_host_body_cached = child;
+		_host_body_rid = rid_v;
+		_host_body_active = true;
+		break;
+	}
+	_host_body_dirty = false;
+}
+
+void Orifice::_apply_reaction_on_host_bone(float p_dt) {
+	_resolve_host_body_lazy();
+	if (!_host_body_active) return;
+	if (_entry_interactions.empty()) return;
+
+	// Center origin in world space — needed for `dir_outward`. Pull
+	// from the cached Center frame so we get the bone-driven origin
+	// when host bone is active.
+	const Transform3D xform = _center_frame_cached;
+	Vector3 center_pos = xform.origin;
+	Vector3 entry_axis_world = xform.basis.xform(entry_axis).normalized();
+	if (entry_axis_world.length_squared() < 1e-10f) {
+		entry_axis_world = Vector3(0.0f, 0.0f, 1.0f);
+	}
+
+	// Resolve host body world origin once (per-tick) for the
+	// `body_apply_impulse` offset. Use the cached Object's
+	// `global_transform` if it exposes it; else fall back to (0,0,0).
+	Vector3 body_origin;
+	if (_host_body_cached != nullptr && _host_body_cached->has_method("get_global_transform")) {
+		Variant xf_v = _host_body_cached->call("get_global_transform");
+		if (xf_v.get_type() == Variant::TRANSFORM3D) {
+			body_origin = ((Transform3D)xf_v).origin;
+		}
+	}
+
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	if (ps == nullptr) return;
+
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		EntryInteraction &ei = _entry_interactions[i];
+		if (!ei.active) continue;
+		Tentacle *t = ei.tentacle;
+		if (t == nullptr) continue;
+
+		for (size_t l = 0; l < ei.radial_pressure_per_loop_k.size(); l++) {
+			if ((int)l >= (int)rim_loops.size()) break;
+			const RimLoopState &loop = rim_loops[l];
+			const std::vector<float> &press_arr = ei.radial_pressure_per_loop_k[l];
+			const std::vector<float> &fric_arr = ei.tangential_friction_per_loop_k[l];
+			for (size_t k = 0; k < press_arr.size(); k++) {
+				float p = press_arr[k];
+				if (p <= 0.0f) continue;
+				if ((int)k >= (int)loop.rim_particles.size()) break;
+				Vector3 contact_pos = loop.rim_particles[k].position;
+
+				// Outward direction — projected to perp-to-entry-axis
+				// plane so it's purely radial in the rim plane.
+				Vector3 from_center = contact_pos - center_pos;
+				Vector3 dir_outward = from_center -
+						entry_axis_world * from_center.dot(entry_axis_world);
+				float dl = dir_outward.length();
+				if (dl < 1e-8f) continue;
+				dir_outward /= dl;
+
+				// Wedge math (§6.3 normalized form). `s_intrinsic` is
+				// the chain-arc-length at this rim particle; the
+				// per-particle offset along axis (`r_offset_along_axis_at_k`)
+				// is approximated as 0 here since 5C-A's contact
+				// collection is per-tentacle-particle (not yet
+				// distributed-along-arc-length). 5C-C accepts this
+				// simplification and flags it.
+				float s_intrinsic = ei.arc_length_at_entry;
+				float drds_intrinsic = t->get_signed_girth_gradient_at_arc_length(s_intrinsic);
+				Vector3 t_hat = t->get_tangent_at_arc_length(s_intrinsic);
+				float sign_proj = (t_hat.dot(entry_axis_world) >= 0.0f) ? 1.0f : -1.0f;
+				float drds_outward = drds_intrinsic * sign_proj;
+				float norm = Math::sqrt(1.0f + drds_outward * drds_outward);
+				float axial_hold = -p * drds_outward / norm;
+
+				Vector3 radial_force = -dir_outward * p;
+				Vector3 axial_force = entry_axis_world * axial_hold;
+				float fric_mag = (k < fric_arr.size()) ? fric_arr[k] : 0.0f;
+				Vector3 friction_force = -t_hat * fric_mag;
+
+				Vector3 total = radial_force + axial_force + friction_force;
+				ps->body_apply_impulse(_host_body_rid, total * p_dt,
+						contact_pos - body_origin);
+				ei.reaction_on_ragdoll += total;
+				ei.axial_friction_force += fric_mag;
+			}
+		}
+	}
+}
+
 Array Orifice::get_entry_interactions_snapshot() const {
 	Array out;
 	for (size_t i = 0; i < _entry_interactions.size(); i++) {
@@ -1254,10 +1669,132 @@ Array Orifice::get_entry_interactions_snapshot() const {
 		d["grip_engagement"] = ei.grip_engagement;
 		d["in_stick_phase"] = ei.in_stick_phase;
 		d["ejection_velocity"] = ei.ejection_velocity;
+
+		// Slice 5C-C — per-loop_k arrays as nested Arrays (Array of
+		// PackedFloat32Array, one per loop). Same shape for all four
+		// metrics so callers iterate uniformly.
+		Array radial_press;
+		Array tang_fric;
+		Array damage;
+		for (size_t l = 0; l < ei.radial_pressure_per_loop_k.size(); l++) {
+			const std::vector<float> &press = ei.radial_pressure_per_loop_k[l];
+			PackedFloat32Array pf;
+			pf.resize((int)press.size());
+			float *dst = pf.ptrw();
+			for (size_t k = 0; k < press.size(); k++) dst[k] = press[k];
+			radial_press.push_back(pf);
+
+			const std::vector<float> &fric = ei.tangential_friction_per_loop_k[l];
+			PackedFloat32Array ff;
+			ff.resize((int)fric.size());
+			float *dst2 = ff.ptrw();
+			for (size_t k = 0; k < fric.size(); k++) dst2[k] = fric[k];
+			tang_fric.push_back(ff);
+
+			const std::vector<float> &dmg = ei.damage_accumulated_per_loop_k[l];
+			PackedFloat32Array df;
+			df.resize((int)dmg.size());
+			float *dst3 = df.ptrw();
+			for (size_t k = 0; k < dmg.size(); k++) dst3[k] = dmg[k];
+			damage.push_back(df);
+		}
+		d["radial_pressure_per_loop_k"] = radial_press;
+		d["tangential_friction_per_loop_k"] = tang_fric;
+		d["damage_accumulated_per_loop_k"] = damage;
+		d["reaction_on_ragdoll"] = ei.reaction_on_ragdoll;
+		d["axial_friction_force"] = ei.axial_friction_force;
 		out.push_back(d);
 	}
 	return out;
 }
+
+// -- Type-2 friction snapshot (slice 5C-C) --------------------------------
+
+Array Orifice::get_type2_friction_snapshot() const {
+	Array out;
+	for (size_t i = 0; i < _type2_contacts.size(); i++) {
+		const Type2Contact &c = _type2_contacts[i];
+		Dictionary d;
+		NodePath path;
+		if (c.tentacle_idx >= 0 && c.tentacle_idx < tentacle_paths.size()) {
+			path = tentacle_paths[c.tentacle_idx];
+		}
+		d["tentacle_path"] = path;
+		d["tentacle_index"] = c.tentacle_idx;
+		d["particle_index"] = c.particle_idx;
+		d["loop_index"] = c.loop_idx;
+		d["rim_particle_index"] = c.rim_particle_idx;
+		d["normal_lambda"] = c.normal_lambda;
+		d["tangent_lambda"] = c.tangent_lambda;
+		d["friction_applied"] = c.friction_applied;
+		// Was the friction at this contact in the static cone (true) or
+		// kinetic regime (false) this tick? Same comparison the EI's
+		// `in_stick_phase` aggregator uses.
+		bool in_static = false;
+		Tentacle *t = (c.tentacle_idx >= 0 && c.tentacle_idx < (int)_tentacles_resolved.size())
+				? _tentacles_resolved[c.tentacle_idx]
+				: nullptr;
+		if (t != nullptr) {
+			Ref<PBDSolver> sol = t->get_solver();
+			if (sol.is_valid() && c.normal_lambda > 0.0f) {
+				float mu_s = sol->get_static_friction();
+				float static_cone = mu_s * c.normal_lambda;
+				in_static = (c.tangent_lambda.length() <= static_cone + 1e-7f);
+			}
+		}
+		d["in_static_cone"] = in_static;
+		out.push_back(d);
+	}
+	return out;
+}
+
+// -- Host body snapshot (slice 5C-C) --------------------------------------
+
+Dictionary Orifice::get_host_body_state() const {
+	_resolve_host_body_lazy();
+	Dictionary d;
+	d["has_host_body"] = _host_body_active;
+	d["body_path"] = host_physical_bone_path;
+	d["bone_index"] = _bone_index_cached;
+	Vector3 origin;
+	if (_host_body_active && _host_body_cached != nullptr &&
+			_host_body_cached->has_method("get_global_transform")) {
+		Variant xf_v = _host_body_cached->call("get_global_transform");
+		if (xf_v.get_type() == Variant::TRANSFORM3D) {
+			origin = ((Transform3D)xf_v).origin;
+		}
+	}
+	d["current_world_position"] = origin;
+	return d;
+}
+
+// -- Slice 5C-C tunable setters/getters -----------------------------------
+
+void Orifice::set_grip_onset_time(float p_seconds) {
+	if (p_seconds < 0.0f) p_seconds = 0.0f;
+	grip_onset_time = p_seconds;
+}
+float Orifice::get_grip_onset_time() const { return grip_onset_time; }
+void Orifice::set_grip_stationarity_threshold(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	grip_stationarity_threshold = p_v;
+}
+float Orifice::get_grip_stationarity_threshold() const { return grip_stationarity_threshold; }
+void Orifice::set_damage_rate(float p_rate) {
+	if (p_rate < 0.0f) p_rate = 0.0f;
+	damage_rate = p_rate;
+}
+float Orifice::get_damage_rate() const { return damage_rate; }
+void Orifice::set_damage_failure_threshold(float p_threshold) {
+	if (p_threshold < 1e-6f) p_threshold = 1e-6f;
+	damage_failure_threshold = p_threshold;
+}
+float Orifice::get_damage_failure_threshold() const { return damage_failure_threshold; }
+void Orifice::set_host_physical_bone_path(const NodePath &p_path) {
+	host_physical_bone_path = p_path;
+	_host_body_dirty = true;
+}
+NodePath Orifice::get_host_physical_bone_path() const { return host_physical_bone_path; }
 
 // -- Type-2 contact snapshot (slice 5C-A) ---------------------------------
 
@@ -1383,6 +1920,20 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_entry_interaction_count"), &Orifice::get_entry_interaction_count);
 	ClassDB::bind_method(D_METHOD("get_entry_interactions_snapshot"), &Orifice::get_entry_interactions_snapshot);
 
+	// Slice 5C-C — friction + reaction-on-host-bone tunables + snapshots.
+	ClassDB::bind_method(D_METHOD("set_grip_onset_time", "seconds"), &Orifice::set_grip_onset_time);
+	ClassDB::bind_method(D_METHOD("get_grip_onset_time"), &Orifice::get_grip_onset_time);
+	ClassDB::bind_method(D_METHOD("set_grip_stationarity_threshold", "m_per_s"), &Orifice::set_grip_stationarity_threshold);
+	ClassDB::bind_method(D_METHOD("get_grip_stationarity_threshold"), &Orifice::get_grip_stationarity_threshold);
+	ClassDB::bind_method(D_METHOD("set_damage_rate", "rate"), &Orifice::set_damage_rate);
+	ClassDB::bind_method(D_METHOD("get_damage_rate"), &Orifice::get_damage_rate);
+	ClassDB::bind_method(D_METHOD("set_damage_failure_threshold", "threshold"), &Orifice::set_damage_failure_threshold);
+	ClassDB::bind_method(D_METHOD("get_damage_failure_threshold"), &Orifice::get_damage_failure_threshold);
+	ClassDB::bind_method(D_METHOD("set_host_physical_bone_path", "path"), &Orifice::set_host_physical_bone_path);
+	ClassDB::bind_method(D_METHOD("get_host_physical_bone_path"), &Orifice::get_host_physical_bone_path);
+	ClassDB::bind_method(D_METHOD("get_host_body_state"), &Orifice::get_host_body_state);
+	ClassDB::bind_method(D_METHOD("get_type2_friction_snapshot"), &Orifice::get_type2_friction_snapshot);
+
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iteration_count",
 						 PROPERTY_HINT_RANGE, "1,8,1"),
 			"set_iteration_count", "get_iteration_count");
@@ -1415,4 +1966,23 @@ void Orifice::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "entry_interaction_grace_period",
 						 PROPERTY_HINT_RANGE, "0.0,5.0,0.05,suffix:s"),
 			"set_entry_interaction_grace_period", "get_entry_interaction_grace_period");
+
+	ADD_GROUP("Grip + Damage", "");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "grip_onset_time",
+						 PROPERTY_HINT_RANGE, "0.0,5.0,0.05,suffix:s"),
+			"set_grip_onset_time", "get_grip_onset_time");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "grip_stationarity_threshold",
+						 PROPERTY_HINT_RANGE, "0.0,2.0,0.01,suffix:m/s"),
+			"set_grip_stationarity_threshold", "get_grip_stationarity_threshold");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "damage_rate",
+						 PROPERTY_HINT_RANGE, "0.0,10.0,0.01"),
+			"set_damage_rate", "get_damage_rate");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "damage_failure_threshold",
+						 PROPERTY_HINT_RANGE, "0.001,100.0,0.01"),
+			"set_damage_failure_threshold", "get_damage_failure_threshold");
+
+	ADD_GROUP("Host Body", "");
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "host_physical_bone_path",
+						 PROPERTY_HINT_NODE_PATH_VALID_TYPES, "PhysicalBone3D"),
+			"set_host_physical_bone_path", "get_host_physical_bone_path");
 }

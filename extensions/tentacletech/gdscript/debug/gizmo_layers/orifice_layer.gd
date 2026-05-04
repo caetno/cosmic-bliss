@@ -21,6 +21,12 @@ const REST_MARKER_SIZE := 0.006
 const HOST_BONE_MARKER_SIZE := 0.018
 const ENTRY_INTERACTION_MARKER_SIZE := 0.014
 const ENTRY_INTERACTION_AXIS_MIN_LENGTH := 0.05
+const HOST_BODY_MARKER_SIZE := 0.022
+# Slice 5C-C — friction arrow scale: tuned so a 1 cm tangent-canceled
+# motion produces a ~5 cm visible arrow. Tweak per scenario.
+const FRICTION_ARROW_SCALE := 5.0
+# Pressure bar geometry — drawn radially outward from the rim particle.
+const PRESSURE_BAR_MAX_LENGTH := 0.04
 
 # Bright cyan — distinct from particle layer's white crosses and the
 # constraint layer's rest-color (also white). Picks up "this segment is
@@ -46,6 +52,16 @@ const ENTRY_INTERACTION_COLOR := Color(0.7, 0.4, 1.0, 0.95)
 # Slightly muted variant for the inactive-but-still-in-grace EIs so the
 # user can tell at a glance which are live vs winding down.
 const ENTRY_INTERACTION_INACTIVE_COLOR := Color(0.45, 0.3, 0.6, 0.7)
+# Slice 5C-C — friction arrow color (cyan-yellow). Distinct from rim
+# cyan / orange contact / purple EI / red-purple host bone.
+const FRICTION_ARROW_COLOR := Color(0.85, 1.0, 0.4, 0.95)
+# Host body marker color (lime). Same family as host-bone marker but
+# brighter so the user can tell which side received the impulses.
+const HOST_BODY_COLOR := Color(0.55, 1.0, 0.3, 0.95)
+# Pressure bar gradient — green (low) → yellow (mid) → red (high).
+const PRESSURE_LOW_COLOR := Color(0.3, 1.0, 0.4, 0.9)
+const PRESSURE_MID_COLOR := Color(1.0, 1.0, 0.3, 0.9)
+const PRESSURE_HIGH_COLOR := Color(1.0, 0.3, 0.3, 0.95)
 
 var _imesh: ImmediateMesh
 var _material: StandardMaterial3D
@@ -177,6 +193,90 @@ func update_from(p_orifice: Node3D) -> void:
 			_imesh.surface_add_vertex(inv * tent_world)
 			_imesh.surface_set_color(TYPE2_CONTACT_COLOR)
 			_imesh.surface_add_vertex(inv * rim_world)
+
+	# Slice 5C-C — friction arrows per type-2 contact. Each contact's
+	# `friction_applied` vector is drawn as a short cyan-yellow line at
+	# the tentacle particle, scaled by `FRICTION_ARROW_SCALE` so visual
+	# length tracks magnitude.
+	var fric_list: Array = p_orifice.call(&"get_type2_friction_snapshot")
+	if fric_list.size() > 0:
+		for fi in fric_list.size():
+			var fc: Dictionary = fric_list[fi]
+			var loop_idx2: int = int(fc.get("loop_index", -1))
+			var rim_idx2: int = int(fc.get("rim_particle_index", -1))
+			var fa: Vector3 = fc.get("friction_applied", Vector3.ZERO)
+			if loop_idx2 < 0 or rim_idx2 < 0 or fa.length() < 1e-7:
+				continue
+			# Use the tentacle position from the matching type-2 contact
+			# snapshot (already reconstructed above) — re-derive it.
+			var rim_world2: Vector3 = p_orifice.call(&"get_particle_position", loop_idx2, rim_idx2)
+			# Approximate tentacle particle world position by stepping
+			# back along the contact normal by radii_sum (we don't have
+			# the per-friction-snapshot radii_sum, so approximate via a
+			# small offset).
+			var arrow_end: Vector3 = rim_world2 + fa * FRICTION_ARROW_SCALE
+			_imesh.surface_set_color(FRICTION_ARROW_COLOR)
+			_imesh.surface_add_vertex(inv * rim_world2)
+			_imesh.surface_set_color(FRICTION_ARROW_COLOR)
+			_imesh.surface_add_vertex(inv * arrow_end)
+
+	# Slice 5C-C — per-rim-particle pressure bars. Aggregated across all
+	# active EIs (a single rim particle can carry pressure from multiple
+	# tentacles). Drawn as a short radial-outward segment whose color
+	# steps green→yellow→red with magnitude.
+	var ei_list2: Array = p_orifice.call(&"get_entry_interactions_snapshot")
+	if ei_list2.size() > 0:
+		var center_pos: Vector3 = (p_orifice.get_center_frame_world() as Transform3D).origin
+		# Aggregate pressure per (loop_idx, rim_particle_idx).
+		var press_map := {}
+		for ei2_idx in ei_list2.size():
+			var ei2: Dictionary = ei_list2[ei2_idx]
+			if not bool(ei2.get("active", false)):
+				continue
+			var press_arr: Array = ei2.get("radial_pressure_per_loop_k", [])
+			for l in press_arr.size():
+				var lp: PackedFloat32Array = press_arr[l]
+				for k in lp.size():
+					if lp[k] <= 0.0:
+						continue
+					var key := Vector2i(l, k)
+					press_map[key] = float(press_map.get(key, 0.0)) + lp[k]
+		# Find max for normalization.
+		var max_press := 0.0
+		for v in press_map.values():
+			if v > max_press:
+				max_press = v
+		if max_press > 0.0:
+			for key in press_map:
+				var v: float = press_map[key]
+				var l: int = key.x
+				var k: int = key.y
+				var rim_world3: Vector3 = p_orifice.call(&"get_particle_position", l, k)
+				var radial: Vector3 = rim_world3 - center_pos
+				var rl: float = radial.length()
+				if rl < 1e-6:
+					continue
+				var dir: Vector3 = radial / rl
+				var bar_len: float = clampf(v / max_press, 0.0, 1.0) * PRESSURE_BAR_MAX_LENGTH
+				var bar_end: Vector3 = rim_world3 + dir * bar_len
+				var t_norm: float = clampf(v / max_press, 0.0, 1.0)
+				var color: Color
+				if t_norm < 0.5:
+					color = PRESSURE_LOW_COLOR.lerp(PRESSURE_MID_COLOR, t_norm * 2.0)
+				else:
+					color = PRESSURE_MID_COLOR.lerp(PRESSURE_HIGH_COLOR, (t_norm - 0.5) * 2.0)
+				_imesh.surface_set_color(color)
+				_imesh.surface_add_vertex(inv * rim_world3)
+				_imesh.surface_set_color(color)
+				_imesh.surface_add_vertex(inv * bar_end)
+
+	# Slice 5C-C — host body marker. Drawn at the resolved
+	# PhysicalBone3D world origin when host body resolves; helps debug
+	# "is the orifice routing impulses to the right body".
+	var hbody: Dictionary = p_orifice.call(&"get_host_body_state")
+	if hbody.get("has_host_body", false):
+		var hb_pos: Vector3 = hbody.get("current_world_position", Vector3.ZERO)
+		_draw_cross(inv * hb_pos, HOST_BODY_MARKER_SIZE, HOST_BODY_COLOR)
 
 	_imesh.surface_end()
 

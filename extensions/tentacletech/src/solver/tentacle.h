@@ -106,6 +106,24 @@ public:
 	void add_external_position_delta(int p_particle_index, const godot::Vector3 &p_delta);
 	void flush_external_position_deltas();
 
+	// Slice 5C-C — chain-arc-length sampling helpers used by §6.3
+	// reaction-on-host-bone. `s` is intrinsic arc length along the chain
+	// in metres; we walk the segment rest lengths to locate the
+	// containing segment, then interpolate.
+	//   - `get_signed_girth_gradient_at_arc_length(s)` returns
+	//     `dr/ds` where `r = collision_radius × particle.girth_scale`
+	//     at the point. Finite-differenced across the containing segment
+	//     (`(g_b − g_a) / rest_length[i]`); the sign of the result encodes
+	//     the wedge geometry (positive = girth INCREASES with intrinsic s).
+	//   - `get_tangent_at_arc_length(s)` returns the unit tangent along
+	//     the segment that contains s (segment direction in world space).
+	// Both clamp `s` to the chain's total arc length; OOR returns 0
+	// gradient / fallback `+Z` tangent so callers don't have to special-
+	// case overshoot.
+	float get_signed_girth_gradient_at_arc_length(float p_s) const;
+	godot::Vector3 get_tangent_at_arc_length(float p_s) const;
+	float get_total_chain_arc_length() const;
+
 	// Snapshot accessors per §15.2 ----------------------------------------
 
 	godot::PackedVector3Array get_particle_positions() const;

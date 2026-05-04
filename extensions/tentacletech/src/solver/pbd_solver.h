@@ -138,6 +138,11 @@ public:
 
 	godot::Vector3 get_particle_position(int p_index) const;
 	void set_particle_position(int p_index, const godot::Vector3 &p_pos);
+	// Slice 5C-C — read-only access to `prev_position` so external
+	// contact sources (e.g. type-2 friction in `Orifice`) can compute
+	// per-tick slip relative to the tentacle's velocity. Implicit
+	// Verlet velocity = (position − prev_position) / dt.
+	godot::Vector3 get_particle_prev_position(int p_index) const;
 	float get_particle_inv_mass(int p_index) const;
 	void set_particle_inv_mass(int p_index, float p_inv_mass);
 	godot::Vector2 get_particle_asymmetry(int p_index) const;

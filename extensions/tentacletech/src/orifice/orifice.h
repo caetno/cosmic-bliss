@@ -100,8 +100,9 @@ struct RimLoopState {
 // Slice 5C-A — type-2 contact (tentacle particle ↔ rim particle).
 // Persistent across iters within a tick; rebuilt every tick. Holds the
 // XPBD `normal_lambda` accumulator that scales each contact's response
-// across iters and is the future input to the §6.3 reaction-on-host-bone
-// pass (5C-C scope).
+// across iters; 5C-C extends it with the friction-cone tangent lambda
+// + per-tick `friction_applied` magnitude that feeds the §6.3
+// reaction-on-host-bone pass.
 struct Type2Contact {
 	int tentacle_idx = -1;
 	int particle_idx = -1;
@@ -117,6 +118,19 @@ struct Type2Contact {
 	// reset to 0 in `_collect_type2_contacts`. Clamped to ≥ 0 (contacts
 	// only push, never pull) per Obi `ParticleCollisionConstraints.compute`.
 	float normal_lambda = 0.0f;
+
+	// Slice 5C-C — friction cone tangent lambda accumulator. Persistent
+	// across iters within a tick; reset to zero in `_collect_type2_contacts`.
+	// Direction encodes the per-tick tangential motion the cone canceled;
+	// magnitude is the cone-bounded amount. Mirrors the chain solver's
+	// per-slot `tangent_lambda` (Obi `ContactHandling.cginc::SolveFriction`).
+	godot::Vector3 tangent_lambda;
+	// Per-tick aggregate friction the rim received from this contact
+	// (sum of −position-deltas applied to the rim across iters), used
+	// by `_populate_entry_interaction_pressures` to feed
+	// `EI.tangential_friction_per_loop_k[l][k]` and ultimately the
+	// §6.3 friction-tangential force on the host bone.
+	godot::Vector3 friction_applied;
 };
 
 class Orifice : public godot::Node3D {
@@ -233,6 +247,36 @@ public:
 	float get_entry_interaction_grace_period() const;
 	int get_entry_interaction_count() const; // active + still-in-grace
 	godot::Array get_entry_interactions_snapshot() const;
+
+	// Slice 5C-C — grip + damage tunables (per-orifice, exposed for
+	// authoring time tuning).
+	void set_grip_onset_time(float p_seconds);
+	float get_grip_onset_time() const;
+	void set_grip_stationarity_threshold(float p_m_per_s);
+	float get_grip_stationarity_threshold() const;
+	void set_damage_rate(float p_rate);
+	float get_damage_rate() const;
+	void set_damage_failure_threshold(float p_threshold);
+	float get_damage_failure_threshold() const;
+
+	// Slice 5C-C — host body (PhysicalBone3D) resolution + impulse
+	// routing for the §6.3 reaction-on-host-bone pass.
+	//   - `host_physical_bone_path` is an explicit override; when set
+	//     and resolves to a `PhysicalBone3D`, that body receives all
+	//     reaction impulses regardless of the bone-id auto-resolve.
+	//   - When the override is empty, the resolver walks the cached
+	//     skeleton's children looking for a `PhysicalBone3D` whose
+	//     `get_bone_id() == _bone_index_cached`. NO-OPs cleanly when
+	//     no body resolves (debug message OK, no impulses applied).
+	void set_host_physical_bone_path(const godot::NodePath &p_path);
+	godot::NodePath get_host_physical_bone_path() const;
+	godot::Dictionary get_host_body_state() const;
+
+	// Slice 5C-C — per-contact friction snapshot (gizmo + tests).
+	// Each entry: { tentacle_path, particle_index, loop_index,
+	// rim_particle_index, normal_lambda, tangent_lambda,
+	// friction_applied, in_static_cone }.
+	godot::Array get_type2_friction_snapshot() const;
 
 	// Authoring API --------------------------------------------------------
 
@@ -382,6 +426,34 @@ private:
 	std::vector<EntryInteraction> _entry_interactions;
 	float entry_interaction_grace_period = 0.5f;
 
+	// Slice 5C-C — grip + damage tunables.
+	//   `grip_onset_time`: seconds for `grip_engagement` to ramp 0→1
+	//     once the EI is engaged AND the tentacle is stationary
+	//     (axial speed below threshold).
+	//   `grip_stationarity_threshold`: |axial_velocity| ≤ this counts
+	//     as stationary. Default 0.1 m/s — typical PBD jitter floor.
+	//   `damage_rate`: damage accumulated per (radial pressure × dt).
+	//     Damage feeds back into `effective_grip_strength` per §6.3.
+	//   `damage_failure_threshold`: per §6.3 smoothstep input. The
+	//     `effective_grip_strength` reaches zero at total damage ≥
+	//     this value.
+	float grip_onset_time = 0.8f;
+	float grip_stationarity_threshold = 0.1f;
+	float damage_rate = 0.1f;
+	float damage_failure_threshold = 1.0f;
+
+	// Slice 5C-C — host body resolution. The §6.3 pass needs a
+	// `PhysicalBone3D` to apply impulses to. Resolved lazily under
+	// the cached skeleton (5B's `_skeleton_cached`) by matching
+	// `get_bone_id() == _bone_index_cached`. The optional
+	// `host_physical_bone_path` @export bypasses the auto-resolve.
+	// Cached pointer + RID re-validated each tick.
+	godot::NodePath host_physical_bone_path;
+	mutable godot::Object *_host_body_cached = nullptr; // PhysicalBone3D *
+	mutable godot::RID _host_body_rid;
+	mutable bool _host_body_active = false;
+	mutable bool _host_body_dirty = true;
+
 	// Tick stages — per-loop.
 	void _predict_loop(RimLoopState &loop, float p_dt);
 	// Slice 5C-A — single-iteration body extracted from the previous
@@ -396,6 +468,28 @@ private:
 	Tentacle *_resolve_node_to_tentacle(const godot::NodePath &p_path) const;
 	void _collect_type2_contacts();
 	void _iterate_type2_contacts(float p_dt);
+
+	// Slice 5C-C — bilateral lambda-bounded friction at type-2 contacts.
+	// Runs inside the iter loop AFTER `_iterate_type2_contacts` so the
+	// normal lambdas are already accumulated.
+	void _iterate_type2_friction(float p_dt);
+
+	// Slice 5C-C — accumulate per-tick contact metrics into the EI's
+	// per-loop_k arrays + ramp grip + accumulate damage. Runs once per
+	// tick AFTER the iter loop finishes (all friction lambdas settled).
+	void _populate_entry_interaction_pressures(float p_dt);
+
+	// Slice 5C-C — apply radial + axial-wedge + friction-tangential
+	// impulses on the host PhysicalBone3D for every rim particle that
+	// received pressure this tick. NO-OP when the host body resolver
+	// produces no body.
+	void _apply_reaction_on_host_bone(float p_dt);
+
+	// Slice 5C-C — host body resolver (PhysicalBone3D under cached
+	// skeleton, matching `get_bone_id() == _bone_index_cached`, or
+	// the explicit override path). Cheap re-validate per call.
+	void _resolve_host_body_lazy() const;
+	godot::Object *_resolve_path_to_physical_bone(const godot::NodePath &p_path) const;
 
 	// Slice 5C-B — EntryInteraction lifecycle + per-tick geometric
 	// refresh. Runs after `_resolve_tentacles_lazy` /
