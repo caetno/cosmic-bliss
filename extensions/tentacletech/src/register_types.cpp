@@ -4,6 +4,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "orifice/orifice.h"
 #include "procedural/procedural_kernels.h"
 #include "solver/pbd_solver.h"
 #include "solver/tentacle.h"
@@ -22,6 +23,7 @@ void initialize_tentacletech_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(PBDSolver);
 	GDREGISTER_CLASS(Tentacle);
 	GDREGISTER_CLASS(ProceduralKernels);
+	GDREGISTER_CLASS(Orifice);
 }
 
 void uninitialize_tentacletech_module(ModuleInitializationLevel p_level) {
