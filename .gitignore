@@ -28,3 +28,12 @@ game/tests/marionette/kasumi/
 
 # Local-only scenes (per-machine scratch; suffix `_local`)
 game/scenes/*_local.tscn
+
+# Blender working directory (.blend files, exports, scratch — local-only)
+blender/
+
+# Image and 3D-asset binaries — local-only by default. Use `git add -f`
+# (or a negation pattern) to track a specific file when needed.
+*.png
+*.glb
+*.gltf
