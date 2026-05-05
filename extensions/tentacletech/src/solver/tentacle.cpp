@@ -30,6 +30,16 @@ const char *UNIFORM_MESH_ARC_SIGN = "mesh_arc_sign";
 const char *UNIFORM_MESH_ARC_OFFSET = "mesh_arc_offset";
 } // namespace
 
+// Slice 5H — function-pointer thunk for the PBDSolver feature-silhouette
+// sampler hook. Lets the contact iter sample (s, θ) without paying
+// Variant boxing or virtual-call overhead.
+static float _silhouette_thunk(void *p_user, int p_particle_idx,
+		const Vector3 &p_contact_world_pos) {
+	Tentacle *t = static_cast<Tentacle *>(p_user);
+	if (t == nullptr) return 0.0f;
+	return t->sample_feature_silhouette_at_contact(p_particle_idx, p_contact_world_pos);
+}
+
 Tentacle::Tentacle() {
 	solver.instantiate();
 	solver->initialize_chain(particle_count, segment_length);
@@ -43,10 +53,19 @@ Tentacle::Tentacle() {
 	solver->set_sleep_threshold(sleep_threshold);
 	solver->set_contact_velocity_damping(contact_velocity_damping);
 	solver->set_support_in_contact(support_in_contact);
+	// Slice 5H — wire up the silhouette sampler. The sampler is a no-op
+	// when no feature_silhouette image has been set (returns 0).
+	solver->set_feature_silhouette_sampler(&_silhouette_thunk, this);
 	render_spline.instantiate();
 }
 
-Tentacle::~Tentacle() {}
+Tentacle::~Tentacle() {
+	// Defensive: clear the sampler hook so a destructed Tentacle can't
+	// be sampled. Solver dies with us so this is mostly informational.
+	if (solver.is_valid()) {
+		solver->clear_feature_silhouette_sampler();
+	}
+}
 
 void Tentacle::_ready() {
 	// Place the chain in the rest pose at the node's current transform. This
@@ -102,6 +121,12 @@ void Tentacle::tick(float p_delta) {
 	if (!anchor_override) {
 		solver->set_anchor(0, get_global_transform());
 	}
+
+	// Slice 5H — refresh per-particle arc-length + body-frame X axis
+	// once per outer tick. Cheap O(N) walk; consumed by
+	// `sample_feature_silhouette_at_contact` from the type-1 / 2 / 4
+	// contact paths.
+	_refresh_silhouette_frame_data();
 
 	// Slice 4O — sub-step count: max(user floor, displacement heuristic),
 	// capped at MAX_SUBSTEPS. The displacement heuristic predicts the
@@ -260,7 +285,8 @@ void Tentacle::_run_environment_probe() {
 
 	environment_probe.probe(this, env_position_scratch, env_girth_scratch,
 			particle_collision_radius,
-			(uint32_t)environment_collision_layer_mask);
+			(uint32_t)environment_collision_layer_mask,
+			feature_silhouette_max_outward);
 
 	// Slice 4M: probe returns up to MAX_CONTACTS_PER_PARTICLE contacts per
 	// particle. Pack into 2N flat arrays for the solver, plus an N-byte
@@ -940,6 +966,19 @@ void Tentacle::_pull_baked_girth_from_mesh() {
 		set_rest_girth_texture(tex);
 	}
 
+	// Slice 5H — pull the 2D feature silhouette texture if the mesh
+	// exposes it. New TentacleMesh resources (post-5H) provide
+	// `get_baked_feature_silhouette`; older / non-TentacleMesh meshes
+	// don't and fall through to the silhouette being empty (zero
+	// perturbation — backward-compat).
+	if (tentacle_mesh->has_method("get_baked_feature_silhouette")) {
+		Variant raw_sil = tentacle_mesh->call("get_baked_feature_silhouette");
+		Ref<ImageTexture> sil = raw_sil;
+		if (sil.is_valid()) {
+			set_feature_silhouette(sil);
+		}
+	}
+
 	// TentacleMesh also reports its arc-axis convention. Without this, a mesh
 	// whose tip is at -Z (intrinsic_axis_sign=-1, the §10.1 default) collapses
 	// in the shader because tt_distance_to_parameter clamps negative arcs.
@@ -1046,6 +1085,209 @@ void Tentacle::set_rest_girth_texture(const Ref<ImageTexture> &p_tex) {
 	rest_girth_texture = p_tex;
 	if (shader_material.is_valid() && rest_girth_texture.is_valid()) {
 		shader_material->set_shader_parameter(UNIFORM_REST_GIRTH, rest_girth_texture);
+	}
+}
+
+// -- Slice 5H feature silhouette ------------------------------------------
+
+Ref<ImageTexture> Tentacle::get_feature_silhouette() const {
+	return feature_silhouette_texture;
+}
+
+void Tentacle::set_feature_silhouette(const Ref<ImageTexture> &p_tex) {
+	feature_silhouette_texture = p_tex;
+	feature_silhouette_max_outward = 0.0f;
+	if (p_tex.is_valid()) {
+		feature_silhouette_image = p_tex->get_image();
+		if (feature_silhouette_image.is_valid()) {
+			feature_silhouette_axial_resolution = feature_silhouette_image->get_width();
+			feature_silhouette_angular_resolution = feature_silhouette_image->get_height();
+			// Slice 5H — scan once for the max OUTWARD (positive)
+			// perturbation. Used to extend the broadphase probe radius
+			// so contacts the contact-step sampler would accept aren't
+			// missed. Inward (negative) values don't extend the probe;
+			// they only reduce the contact threshold at sample time.
+			int W = feature_silhouette_axial_resolution;
+			int H = feature_silhouette_angular_resolution;
+			float max_v = 0.0f;
+			for (int u = 0; u < W; u++) {
+				for (int v = 0; v < H; v++) {
+					float pv = feature_silhouette_image->get_pixel(u, v).r;
+					if (pv > max_v) max_v = pv;
+				}
+			}
+			feature_silhouette_max_outward = max_v;
+		} else {
+			feature_silhouette_axial_resolution = 0;
+			feature_silhouette_angular_resolution = 0;
+		}
+	} else {
+		feature_silhouette_image = Ref<Image>();
+		feature_silhouette_axial_resolution = 0;
+		feature_silhouette_angular_resolution = 0;
+	}
+}
+
+float Tentacle::sample_feature_silhouette(float p_s, float p_theta) const {
+	if (feature_silhouette_image.is_null()) return 0.0f;
+	int W = feature_silhouette_axial_resolution;
+	int H = feature_silhouette_angular_resolution;
+	if (W <= 0 || H <= 0) return 0.0f;
+	// s clamps; θ wraps (mod 2π).
+	float s = p_s;
+	if (s < 0.0f) s = 0.0f;
+	if (s > 1.0f) s = 1.0f;
+	float two_pi = (float)Math_TAU;
+	float theta = Math::fmod(Math::fmod(p_theta, two_pi) + two_pi, two_pi);
+	float u = s * (float)(W - 1);
+	float v = theta / two_pi * (float)H;
+	int u0 = (int)Math::floor(u);
+	int u1 = u0 + 1;
+	if (u1 > W - 1) u1 = W - 1;
+	int v0 = (int)Math::floor(v);
+	int v1 = (v0 + 1) % H;
+	v0 = ((v0 % H) + H) % H;
+	float fu = u - (float)u0;
+	float fv = v - Math::floor(v);
+	float a = feature_silhouette_image->get_pixel(u0, v0).r;
+	float b = feature_silhouette_image->get_pixel(u1, v0).r;
+	float c = feature_silhouette_image->get_pixel(u0, v1).r;
+	float d = feature_silhouette_image->get_pixel(u1, v1).r;
+	float top = a + (b - a) * fu;
+	float bot = c + (d - c) * fu;
+	return top + (bot - top) * fv;
+}
+
+float Tentacle::sample_feature_silhouette_at_contact(int p_particle_idx,
+		const Vector3 &p_contact_world_pos) const {
+	if (feature_silhouette_image.is_null()) return 0.0f;
+	if (solver.is_null()) return 0.0f;
+	int n = solver->get_particle_count();
+	if (p_particle_idx < 0 || p_particle_idx >= n) return 0.0f;
+	if (particle_arc_length_normalized.size() != n) return 0.0f;
+	if (particle_body_frame_x.size() != n) return 0.0f;
+
+	float s = particle_arc_length_normalized[p_particle_idx];
+	Vector3 frame_x = particle_body_frame_x[p_particle_idx];
+	if (frame_x.length_squared() < 1e-10f) return 0.0f;
+	// Tangent estimate at the particle.
+	Vector3 tangent;
+	if (p_particle_idx + 1 < n) {
+		tangent = solver->get_particle_position(p_particle_idx + 1) -
+				solver->get_particle_position(p_particle_idx);
+	} else if (p_particle_idx > 0) {
+		tangent = solver->get_particle_position(p_particle_idx) -
+				solver->get_particle_position(p_particle_idx - 1);
+	}
+	float tl = tangent.length();
+	if (tl < 1e-8f) return 0.0f;
+	tangent /= tl;
+	Vector3 frame_y = tangent.cross(frame_x).normalized();
+	if (frame_y.length_squared() < 1e-10f) return 0.0f;
+	Vector3 contact_dir = p_contact_world_pos - solver->get_particle_position(p_particle_idx);
+	// Project to plane perpendicular to tangent so θ is purely radial.
+	Vector3 contact_perp = contact_dir - tangent * contact_dir.dot(tangent);
+	float perp_len = contact_perp.length();
+	if (perp_len < 1e-8f) return 0.0f;
+	float cx = contact_perp.dot(frame_x);
+	float cy = contact_perp.dot(frame_y);
+	float theta = Math::atan2(cy, cx);
+	return sample_feature_silhouette(s, theta);
+}
+
+void Tentacle::_refresh_silhouette_frame_data() {
+	if (solver.is_null()) return;
+	int n = solver->get_particle_count();
+	if (n < 2) return;
+	if (particle_arc_length_normalized.size() != n) {
+		particle_arc_length_normalized.resize(n);
+	}
+	if (particle_body_frame_x.size() != n) {
+		particle_body_frame_x.resize(n);
+	}
+	float *arc_ptr = particle_arc_length_normalized.ptrw();
+	Vector3 *fx_ptr = particle_body_frame_x.ptrw();
+	// Total arc length from rest_lengths (stable across the tick).
+	int seg_count = solver->get_segment_count();
+	float total = 0.0f;
+	for (int i = 0; i < seg_count; i++) total += solver->get_rest_length(i);
+	float total_inv = (total > 1e-6f) ? (1.0f / total) : 0.0f;
+	float cum = 0.0f;
+	arc_ptr[0] = 0.0f;
+	for (int i = 1; i <= seg_count && i < n; i++) {
+		cum += solver->get_rest_length(i - 1);
+		arc_ptr[i] = cum * total_inv;
+	}
+	if (n > seg_count) arc_ptr[n - 1] = 1.0f;
+
+	// Body-frame X via parallel transport from particle 0. Anchor's
+	// basis x axis as the seed reference; falls back to a stable world
+	// reference when the anchor's basis is degenerate or not set.
+	Vector3 ref_x;
+	if (anchor_override) {
+		// Honour the explicit anchor. Use the X column of its basis.
+		// `anchor_override` only signals "manual override"; the actual
+		// transform sits in the solver's anchor state.
+	}
+	Transform3D anchor_xform = solver->get_anchor_transform();
+	ref_x = anchor_xform.basis.get_column(0);
+	if (ref_x.length_squared() < 1e-10f) ref_x = Vector3(1.0f, 0.0f, 0.0f);
+	// Tangent at particle 0 from segment 0.
+	Vector3 t0 = solver->get_particle_position(1) - solver->get_particle_position(0);
+	float t0l = t0.length();
+	if (t0l < 1e-8f) t0 = Vector3(0.0f, 0.0f, 1.0f);
+	else t0 /= t0l;
+	// Project ref_x perpendicular to tangent; renormalize.
+	Vector3 fx0 = ref_x - t0 * ref_x.dot(t0);
+	if (fx0.length_squared() < 1e-10f) {
+		// Fall back to world Y projected.
+		Vector3 alt = Vector3(0.0f, 1.0f, 0.0f);
+		fx0 = alt - t0 * alt.dot(t0);
+		if (fx0.length_squared() < 1e-10f) {
+			alt = Vector3(0.0f, 0.0f, 1.0f);
+			fx0 = alt - t0 * alt.dot(t0);
+		}
+	}
+	fx0.normalize();
+	fx_ptr[0] = fx0;
+	// Parallel transport along chain segments.
+	Vector3 prev_t = t0;
+	Vector3 prev_x = fx0;
+	for (int i = 1; i < n; i++) {
+		Vector3 ti;
+		if (i + 1 < n) {
+			ti = solver->get_particle_position(i + 1) - solver->get_particle_position(i);
+		} else {
+			ti = solver->get_particle_position(i) - solver->get_particle_position(i - 1);
+		}
+		float til = ti.length();
+		if (til < 1e-8f) {
+			fx_ptr[i] = prev_x;
+			continue;
+		}
+		ti /= til;
+		// Rotate prev_x by the rotation that takes prev_t → ti
+		// (rotation-minimizing frame). Done via Rodrigues.
+		Vector3 axis = prev_t.cross(ti);
+		float axis_len = axis.length();
+		Vector3 fxi;
+		if (axis_len < 1e-7f) {
+			// Tangents are (anti-)collinear; keep prev_x.
+			fxi = prev_x;
+		} else {
+			axis /= axis_len;
+			float cos_a = Math::clamp(prev_t.dot(ti), -1.0f, 1.0f);
+			float angle = Math::acos(cos_a);
+			fxi = prev_x.rotated(axis, angle);
+		}
+		// Re-orthogonalize against ti.
+		fxi = fxi - ti * fxi.dot(ti);
+		float fxil = fxi.length();
+		if (fxil < 1e-10f) fxi = prev_x;
+		else fxi /= fxil;
+		fx_ptr[i] = fxi;
+		prev_t = ti;
+		prev_x = fxi;
 	}
 }
 
@@ -1486,6 +1728,12 @@ void Tentacle::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_spline_data_image"), &Tentacle::get_spline_data_image);
 	ClassDB::bind_method(D_METHOD("get_rest_girth_texture"), &Tentacle::get_rest_girth_texture);
 	ClassDB::bind_method(D_METHOD("set_rest_girth_texture", "tex"), &Tentacle::set_rest_girth_texture);
+	ClassDB::bind_method(D_METHOD("get_feature_silhouette"), &Tentacle::get_feature_silhouette);
+	ClassDB::bind_method(D_METHOD("set_feature_silhouette", "tex"), &Tentacle::set_feature_silhouette);
+	ClassDB::bind_method(D_METHOD("sample_feature_silhouette", "s", "theta"),
+			&Tentacle::sample_feature_silhouette);
+	ClassDB::bind_method(D_METHOD("sample_feature_silhouette_at_contact", "particle_idx", "contact_world_pos"),
+			&Tentacle::sample_feature_silhouette_at_contact);
 	ClassDB::bind_method(D_METHOD("get_spline_samples", "count"), &Tentacle::get_spline_samples);
 	ClassDB::bind_method(D_METHOD("get_spline_frames", "count"), &Tentacle::get_spline_frames);
 	ClassDB::bind_method(D_METHOD("update_render_data"), &Tentacle::update_render_data);

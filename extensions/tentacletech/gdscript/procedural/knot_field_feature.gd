@@ -88,6 +88,33 @@ func _compute_centers() -> PackedFloat32Array:
 	return out
 
 
+# Slice 5H — silhouette bake. Knots are radially symmetric (all θ), so
+# each knot contributes an axial-ring Gaussian. Amplitude is the per-knot
+# radial bump in metres: `(max_radius_multiplier - 1) × baseline_radius`.
+# Without a per-feature view of the chain's smooth `girth_scale`, we use
+# a representative baseline of 1 cm — the silhouette is ADDED to the
+# smooth `girth_scale × base_radius` at contact time, so this is the
+# extra-radius contribution authored at "max-girth" reference scale.
+# Authoring intent: a knot with `max_radius_multiplier = 1.4` adds ~4 mm
+# to the contact threshold at the bump peak.
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or count <= 0:
+		return
+	if absf(max_radius_multiplier - 1.0) < 1e-4:
+		return
+	var centers: PackedFloat32Array = _compute_centers()
+	var span: float = maxf(t_end - t_start, 1e-4)
+	var sigma_t: float = (span / float(count)) * sigma_factor
+	if sigma_t <= 1e-5:
+		return
+	# Reference baseline 1 cm — see comment above.
+	var amplitude: float = (max_radius_multiplier - 1.0) * 0.01
+	for c in centers:
+		# Knots are axially symmetric; deposit across all θ via the
+		# axial ring helper.
+		p_ctx.add_axial_ring(c, sigma_t, amplitude)
+
+
 # Maximum bump influence at axial position `t` across all centers. Uses the
 # selected profile shape; centers more than ~3σ away contribute zero.
 func _max_influence(p_t: float, p_centers: PackedFloat32Array, p_sigma: float) -> float:

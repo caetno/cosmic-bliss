@@ -256,3 +256,38 @@ func _emit_disc_ring(p_ctx: BakeContext, p_center: Vector3,
 static func _wrap_signed(p_angle: float) -> float:
 	var a: float = fposmod(p_angle + PI, TAU) - PI
 	return a
+
+
+# Slice 5H — silhouette bake. Each sucker is a concentric pair: outer
+# rim positive (raised), inner cup negative (depressed). Approximated
+# as a positive Gaussian at the sucker center plus a deeper negative
+# Gaussian with a smaller σ stacked on top — net signature is "rim up,
+# pit down" at the contact-threshold scale. Since we deposit two
+# Gaussians at the same (t, θ) the net peak is `rim_height − cup_depth`.
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or count <= 0:
+		return
+	var length: float = p_ctx.total_arc_length
+	if length <= 0.0:
+		return
+	# Reference baseline 1 cm — see KnotFieldFeature note.
+	var avg_radius: float = 0.01
+	var seam_offset: float = 0.0  # default; sucker honors seam in mesh path, but for silhouette we don't have access to it
+	for i in count:
+		var t_normalized: float = float(i) / float(maxi(count - 1, 1))
+		var axial_t: float = position_curve.sample(t_normalized) if position_curve != null else t_normalized
+		axial_t = clampf(axial_t, 0.0, 1.0)
+		var size_scale: float = size_curve.sample(axial_t) if size_curve != null else 1.0
+		var cup_radius: float = base_size * size_scale
+		if cup_radius <= 1e-5:
+			continue
+		var radial_angle: float = _radial_angle_for_index(i, seam_offset)
+		var sigma_t: float = (cup_radius * rim_outer_factor) / maxf(length, 1e-4)
+		var sigma_theta_outer: float = (cup_radius * rim_outer_factor) / maxf(avg_radius, 1e-4)
+		var sigma_theta_inner: float = cup_radius / maxf(avg_radius, 1e-4)
+		# Outer rim: positive, broader Gaussian.
+		p_ctx.add_gaussian(axial_t, radial_angle, sigma_t, sigma_theta_outer, rim_height)
+		# Inner pit: negative, narrower Gaussian (digs deeper into the
+		# rim signature — the SUM gives a "raised ring with sunken
+		# centre" silhouette).
+		p_ctx.add_gaussian(axial_t, radial_angle, sigma_t * 0.6, sigma_theta_inner, -cup_depth)

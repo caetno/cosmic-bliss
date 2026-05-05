@@ -149,3 +149,36 @@ func _width_taper(p_u: float) -> float:
 	if p_u > 1.0 - fade:
 		return smoothstep(1.0, 1.0 - fade, p_u)
 	return 1.0
+
+
+# Slice 5H — silhouette bake. Ribbon fins extend OUTWARD from the body
+# along a narrow θ band at one or more `fin_count` evenly-spaced angles.
+# Deposit one axial strip per fin, σ_θ scaled by a fraction of TAU /
+# fin_count so the strip is locally thin. Amplitude = max_width × peak
+# width-curve value; the strip's actual width varies with u, but the
+# silhouette captures the peak (collision against the fin extends the
+# threshold by ~max_width).
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or fin_count <= 0 or max_width <= 0.0:
+		return
+	if t_end <= t_start:
+		return
+	var allowed: PackedInt32Array = PackedInt32Array([1, 2, 4])
+	if not allowed.has(fin_count):
+		return
+	var seam_offset: float = 0.0
+	# σ_θ in radians; narrow band per fin so strips don't overlap.
+	var sigma_theta: float = (TAU / float(fin_count)) * 0.10
+	for f in fin_count:
+		var phi: float = seam_offset + radial_offset + TAU * float(f) / float(fin_count)
+		# Deposit incremental Gaussian-axial strips for the smooth
+		# width taper. Sample axial_segments steps for variation.
+		for i in axial_segments + 1:
+			var u: float = float(i) / float(axial_segments)
+			var t: float = lerpf(t_start, t_end, u)
+			var width_scale: float = (width_curve.sample(u)
+					if width_curve != null else _width_taper(u))
+			var amplitude: float = max_width * width_scale
+			# Per-step σ_t = inter-step distance so the strip is smooth.
+			var sigma_t: float = (t_end - t_start) / float(axial_segments) * 0.6
+			p_ctx.add_gaussian(t, phi, sigma_t, sigma_theta, amplitude)

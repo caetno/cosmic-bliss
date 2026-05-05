@@ -23,7 +23,8 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 		const PackedVector3Array &p_positions,
 		const PackedFloat32Array &p_girth_scales,
 		float p_radius_base,
-		uint32_t p_collision_mask) {
+		uint32_t p_collision_mask,
+		float p_feature_radius_padding) {
 	int n = p_positions.size();
 
 	if ((int)contacts.size() != n) {
@@ -98,7 +99,14 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 		// (so contact_stiffness softening engages) but no spurious push-out
 		// is applied (depth ≤ 0 in the solver pass).
 		const float QUERY_BIAS = 1.05f;
-		sphere_shape->set_radius(radius * QUERY_BIAS);
+		// Slice 5H — extend the query radius by a per-tentacle padding
+		// representing the maximum outward feature silhouette
+		// perturbation. This guarantees the broadphase finds contacts
+		// the per-θ sampler in the contact step would consider valid;
+		// without padding, a wart-bearing chain would slip past colliders
+		// the smooth-girth probe radius alone wouldn't catch.
+		float biased = radius * QUERY_BIAS + p_feature_radius_padding;
+		sphere_shape->set_radius(biased);
 		xform.origin = src[i];
 		shape_query->set_transform(xform);
 

@@ -22,6 +22,7 @@ extends Node3D
 @export var show_bending: bool = true
 @export var show_environment: bool = true
 @export var show_orifice: bool = true
+@export var show_feature_silhouette: bool = false
 @export_range(0.0, 0.2, 0.001) var particle_gizmo_size: float = 0.02
 @export var toggle_action: StringName = &"tentacletech_debug_toggle"
 
@@ -29,11 +30,13 @@ const _ParticlesLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_
 const _ConstraintsLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/constraints_layer.gd")
 const _EnvironmentLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/environment_layer.gd")
 const _OrificeLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/orifice_layer.gd")
+const _FeatureSilhouetteLayer := preload("res://addons/tentacletech/scripts/debug/gizmo_layers/feature_silhouette_layer.gd")
 
 var _particles_layer: Node3D
 var _constraints_layer: Node3D
 var _environment_layer: Node3D
 var _orifice_layer: Node3D
+var _feature_silhouette_layer: Node3D
 
 
 func _ready() -> void:
@@ -56,6 +59,10 @@ func _ready() -> void:
 	_orifice_layer.name = "OrificeLayer"
 	add_child(_orifice_layer, false, Node.INTERNAL_MODE_FRONT)
 
+	_feature_silhouette_layer = _FeatureSilhouetteLayer.new()
+	_feature_silhouette_layer.name = "FeatureSilhouetteLayer"
+	add_child(_feature_silhouette_layer, false, Node.INTERNAL_MODE_FRONT)
+
 
 func _process(_delta: float) -> void:
 	# F3 toggle is runtime-only — input polling is meaningless at edit time.
@@ -74,6 +81,7 @@ func _process(_delta: float) -> void:
 	_constraints_layer.visible = show_constraints and tentacle != null
 	_environment_layer.visible = show_environment and tentacle != null
 	_orifice_layer.visible = show_orifice and orifice != null
+	_feature_silhouette_layer.visible = show_feature_silhouette and tentacle != null
 
 	if tentacle != null:
 		if show_particles:
@@ -82,5 +90,7 @@ func _process(_delta: float) -> void:
 			_constraints_layer.update_from(tentacle, show_bending)
 		if show_environment:
 			_environment_layer.update_from(tentacle)
+		if show_feature_silhouette:
+			_feature_silhouette_layer.update_from(tentacle)
 	if orifice != null and show_orifice:
 		_orifice_layer.update_from(orifice)

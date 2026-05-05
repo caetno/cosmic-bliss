@@ -332,6 +332,22 @@ public:
 	godot::Ref<godot::ImageTexture> get_rest_girth_texture() const;
 	void set_rest_girth_texture(const godot::Ref<godot::ImageTexture> &p_tex);
 
+	// Slice 5H — feature silhouette texture: 2D R32F (axial × angular)
+	// outward radial perturbation in metres, ADDED to the smooth
+	// `girth_scale × collision_radius` at type-1 / 2 / 4 contact
+	// threshold time. Authored by `TentacleMesh.bake_feature_silhouette`
+	// and pushed in via `set_feature_silhouette`. Setting null clears.
+	// `sample_feature_silhouette(s, theta)` returns the bilinear
+	// (s, theta) sample in metres; θ wraps, s clamps.
+	godot::Ref<godot::ImageTexture> get_feature_silhouette() const;
+	void set_feature_silhouette(const godot::Ref<godot::ImageTexture> &p_tex);
+	float sample_feature_silhouette(float p_s, float p_theta) const;
+	// Same sampler, but takes a contact world position and a particle
+	// index — computes (s, θ) internally from the cached per-particle
+	// arc-length + body-frame data.
+	float sample_feature_silhouette_at_contact(int p_particle_idx,
+			const godot::Vector3 &p_contact_world_pos) const;
+
 	// Editor-gizmo accessors (§15.5). Both return data in *tentacle-local*
 	// space (matching the spline data texture); gizmos are drawn relative to
 	// the node's transform, so local space is what they want.
@@ -401,6 +417,28 @@ private:
 
 	godot::Ref<godot::ImageTexture> rest_girth_texture;
 
+	// Slice 5H — feature silhouette: 2D R32F image (256 axial × 16
+	// angular) of outward radial perturbation. The texture is the
+	// public artifact (set/get); the underlying Image is cached for
+	// fast bilinear sampling without per-call Variant boxing.
+	godot::Ref<godot::ImageTexture> feature_silhouette_texture;
+	godot::Ref<godot::Image> feature_silhouette_image;
+	int feature_silhouette_axial_resolution = 0;
+	int feature_silhouette_angular_resolution = 0;
+	// Max outward perturbation across the entire silhouette image,
+	// recomputed when the texture is set. Used by the env-probe path
+	// to extend the query radius so contacts the contact-step sampler
+	// would accept aren't missed by the broadphase.
+	float feature_silhouette_max_outward = 0.0f;
+	// Per-particle arc-length-normalized + body-frame X axis. Refreshed
+	// once per `tick()` by `_refresh_silhouette_frame_data()` so contact
+	// paths can sample (s, θ) without recomputing the chain frame in
+	// hot code. `s` ∈ [0, 1] along the rest chain; body-frame X is the
+	// parallel-transported reference axis from particle 0's frame
+	// (slice 5H spec divergence (b)).
+	godot::PackedFloat32Array particle_arc_length_normalized;
+	godot::PackedVector3Array particle_body_frame_x;
+
 	// Debug gizmo overlay — auto-spawned as an internal child when
 	// draw_gizmo is true. Loads
 	// `res://addons/tentacletech/scripts/debug/debug_gizmo_overlay.gd` via
@@ -453,6 +491,10 @@ private:
 	godot::PackedByteArray _in_contact_this_tick_snapshot;
 
 	void _run_environment_probe();
+	// Slice 5H — refresh per-particle arc-length + body-frame X axis
+	// once per outer tick so the contact paths can sample the feature
+	// silhouette in O(1) without recomputing the chain frame.
+	void _refresh_silhouette_frame_data();
 	// Slice 4E — apply equal-and-opposite friction impulses to dynamic
 	// bodies the chain contacted this tick (§4.3 type-1 reciprocal). Run
 	// after solver->tick() so friction_applied is final.

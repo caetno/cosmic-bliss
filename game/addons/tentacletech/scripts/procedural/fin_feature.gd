@@ -111,3 +111,26 @@ func _default_height_taper(p_u: float) -> float:
 	if p_u > 1.0 - fade:
 		return smoothstep(1.0, 1.0 - fade, p_u)
 	return 1.0
+
+
+# Slice 5H — silhouette bake. Same axial-strip pattern as Ribbon: a thin
+# θ band per fin, sampled at axial increments and stamped as Gaussians.
+# `twist_per_length` rotates φ along arc-length t (radians per unit t).
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or count <= 0 or max_height <= 0.0:
+		return
+	if t_end <= t_start:
+		return
+	var sigma_theta: float = half_width
+	const SAMPLES := 16
+	for f in count:
+		var phi: float = radial_offset + TAU * float(f) / float(count)
+		for i in SAMPLES:
+			var u: float = float(i) / float(SAMPLES - 1)
+			var t: float = lerpf(t_start, t_end, u)
+			var hsamp: float = (height_curve.sample(u)
+					if height_curve != null else _default_height_taper(u))
+			var amplitude: float = max_height * hsamp
+			var sigma_t: float = (t_end - t_start) / float(SAMPLES) * 0.6
+			var twisted_phi: float = phi + twist_per_length * t
+			p_ctx.add_gaussian(t, twisted_phi, sigma_t, sigma_theta, amplitude)

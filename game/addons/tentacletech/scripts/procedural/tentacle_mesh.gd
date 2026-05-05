@@ -27,6 +27,7 @@ extends PrimitiveMesh
 
 const _BakeContextScript := preload("res://addons/tentacletech/scripts/procedural/bake_context.gd")
 const _GirthBaker := preload("res://addons/tentacletech/scripts/procedural/girth_baker.gd")
+const _SilhouetteBakeContextScript := preload("res://addons/tentacletech/scripts/procedural/silhouette_bake_context.gd")
 
 enum CrossSection {
 	CIRCULAR = 0,
@@ -136,6 +137,12 @@ var _cached_peak_radius: float = 0.0
 var _cached_channels_used: PackedStringArray = PackedStringArray()
 var _cached_errors: PackedStringArray = PackedStringArray()
 var _cached_warnings: PackedStringArray = PackedStringArray()
+# Slice 5H — feature silhouette: 2D R32F image (axial × angular) of
+# outward radial perturbation in metres, summed across all features.
+# Default value zero (no perturbation). Re-baked when any feature
+# emits `changed` via the existing `_invalidate_and_request` flow.
+var _cached_feature_silhouette: ImageTexture = null
+var _cached_feature_silhouette_image: Image = null
 # Re-entrancy guard: _ensure_baked() mutates state that other accessors
 # (called from inside features) may read. Cheap belt-and-braces.
 var _baking: bool = false
@@ -286,6 +293,12 @@ func _ensure_baked() -> void:
 	_cached_errors = ctx.errors
 	_cached_warnings = ctx.warnings
 
+	# Slice 5H — bake the 2D feature silhouette image. Each feature
+	# deposits its radial-perturbation contribution; result is a
+	# 256×16 R32F image of metres-of-outward-perturbation. Cached
+	# for type-1/2/4 contact threshold sampling and for the gizmo.
+	_bake_feature_silhouette()
+
 	# AABB for spline-deformed culling. The vertex shader (§5.3) places each
 	# ring along the bent spline, so the bent silhouette can reach laterally
 	# in any direction (±X, ±Y) by up to the chain length. Along the chain
@@ -390,6 +403,36 @@ func get_baked_arc_convention() -> Dictionary:
 		"sign": intrinsic_axis_sign,
 		"offset": 0.0,
 	}
+
+
+# Slice 5H — feature silhouette accessors. The image is the source of
+# truth; the texture is a cache for GPU upload paths. Tentacle reads
+# the texture at `set_tentacle_mesh` time and pushes it into the C++
+# Tentacle node via `set_feature_silhouette`.
+func get_baked_feature_silhouette() -> ImageTexture:
+	_ensure_baked()
+	return _cached_feature_silhouette
+
+
+func get_baked_feature_silhouette_image() -> Image:
+	_ensure_baked()
+	return _cached_feature_silhouette_image
+
+
+# Internal — runs every feature's `bake_silhouette_contribution` into a
+# fresh 2D R32F image. Called by `_ensure_baked`.
+func _bake_feature_silhouette() -> void:
+	var silhouette_ctx: SilhouetteBakeContext = _SilhouetteBakeContextScript.new()
+	silhouette_ctx.total_arc_length = _cached_rest_length if _cached_rest_length > 0.0 else length
+	silhouette_ctx.image = SilhouetteBakeContext.make_image()
+	for f in features:
+		if f == null or not f.enabled:
+			continue
+		f.bake_silhouette_contribution(silhouette_ctx)
+	_cached_feature_silhouette_image = silhouette_ctx.image
+	# Convert image → ImageTexture (cached for GPU paths; the C++
+	# Tentacle samples the underlying Image directly).
+	_cached_feature_silhouette = ImageTexture.create_from_image(silhouette_ctx.image)
 
 
 # Build the cylindrical base shape into ctx: rings of radial_segments along

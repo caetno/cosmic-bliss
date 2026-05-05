@@ -970,15 +970,25 @@ void Orifice::_collect_type2_contacts() {
 		for (int pi = 0; pi < t_n; pi++) {
 			Vector3 t_pos = sol->get_particle_position(pi);
 			float t_girth = sol->get_particle_girth_scale(pi);
-			float t_radius = t_radius_base * t_girth;
+			float t_smooth_radius = t_radius_base * t_girth;
 			for (size_t li = 0; li < rim_loops.size(); li++) {
 				RimLoopState &loop = rim_loops[li];
 				int rn = (int)loop.rim_particles.size();
 				for (int rk = 0; rk < rn; rk++) {
 					float r_radius = loop.rim_contact_radius_per_k[rk];
+					Vector3 r_pos = loop.rim_particles[rk].position;
+					// Slice 5H — sample the tentacle's feature silhouette
+					// at the rim particle's position (the contact will
+					// land here if it materializes). The silhouette adds
+					// outward (positive) or inward (negative) perturbation
+					// to the smooth tentacle radius. Sample BEFORE the
+					// distance check so feature bumps trigger contacts
+					// that the smooth threshold would have missed.
+					float feature_perturbation = t->sample_feature_silhouette_at_contact(pi, r_pos);
+					float t_radius = t_smooth_radius + feature_perturbation;
+					if (t_radius < 1e-5f) t_radius = 1e-5f;
 					float radii_sum = t_radius + r_radius;
 					if (radii_sum <= 1e-6f) continue;
-					Vector3 r_pos = loop.rim_particles[rk].position;
 					Vector3 d = r_pos - t_pos;
 					float dist_sq = d.length_squared();
 					float thresh_sq = radii_sum * radii_sum;

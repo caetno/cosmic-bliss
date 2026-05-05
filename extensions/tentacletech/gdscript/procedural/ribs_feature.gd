@@ -71,6 +71,25 @@ func _apply(p_ctx: BakeContext) -> void:
 			centers, half_width, depth, int(profile))
 
 
+# Slice 5H — silhouette bake. Ribs are inward grooves at fixed axial
+# positions, all θ. They REDUCE the body radius (negative amplitude).
+# `depth` is interpreted as a fraction of a 1 cm reference baseline so
+# a rib of `depth = 0.12` deposits ~1.2 mm INWARD perturbation at the
+# groove axis.
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or count <= 0 or depth <= 0.0:
+		return
+	var centers: PackedFloat32Array = _compute_centers()
+	var span: float = maxf(t_end - t_start, 1e-4)
+	var sigma_t: float = (span / float(count)) * width_factor
+	if sigma_t <= 1e-5:
+		return
+	# Reference baseline 1 cm; depth is a fractional groove depth.
+	var amplitude: float = -depth * 0.01
+	for c in centers:
+		p_ctx.add_axial_ring(c, sigma_t, amplitude)
+
+
 func _compute_centers() -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	out.resize(count)

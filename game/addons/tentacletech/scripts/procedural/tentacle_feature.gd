@@ -30,3 +30,14 @@ func _apply(_ctx: BakeContext) -> void:
 # from BakeContext). Default empty.
 func _get_required_masks() -> PackedStringArray:
 	return PackedStringArray()
+
+
+# Slice 5H — write this feature's contribution to the 2D radial-
+# perturbation silhouette image carried by `p_ctx`. Default no-op.
+# Implementations deposit Gaussians / strips / rings into the image
+# via the helpers on `SilhouetteBakeContext` (`add_gaussian`,
+# `add_axial_ring`, `add_axial_strip`). Bake is ADDITIVE — overlapping
+# features sum; subtractive behavior (sucker pits) emit negative
+# amplitudes.
+func bake_silhouette_contribution(_ctx: SilhouetteBakeContext) -> void:
+	pass

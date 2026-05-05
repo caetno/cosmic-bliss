@@ -202,6 +202,13 @@ public:
 	// the §15.2 environment-contacts snapshot.
 	godot::PackedVector3Array get_environment_friction_applied() const;
 
+	// Slice 4Q diagnostic (read-only) — per-slot normal_lambda
+	// accumulator, size N × MAX_CONTACTS, slot[i × MAX + k]. Used by
+	// the wedge-stability diagnostic test to observe lambda oscillation
+	// channel; not used by any non-test code. Bound for GDScript test
+	// access.
+	godot::PackedFloat32Array get_environment_normal_lambdas_snapshot() const;
+
 	// Per-tentacle base collision radius. Each particle's effective collision
 	// radius for slice 4A is `collision_radius * particle.girth_scale`.
 	// Asymmetry ellipse (§4.1) is deferred to a later slice.
@@ -326,6 +333,18 @@ public:
 	void add_external_position_delta(int p_index, const godot::Vector3 &p_delta);
 	void apply_external_position_deltas();
 
+	// Slice 5H — opaque sampler for the feature silhouette. The owning
+	// `Tentacle` registers itself + a callback; the contact step calls
+	// `_sample_feature_silhouette(particle_idx, contact_world_pos)` per
+	// contact slot to pick up the (s, θ)-sampled radial perturbation.
+	// Cleared on `clear_feature_silhouette_sampler` (or when the owning
+	// Tentacle dies). NULL = no sampler installed = behaves as 5G
+	// baseline (smooth girth only).
+	typedef float (*FeatureSilhouetteSampler)(void *p_user, int p_particle_idx,
+			const godot::Vector3 &p_contact_world_pos);
+	void set_feature_silhouette_sampler(FeatureSilhouetteSampler p_fn, void *p_user);
+	void clear_feature_silhouette_sampler();
+
 protected:
 	static void _bind_methods();
 
@@ -407,6 +426,13 @@ private:
 	float sor_factor = DEFAULT_SOR_FACTOR;
 	float max_depenetration = DEFAULT_MAX_DEPENETRATION;
 	float sleep_threshold = 0.0f;
+
+	// Slice 5H — feature silhouette sampler hook. Owned by the parent
+	// Tentacle; raw function pointer + user-data so PBDSolver doesn't
+	// need a Godot-class dependency. Called from the contact step at
+	// most once per contact slot.
+	FeatureSilhouetteSampler feature_silhouette_fn = nullptr;
+	void *feature_silhouette_user = nullptr;
 
 	// Pose targets are stored as parallel PackedArrays — same lifetime
 	// model as the snapshot accessors (copy in / copy out). The behavior

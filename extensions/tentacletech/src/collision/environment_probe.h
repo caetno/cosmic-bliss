@@ -82,7 +82,8 @@ public:
 			const godot::PackedVector3Array &p_positions,
 			const godot::PackedFloat32Array &p_girth_scales,
 			float p_radius_base,
-			uint32_t p_collision_mask);
+			uint32_t p_collision_mask,
+			float p_feature_radius_padding = 0.0f);
 
 	void clear();
 

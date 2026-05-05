@@ -291,14 +291,26 @@ void PBDSolver::iterate(float p_dt) {
 				if (kn == 0) continue;
 				TentacleParticle &p = particles[i];
 				if (p.inv_mass <= 0.0f) continue;
-				float radius = collision_radius * p.girth_scale;
-				if (radius < 1e-5f) continue;
+				float smooth_radius = collision_radius * p.girth_scale;
+				if (smooth_radius < 1e-5f) continue;
 				p.in_contact_this_tick = true;
 				int base = i * MAX_CONTACTS;
 				for (int k = 0; k < kn; k++) {
 					int slot = base + k;
 					Vector3 cn_k = cn[slot];
 					if (cn_k.length_squared() < 1e-10f) continue;
+					// Slice 5H — per-contact effective radius. The smooth
+					// `girth_scale × collision_radius` is augmented by a
+					// silhouette sample at (s, θ) where the contact normal
+					// hits the body. Sampler is a function pointer; null →
+					// behaves as 5G baseline.
+					float radius = smooth_radius;
+					if (feature_silhouette_fn != nullptr) {
+						float perturbation = feature_silhouette_fn(
+								feature_silhouette_user, i, cp[slot]);
+						radius += perturbation;
+						if (radius < 1e-5f) radius = 1e-5f;
+					}
 					// Signed distance from the particle surface to contact
 					// plane. < 0 → penetrating.
 					float dist = (p.position - cp[slot]).dot(cn_k) - radius;
@@ -1031,6 +1043,19 @@ void PBDSolver::apply_external_position_deltas() {
 	apply_position_deltas_all();
 }
 
+// Slice 5H — feature silhouette sampler registration. Function-pointer
+// hook, not a Godot Callable, so the contact iter doesn't pay Variant
+// boxing per call. The owning Tentacle installs itself as user-data.
+void PBDSolver::set_feature_silhouette_sampler(FeatureSilhouetteSampler p_fn, void *p_user) {
+	feature_silhouette_fn = p_fn;
+	feature_silhouette_user = p_user;
+}
+
+void PBDSolver::clear_feature_silhouette_sampler() {
+	feature_silhouette_fn = nullptr;
+	feature_silhouette_user = nullptr;
+}
+
 int PBDSolver::get_environment_contact_count() const {
 	int total = 0;
 	int n = env_contact_count.size();
@@ -1043,6 +1068,23 @@ int PBDSolver::get_environment_contact_count() const {
 
 PackedVector3Array PBDSolver::get_environment_friction_applied() const {
 	return env_contact_friction_applied;
+}
+
+PackedFloat32Array PBDSolver::get_environment_normal_lambdas_snapshot() const {
+	// Slice 4Q diagnostic — read-only snapshot of the per-slot
+	// `normal_lambda` accumulator (size N × MAX_CONTACTS, slot[i*MAX+k]).
+	// Reset whenever fresh probe data lands; persists across iters
+	// within a tick (per Obi `ContactHandling.cginc`). The diagnostic
+	// uses this to detect channel-(iv) lambda oscillation: an unstable
+	// contact representation manifests as the lambda for the same slot
+	// flipping magnitude tick-to-tick at a settled particle.
+	PackedFloat32Array out;
+	int n = (int)env_contact_normal_lambda.size();
+	if (n == 0) return out;
+	out.resize(n);
+	float *dst = out.ptrw();
+	for (int i = 0; i < n; i++) dst[i] = env_contact_normal_lambda[i];
+	return out;
 }
 
 void PBDSolver::set_collision_radius(float p_radius) {
@@ -1200,6 +1242,8 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
 	ClassDB::bind_method(D_METHOD("get_environment_friction_applied"),
 			&PBDSolver::get_environment_friction_applied);
+	ClassDB::bind_method(D_METHOD("get_environment_normal_lambdas_snapshot"),
+			&PBDSolver::get_environment_normal_lambdas_snapshot);
 	ClassDB::bind_method(D_METHOD("set_collision_radius", "radius"), &PBDSolver::set_collision_radius);
 	ClassDB::bind_method(D_METHOD("get_collision_radius"), &PBDSolver::get_collision_radius);
 	ClassDB::bind_method(D_METHOD("set_friction", "static_coeff", "kinetic_ratio"),

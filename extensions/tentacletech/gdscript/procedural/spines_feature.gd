@@ -155,3 +155,33 @@ func _emit_spine(p_ctx: BakeContext, p_axial_t: float, p_radial_angle: float,
 	p_ctx.mark_mask(BakeContext.CH_CUSTOM0_X, base_ring, BakeContext.FEATURE_ID_SPINE)
 	p_ctx.mark_mask(BakeContext.CH_CUSTOM0_X, PackedInt32Array([apex_idx]),
 			BakeContext.FEATURE_ID_SPINE)
+
+
+# Slice 5H — silhouette bake. Spines are sharp narrow Gaussians at the
+# spine base (positive amplitude = tip-of-spine raised above the body).
+# The actual cone tip lives outside the body surface; for collision
+# threshold purposes we treat the base as a small bump. Spine_tip_normal
+# (anisotropic friction modulation) is reserved for a later slice.
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or count <= 0:
+		return
+	if base_width <= 0.0 or base_length <= 0.0:
+		return
+	var avg_radius: float = 0.01
+	var seam_offset: float = 0.0
+	for i in count:
+		var u: float = float(i) / float(maxi(count - 1, 1))
+		var axial_t: float = lerpf(t_start, t_end,
+				(position_curve.sample(u) if position_curve != null else u))
+		axial_t = clampf(axial_t, 0.0, 1.0)
+		var phi: float = _radial_angle_for_index(i, seam_offset)
+		var len_scale: float = (length_curve.sample(axial_t)
+				if length_curve != null else 1.0)
+		# Sharp narrow Gaussian: σ_t and σ_θ scaled by base_width (small).
+		var sigma_t: float = (base_width * 0.5) / maxf(p_ctx.total_arc_length, 1e-4)
+		var sigma_theta: float = (base_width * 0.5) / maxf(avg_radius, 1e-4)
+		# Amplitude: the spine tip is `base_length * len_scale` outward
+		# from the body surface; for collision purposes the base bump
+		# extends ~half that distance into contact range. Tunable.
+		var amplitude: float = base_length * len_scale * 0.5
+		p_ctx.add_gaussian(axial_t, phi, sigma_t, sigma_theta, amplitude)

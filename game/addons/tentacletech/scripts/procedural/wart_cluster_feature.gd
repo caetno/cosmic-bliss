@@ -137,3 +137,52 @@ func _apply(p_ctx: BakeContext) -> void:
 	p_ctx.vertices = ProceduralKernels.displace_warts(
 			p_ctx.vertices, p_ctx.custom0, length,
 			centers_t, centers_phi, sigma, height)
+
+
+# Slice 5H — silhouette bake. Each wart deposits a small Gaussian bump
+# at (t, φ) into the silhouette image. Same `seed` produces identical
+# placement; the σ values are derived from `size` (Gaussian half-width
+# in axial t / radians around the body).
+func bake_silhouette_contribution(p_ctx: SilhouetteBakeContext) -> void:
+	if not enabled or density <= 0.0 or size_max <= 0.0:
+		return
+	var size_lo: float = minf(size_min, size_max)
+	var size_hi: float = maxf(size_min, size_max)
+	var length: float = p_ctx.total_arc_length
+	if length <= 0.0:
+		return
+	# Reference avg radius (1 cm) for the θ-σ scaling — features don't
+	# have access to the smooth girth profile here. The silhouette is
+	# added to `girth_scale × base_radius` at contact time so this is
+	# the per-bump radial perturbation in absolute metres.
+	var avg_radius: float = 0.01
+	var span: float = maxf(t_end - t_start, 0.0)
+	var surface_area: float = TAU * avg_radius * length * span
+	var n: int = int(round(density * surface_area))
+	n = clampi(n, 0, max_count)
+	if n <= 0:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = max(1, seed)
+	var centers_t := PackedFloat32Array()
+	var centers_phi := PackedFloat32Array()
+	centers_t.resize(n); centers_phi.resize(n)
+	for i in n:
+		var t: float = lerpf(t_start, t_end, rng.randf())
+		var phi: float = rng.randf() * TAU
+		if clustering_exponent > 0.0 and i > 0:
+			var anchor_idx: int = rng.randi_range(0, i - 1)
+			t = lerpf(centers_t[anchor_idx], t,
+					pow(rng.randf(), clustering_exponent + 1.0))
+			phi = lerpf(centers_phi[anchor_idx], phi,
+					pow(rng.randf(), clustering_exponent + 1.0))
+		centers_t[i] = t
+		centers_phi[i] = phi
+		var sz: float = lerpf(size_lo, size_hi, rng.randf())
+		# σ_t in axial_t units; sz is metres, divide by total length.
+		var sigma_t: float = (sz * 0.5 * (1.0 + smoothing)) / maxf(length, 1e-4)
+		# σ_θ in radians; sz is metres along body, divide by avg_radius
+		# for small-angle approximation.
+		var sigma_theta: float = (sz * 0.5 * (1.0 + smoothing)) / maxf(avg_radius, 1e-4)
+		var amplitude: float = sz * height_factor
+		p_ctx.add_gaussian(t, phi, sigma_t, sigma_theta, amplitude)
