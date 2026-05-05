@@ -78,6 +78,25 @@ extends Resource
 ## behavior in tight spaces. 0.3 is a good middle ground; drop to 0.1
 ## for very soft "complies easily" moods.
 @export_range(0.0, 1.0) var pose_softness_when_blocked: float = 0.3
+## Slice 4Q-fix — tension-aware target softening threshold. When an
+## in-contact particle's dominant slot has tangent_lambda exceeding
+## [code]threshold × static_cone[/code], the target stiffness is further
+## scaled linearly to zero at saturation (composes multiplicatively with
+## pose_softness_when_blocked). Default 0.8: chain stops adding tension
+## the static-friction cone can't hold, eliminating the build-then-slip
+## stick-slip cycle observed under probing + low-lubricity contact.
+## 1.0 disables the taper (never engages); 0.0 always engages.
+@export_range(0.0, 1.0) var tension_taper_threshold: float = 0.8
+## Slice 4T — pose-target rate limit (m/s). Caps how fast the driver-
+## supplied target position can move per outer Tentacle tick; the solver
+## linearly interpolates toward the driver's intent. Source-side
+## complement to the 4Q-fix taper — taper caps tension at the friction
+## cone, this caps tension at the source. Default 5.0 leaves headroom
+## for probing's 1.5 Hz × 0.15 m thrust (~1.4 m/s peak); aggressive
+## moods can lower (slower, calmer motion); 0 disables. Cold-start
+## bypasses the cap so initial settling isn't artificially slow.
+## Forwarded to [code]Tentacle.target_velocity_max[/code].
+@export_range(0.0, 20.0, 0.1) var target_velocity_max: float = 5.0
 ## Mood-tunable solver bending stiffness. Probing wants high (taut,
 ## holds shape under contact); caressing/idle want low (limp, drapes
 ## willingly). Forwarded to [code]Tentacle.bending_stiffness[/code] when
@@ -115,7 +134,9 @@ extends Resource
 ## the count when a singleton tip target would drag a particle past
 ## [code]0.5 × collision_radius[/code], so this floor is the minimum;
 ## actual count may be higher per-tick. Hard-capped at 4. Forwarded to
-## [code]Tentacle.substep_count[/code].
+## [code]Tentacle.substep_count[/code]. Slice 4R explored a 1 → 4 default
+## flip; reverted after a regression in active-probing scenarios. See
+## PBDSolver.h DEFAULT_ITERATION_COUNT comment for context.
 @export_range(1, 4) var substep_count: int = 1
 
 # --- Attractor -------------------------------------------------------------

@@ -27,6 +27,23 @@ class PBDSolver : public godot::RefCounted {
 	GDCLASS(PBDSolver, godot::RefCounted)
 
 public:
+	// Slice 4R — substep flip default 1 → 4 explored alongside iter_count
+	// 4 → 1 (the Obi canonical 4×1 convergence pattern). Flip reverted on
+	// 2026-05-05 after the probing-regression scenario showed taper-ON
+	// becoming worse than taper-OFF under 4×1: tlam warm-started across
+	// substeps drives the 4Q-fix taper into an aggressive engagement
+	// regime that creates a feedback oscillation (taper kills target pull
+	// → less normal force → smaller cone → tlam/cone climbs → taper kills
+	// pull harder → contacts lost → cone collapses → no taper → chain
+	// slams back in). Net leg motion increased ~30%. Held the default
+	// flip for review; the RID-keyed warm-start machinery + API extension
+	// + reset_environment_contact_lambdas are still in place and inert
+	// at substep_count=1 (the API takes RIDs but the warm-start path
+	// degenerates to "match against last call's identical-RID slot",
+	// preserving lambda across the single inline iter loop — no
+	// behaviour change). Kept at 4 for any future slice that finds a
+	// substep configuration that does extinguish stick-slip without the
+	// taper feedback loop.
 	static constexpr int DEFAULT_ITERATION_COUNT = 4;
 	static constexpr int MAX_ITERATION_COUNT = 6;
 	static constexpr int DEFAULT_PARTICLE_COUNT = 16;
@@ -186,11 +203,31 @@ public:
 	// already routes ragdoll-bone transforms to us during the query); slice
 	// 4M extends the per-particle query to a manifold of up to 2 contacts.
 	// See update docs 2026-05-02 and 2026-05-03.
+	// Slice 4R — added `p_rids` (size N × MAX_CONTACTS, int64 RIDs from
+	// PhysicsServer3D) for RID-keyed lambda warm-start. On intake, each
+	// new slot's RID is matched against the previous tick / substep's
+	// per-particle slot RIDs; if found, normal_lambda + tangent_lambda
+	// copy from the matching old slot into the new slot's index. New
+	// contacts (no match) start at lambda = 0. Without warm-start, the
+	// 4×1 substep flip would reset lambdas every substep with only one
+	// iter to rebuild them — the 4Q-fix tension signal would never
+	// engage. With warm-start, stable contacts (the common case) carry
+	// full convergent lambdas across substeps so the taper sees the
+	// equilibrium tension from iter 0 onward.
 	void set_environment_contacts_multi(
 			const godot::PackedVector3Array &p_points,
 			const godot::PackedVector3Array &p_normals,
-			const godot::PackedByteArray &p_counts);
+			const godot::PackedByteArray &p_counts,
+			const godot::PackedInt64Array &p_rids);
 	void clear_environment_contacts();
+	// Slice 4R — zero env_contact_normal_lambda + env_contact_tangent_lambda
+	// without disturbing RIDs / counts / points. Tentacle::tick calls this
+	// once at the start of an outer physics tick, before the substep loop.
+	// Intra-tick warm-start (substep N+1 reuses substep N's λ for matching
+	// RIDs) is the load-bearing 4R behaviour. Cross-tick warm-start is
+	// out of scope per the slice prompt — would introduce a "stale λ from
+	// last frame" failure mode if the contact set silently changes.
+	void reset_environment_contact_lambdas();
 	int get_environment_contact_count() const;
 
 	// Slice 4M: tangential displacement actually canceled per *contact slot*
@@ -208,6 +245,23 @@ public:
 	// channel; not used by any non-test code. Bound for GDScript test
 	// access.
 	godot::PackedFloat32Array get_environment_normal_lambdas_snapshot() const;
+
+	// Slice 4Q round-4 diagnostic (read-only) — per-slot tangent_lambda
+	// VECTOR accumulator, size N × MAX_CONTACTS, slot[i × MAX + k]. Used
+	// to detect stick-slip: the tangent_lambda magnitude grows during
+	// "stuck" phases as un-canceled tangent motion accumulates against the
+	// static cone, then snaps back to ~zero when the kinetic cone is
+	// breached and slip occurs. Mirror of `get_environment_normal_lambdas_snapshot`.
+	godot::PackedVector3Array get_environment_tangent_lambdas_snapshot() const;
+
+	// Slice 4Q-fix — static formula helper. Extracted from the iter loop
+	// so the unit test can verify the formula at threshold/0.5/saturation
+	// without driving the full pipeline. The same call site inside
+	// iterate()'s step 2 invokes this. Returns a stiffness multiplier
+	// in [0, 1]: 1.0 when the taper is disabled or doesn't engage,
+	// 0.0 at full saturation.
+	static float compute_tension_taper_factor(float p_threshold, float p_mu_s,
+			float p_normal_lambda, float p_tangent_lambda_mag);
 
 	// Per-tentacle base collision radius. Each particle's effective collision
 	// radius for slice 4A is `collision_radius * particle.girth_scale`.
@@ -247,6 +301,40 @@ public:
 	// reduced/raised pull on that particle, with no effect on convergence.
 	void set_target_softness_when_blocked(float p_softness);
 	float get_target_softness_when_blocked() const;
+
+	// Slice 4T — pose-target rate limiting (source-side complement to the
+	// 4Q-fix taper). Caps the per-tick velocity at which a target position
+	// can move. Applied uniformly to BOTH the singleton tip target AND
+	// every distributed pose-target entry inside `apply_target_rate_limit`,
+	// once per outer Tentacle::tick (NOT per substep). Cold-start (first
+	// `set_target` after `clear_target`) bypasses the clamp so initial
+	// settling isn't artificially slow; subsequent writes (warm-running)
+	// are clamped against the previous tick's clamped value. Default
+	// 5.0 m/s — leaves headroom for the bundled probing mood's 1.5 Hz
+	// thrust at 0.15 m amplitude (~1.4 m/s peak velocity). 0 = disabled.
+	void set_target_velocity_max(float p_v);
+	float get_target_velocity_max() const;
+	void apply_target_rate_limit(float p_dt);
+	// Read-only snapshot of the post-clamp singleton target. Tests use
+	// this to verify clamping happened without driving the full pipeline.
+	godot::Vector3 get_target_position_clamped() const;
+	// Per-pose-target post-clamp position snapshot, parallel to
+	// `pose_target_positions`. Empty if no pose targets are active.
+	godot::PackedVector3Array get_pose_target_positions_clamped() const;
+
+	// Slice 4Q-fix — tension-aware target softening. Composes
+	// multiplicatively with `target_softness_when_blocked`. For each
+	// in-contact particle, iter-step 2 reads the dominant contact slot's
+	// `tangent_lambda / (mu_s × normal_lambda)` ratio. When that ratio
+	// exceeds the threshold (default 0.8), the target-pull stiffness is
+	// further scaled by `(1 - over)` where `over = (t - threshold) /
+	// (1 - threshold)` — linearly ramping to zero at full saturation
+	// (t = 1.0). Effect: chain stops adding tension the static cone
+	// can't hold, eliminating the build-then-slip stick-slip cycle.
+	// Threshold 0.0 disables the taper entirely (always full softening
+	// only); 1.0 disables it the other way (taper never engages).
+	void set_tension_taper_threshold(float p_threshold);
+	float get_tension_taper_threshold() const;
 
 	// Slice 4M — Jacobi successive-over-relaxation factor for the position
 	// delta accumulator. 1.0 = strict average (Obi default for parallel mode);
@@ -394,6 +482,20 @@ private:
 	int target_particle_index = -1;
 	godot::Vector3 target_position;
 	float target_stiffness = DEFAULT_TARGET_STIFFNESS;
+	// Slice 4T — rate-limit state. `target_velocity_max` is the per-tentacle
+	// cap (m/s, 0 = disabled). `prev_target_position` is the last clamped
+	// position (used as the base for the next clamp delta). `_target_warm`
+	// tracks first-write-after-clear so cold-start bypasses the cap.
+	float target_velocity_max = 5.0f;
+	godot::Vector3 prev_target_position;
+	bool _target_warm = false;
+	// Slice 4T — pose-target rate-limit parallel state. Length matches
+	// `pose_target_positions` after each `set_pose_targets`. Indices array
+	// fingerprint is `_pose_target_warm.size() == pose_target_indices.size()`
+	// AND element-wise equality (cheap walk; pose targets are typically
+	// ≤ N particles in chain, so this is O(16) at most).
+	godot::PackedVector3Array prev_pose_target_positions;
+	std::vector<bool> _pose_target_warm;
 
 	// Type-4 environment contacts. Slice 4M: up to MAX_CONTACTS_PER_PARTICLE
 	// slots per particle. Points/normals are flat N×MAX arrays — slot k for
@@ -416,11 +518,17 @@ private:
 	godot::PackedVector3Array env_contact_friction_applied;
 	std::vector<float> env_contact_normal_lambda;
 	std::vector<godot::Vector3> env_contact_tangent_lambda;
+	// Slice 4R — per-slot RID (int64 from RID::get_id()). Sized in
+	// `initialize_chain` and persists across substeps + ticks. Used by
+	// `set_environment_contacts_multi` to match new slots against last
+	// known slot RIDs and warm-start lambdas for stable contacts.
+	std::vector<int64_t> env_contact_rid;
 	float collision_radius = 0.05f;
 	float friction_static = 0.0f;
 	float friction_kinetic_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
 	float target_softness_when_blocked = 0.3f;
+	float tension_taper_threshold = 0.8f;
 	float contact_velocity_damping = 0.5f;
 	bool support_in_contact = true;
 	float sor_factor = DEFAULT_SOR_FACTOR;

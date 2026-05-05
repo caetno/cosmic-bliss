@@ -264,6 +264,15 @@
 		<member name="shader_material" type="ShaderMaterial" setter="set_shader_material" getter="get_shader_material">
 			Per-instance [ShaderMaterial] driving the spline-skinned mesh. Each tentacle owns its own; the [code].gdshader[/code] file is shared. Auto-created on [code]_ready[/code] if not assigned.
 		</member>
+		<member name="target_softness_when_blocked" type="float" setter="set_target_softness_when_blocked" getter="get_target_softness_when_blocked" default="0.3">
+			Slice 4M-pre.2. Multiplier on target-pull stiffness for in-contact particles — applied uniformly to both the singleton tip target ([method set_target]) and every distributed pose target. Below 1.0 lets the chain *give* to constraints instead of fighting them; fixes the "tentacle jitters between two colliders" failure mode where pose / tip pulls fight collision push-out at full strength. Composes multiplicatively with [member tension_taper_threshold]'s ramp. Forwarded to the underlying [PBDSolver].
+		</member>
+		<member name="target_velocity_max" type="float" setter="set_target_velocity_max" getter="get_target_velocity_max" default="5.0">
+			Slice 4T pose-target rate cap (m/s). Caps how fast the driver-supplied target position can move per outer Tentacle tick; the solver linearly interpolates toward the driver's intent so high-frequency target writes (an aggressive behaviour driver, a step-function target jump) don't shock the chain. Source-side complement to [member tension_taper_threshold] — the taper caps tension at the friction cone, this caps it at the source. Default 5.0 leaves headroom for probing mood's 1.4 m/s peak; aggressive moods can lower for slower / calmer motion; 0 disables the cap entirely. Cold-start (first call after [method set_target] / [method clear_target]) bypasses the cap so initial settling isn't artificially slow. Forwarded to the underlying [PBDSolver].
+		</member>
+		<member name="tension_taper_threshold" type="float" setter="set_tension_taper_threshold" getter="get_tension_taper_threshold" default="0.8">
+			Slice 4Q-fix tension-aware target softening engagement threshold. When an in-contact particle's dominant contact slot has tangent_lambda exceeding [code]threshold × static_cone[/code] (where [code]static_cone = mu_s × normal_lambda[/code]), the target stiffness is further scaled linearly to zero at saturation ([code]tangent_lambda == static_cone[/code]). Composes multiplicatively with [member target_softness_when_blocked]. Default 0.8 — chain stops adding tension the static-friction cone can't hold, eliminating the build-then-slip stick-slip cycle observed under probing + low-lubricity contact. 1.0 disables (taper never engages); 0.0 always-engaged. Forwarded to the underlying [PBDSolver].
+		</member>
 		<member name="tentacle_lubricity" type="float" setter="set_tentacle_lubricity" getter="get_tentacle_lubricity" default="0.0">
 			0..1 modulator on [member base_static_friction]. Scales μ_s as [code](1 − lubricity)[/code]. 1.0 = frictionless (slick); 0 = full base coefficient. The cleanest knob for "this tentacle is slippery / dry".
 		</member>

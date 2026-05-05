@@ -601,6 +601,15 @@ func _apply_mood() -> void:
 		# 2-4, settled / hanging moods opt in to a small sleep_threshold.
 		_tentacle.substep_count = mood.substep_count
 		_tentacle.sleep_threshold = mood.sleep_threshold
+		# Slice 4Q-fix — tension-aware target softening threshold. Default
+		# 0.8 in mood preserves shipping behaviour for moods that don't
+		# touch this knob; mood resources can dial down (more aggressive
+		# taper) or up to 1.0 (disable) if a scenario needs it.
+		_tentacle.tension_taper_threshold = mood.tension_taper_threshold
+		# Slice 4T — pose-target rate limit (m/s). Default 5.0 in mood is
+		# the resource default; presets that want slower / faster motion
+		# author their own value. 0 disables.
+		_tentacle.target_velocity_max = mood.target_velocity_max
 
 
 # Pulled out of `_ready` and exposed via the property setters so

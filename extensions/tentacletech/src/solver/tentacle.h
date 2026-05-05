@@ -175,6 +175,21 @@ public:
 	// correctness as drivers using pose targets.
 	void set_target_softness_when_blocked(float p_value);
 	float get_target_softness_when_blocked() const;
+	// Slice 4Q-fix — tension-aware target softening threshold. Composes
+	// multiplicatively with `target_softness_when_blocked`. When the
+	// in-contact particle's dominant slot has tangent_lambda exceeding
+	// `threshold × static_cone`, the target stiffness is further scaled
+	// linearly to zero at saturation. Default 0.8 lands the prompt's
+	// hypothesis value. Forwarded to the solver.
+	void set_tension_taper_threshold(float p_value);
+	float get_tension_taper_threshold() const;
+	// Slice 4T — pose-target rate limit cap (m/s; 0 = disabled). Caps how
+	// fast the driver-supplied target position can move per outer tick;
+	// the solver linearly interpolates toward the driver's intent.
+	// Composes orthogonally with the 4Q-fix taper (rate limit clamps
+	// position; taper reads tangent_lambda). Forwarded to the solver.
+	void set_target_velocity_max(float p_value);
+	float get_target_velocity_max() const;
 	// Slice 4M — Jacobi successive-over-relaxation factor for the
 	// position-delta accumulator. 1.0 = strict average (Obi default for
 	// parallel mode); higher values converge faster but can overshoot.
@@ -461,12 +476,17 @@ private:
 	float kinetic_friction_ratio = 0.8f;
 	float contact_stiffness = 0.5f;
 	float target_softness_when_blocked = 0.3f;
+	float tension_taper_threshold = 0.8f;
+	float target_velocity_max = 5.0f;
 	float sor_factor = PBDSolver::DEFAULT_SOR_FACTOR;
 	float max_depenetration = PBDSolver::DEFAULT_MAX_DEPENETRATION;
 	float sleep_threshold = 0.0f;
 	float contact_velocity_damping = 0.5f;
 	bool support_in_contact = true;
 	float body_impulse_scale = 1.0f;
+	// Slice 4R — substep flip default explored (1 → 4) but reverted —
+	// see PBDSolver.h DEFAULT_ITERATION_COUNT comment for the full
+	// rationale (taper feedback oscillation under 4×1 + warm-start).
 	int substep_count = 1;
 	int last_substep_count = 1;
 	godot::PackedVector3Array env_position_scratch;
@@ -478,6 +498,10 @@ private:
 	godot::PackedVector3Array env_contact_points_scratch;
 	godot::PackedVector3Array env_contact_normals_scratch;
 	godot::PackedByteArray env_contact_count_scratch;
+	// Slice 4R — per-slot RID (int64) scratch, populated from
+	// EnvironmentContact::hit_rid[k].get_id() and forwarded to the
+	// solver for RID-keyed lambda warm-start across substeps.
+	godot::PackedInt64Array env_contact_rids_scratch;
 
 	// Slice 4N — fresh-this-tick contact flags. Written by
 	// `_run_environment_probe()` from `contact_count > 0` *before* the solver

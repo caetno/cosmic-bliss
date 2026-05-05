@@ -58,6 +58,9 @@ func _run_tests() -> void:
 		"test_jitter_does_not_scale_with_iter_count",
 		"test_dt_clamp_caps_at_25ms",
 		"test_singleton_target_softens_on_contact",
+		"test_tension_taper_threshold_default_and_clamp",
+		"test_tension_taper_formula_at_threshold_half_saturation",
+		"test_rid_warm_start_preserves_lambda_on_match_resets_on_mismatch",
 		"test_multi_contact_wedge_sweep",
 		"test_multi_contact_anti_parallel_pinch_settles",
 		"test_distance_xpbd_steady_state_lambdas_bounded",
@@ -855,6 +858,203 @@ func test_singleton_target_softens_on_contact() -> bool:
 	return true
 
 
+# Slice 4Q-fix — tension-aware target softening (taper). Composes with
+# `target_softness_when_blocked` and shrinks the per-target stiffness as
+# the contact's `tangent_lambda / (mu_s × normal_lambda)` ratio approaches
+# saturation. Two tests: default + setter clamp, and behavioural — chain
+# under target-pulled lateral motion against a friction-bearing floor
+# settles closer to its starting position when the taper is fully active
+# (threshold=0) than when it's disabled (threshold=1).
+func test_tension_taper_threshold_default_and_clamp() -> bool:
+	var t: Node3D = _make_tentacle(Vector3(0, 1, 0), 8, 0.05)
+	# Default value.
+	if absf(t.tension_taper_threshold - 0.8) > 1e-5:
+		push_error("expected default tension_taper_threshold=0.8, got %f" %
+				t.tension_taper_threshold)
+		return false
+	# Setter forwards to solver.
+	t.tension_taper_threshold = 0.5
+	var solver = t.get_solver()
+	if absf(solver.get_tension_taper_threshold() - 0.5) > 1e-5:
+		push_error("Tentacle.tension_taper_threshold setter did not reach solver: %f" %
+				solver.get_tension_taper_threshold())
+		return false
+	# Clamp at lower bound.
+	t.tension_taper_threshold = -0.5
+	if t.tension_taper_threshold != 0.0:
+		push_error("expected clamp to 0.0, got %f" % t.tension_taper_threshold)
+		return false
+	# Clamp at upper bound.
+	t.tension_taper_threshold = 1.5
+	if t.tension_taper_threshold != 1.0:
+		push_error("expected clamp to 1.0, got %f" % t.tension_taper_threshold)
+		return false
+	return true
+
+
+func test_tension_taper_formula_at_threshold_half_saturation() -> bool:
+	# Verify the static formula `PBDSolver.compute_tension_taper_factor`
+	# at the four canonical points: below threshold (no engagement),
+	# at threshold (factor = 1), at the midpoint (factor = 0.5), at
+	# saturation (factor = 0). Plus the disabled / no-friction guards.
+	var Solver := ClassDB.class_exists("PBDSolver")
+	if not Solver:
+		push_error("PBDSolver class not found")
+		return false
+	var thr := 0.8
+	var mu_s := 0.4
+	var nl := 0.05  # gives static_cone = mu_s * nl = 0.02 m·kg
+	var cone: float = mu_s * nl
+
+	# Disabled: threshold ≥ 1.0 → factor = 1 regardless of lambdas.
+	var f_disabled: float = PBDSolver.compute_tension_taper_factor(1.0, mu_s, nl, cone * 0.99)
+	if absf(f_disabled - 1.0) > 1e-5:
+		push_error("disabled (thr=1.0) expected 1.0, got %f" % f_disabled)
+		return false
+
+	# Below threshold: tlam = 0.5 × cone < 0.8 × cone → no taper.
+	var f_below: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, nl, cone * 0.5)
+	if absf(f_below - 1.0) > 1e-5:
+		push_error("below threshold expected 1.0, got %f" % f_below)
+		return false
+
+	# Exactly at threshold: tlam = 0.8 × cone → t_frac = 0.8 ≤ thr → factor 1.
+	var f_at: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, nl, cone * 0.8)
+	if absf(f_at - 1.0) > 1e-5:
+		push_error("at threshold expected 1.0, got %f" % f_at)
+		return false
+
+	# Midpoint: tlam = 0.9 × cone → t_frac=0.9, over=(0.9-0.8)/0.2 = 0.5,
+	# scale = 0.5.
+	var f_mid: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, nl, cone * 0.9)
+	if absf(f_mid - 0.5) > 1e-4:
+		push_error("midpoint (tlam=0.9 cone) expected 0.5, got %f" % f_mid)
+		return false
+
+	# Saturation: tlam = 1.0 × cone → over = 1, scale = 0.
+	var f_sat: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, nl, cone * 1.0)
+	if absf(f_sat - 0.0) > 1e-5:
+		push_error("saturation expected 0.0, got %f" % f_sat)
+		return false
+
+	# Past saturation: tlam = 1.5 × cone → scale clamps at 0.
+	var f_over: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, nl, cone * 1.5)
+	if absf(f_over - 0.0) > 1e-5:
+		push_error("past saturation expected 0.0 (clamped), got %f" % f_over)
+		return false
+
+	# Threshold = 0.0 (always engaged at any tlam > 0). At tlam = 0.5 ×
+	# cone, t_frac=0.5, over=(0.5 - 0)/(1 - 0) = 0.5, scale = 0.5.
+	var f_zero_thr: float = PBDSolver.compute_tension_taper_factor(0.0, mu_s, nl, cone * 0.5)
+	if absf(f_zero_thr - 0.5) > 1e-4:
+		push_error("thr=0, tlam=0.5cone expected 0.5, got %f" % f_zero_thr)
+		return false
+
+	# No friction (mu_s = 0) — formula returns 1 (no cone to compare).
+	var f_no_friction: float = PBDSolver.compute_tension_taper_factor(thr, 0.0, nl, cone * 0.99)
+	if absf(f_no_friction - 1.0) > 1e-5:
+		push_error("no friction expected 1.0, got %f" % f_no_friction)
+		return false
+
+	# Zero normal_lambda (contact not pressing) — formula returns 1.
+	var f_no_press: float = PBDSolver.compute_tension_taper_factor(thr, mu_s, 0.0, 0.001)
+	if absf(f_no_press - 1.0) > 1e-5:
+		push_error("zero normal_lambda expected 1.0, got %f" % f_no_press)
+		return false
+
+	return true
+
+
+# Slice 4R — RID-keyed lambda warm-start. Tick a settled chain on a
+# floor (env_contact_normal_lambda > 0 at the in-contact slots), then
+# manually invoke `set_environment_contacts_multi` twice:
+#   1. Same RIDs as last tick → warm-start matches → lambdas preserved.
+#   2. Different RIDs → no match → lambdas zeroed.
+# Required to make the 4Q-fix tension taper engage from iter 0 of each
+# substep under the 4×1 default — without warm-start, the 1-iter-per-
+# substep budget would never accumulate enough λ for the taper to fire.
+func test_rid_warm_start_preserves_lambda_on_match_resets_on_mismatch() -> bool:
+	# Use the chain-settles-above-floor pattern (12 particles × 0.05 =
+	# 0.60 m chain at anchor y=0.6) which reliably puts particles in
+	# contact with the floor at y=0. After 60 frames at 60Hz the chain
+	# is settled and pressing into the floor → in-contact slots have
+	# normal_lambda > 0 from the natural probe.
+	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
+	var floor_body: StaticBody3D = _make_floor(0.0)
+	_step([t], SETTLE_FRAMES)
+	var solver = t.get_solver()
+
+	var nlam_baseline: PackedFloat32Array = solver.get_environment_normal_lambdas_snapshot()
+	var max_baseline: float = 0.0
+	for v in nlam_baseline:
+		max_baseline = maxf(max_baseline, v)
+	if max_baseline < 1e-5:
+		push_error("baseline normal_lambda should be > 0 after %d settled frames; got %f"
+				% [SETTLE_FRAMES, max_baseline])
+		return false
+
+	# Construct a manifold matching the chain's current contact state but
+	# with RIDs of our choosing.
+	var n: int = t.particle_count
+	var slot_count: int = n * 2  # MAX_CONTACTS_PER_PARTICLE
+	var pts := PackedVector3Array()
+	var nrms := PackedVector3Array()
+	var counts := PackedByteArray()
+	var rids := PackedInt64Array()
+	pts.resize(slot_count)
+	nrms.resize(slot_count)
+	counts.resize(n)
+	rids.resize(slot_count)
+
+	# Pull the current Tentacle snapshot to mirror the geometry exactly.
+	# The natural probe set env_contact_rid to floor_body.get_rid().get_id()
+	# for in-contact slots; we replay that same RID to test the same-RID
+	# preservation path.
+	var snap: Array = t.get_environment_contacts_snapshot()
+	var floor_rid_id: int = int(floor_body.get_rid().get_id())
+	for i in n:
+		counts[i] = 0
+		for k in 2:
+			pts[i * 2 + k] = Vector3.ZERO
+			nrms[i * 2 + k] = Vector3.ZERO
+			rids[i * 2 + k] = 0
+		if i < snap.size():
+			var ps: Dictionary = snap[i]
+			var clist: Array = ps.get("contacts", [])
+			counts[i] = clist.size()
+			for k in clist.size():
+				var slot: Dictionary = clist[k]
+				pts[i * 2 + k] = slot.get("hit_point", Vector3.ZERO)
+				nrms[i * 2 + k] = slot.get("hit_normal", Vector3.UP)
+				rids[i * 2 + k] = floor_rid_id
+
+	# Same-RID call → warm-start preserves lambdas.
+	solver.set_environment_contacts_multi(pts, nrms, counts, rids)
+	var nlam_same: PackedFloat32Array = solver.get_environment_normal_lambdas_snapshot()
+	var max_same: float = 0.0
+	for v in nlam_same:
+		max_same = maxf(max_same, v)
+	if max_same < 0.99 * max_baseline:
+		push_error(("same-RID warm-start failed to preserve lambdas: baseline_max=%f, after_same_max=%f")
+				% [max_baseline, max_same])
+		return false
+
+	# Different-RID call → no match → lambdas zeroed.
+	var fake_rid_id: int = floor_rid_id + 999999
+	for i in n:
+		for k in counts[i]:
+			rids[i * 2 + k] = fake_rid_id
+	solver.set_environment_contacts_multi(pts, nrms, counts, rids)
+	var nlam_diff: PackedFloat32Array = solver.get_environment_normal_lambdas_snapshot()
+	var max_diff: float = 0.0
+	for v in nlam_diff:
+		max_diff = maxf(max_diff, v)
+	if max_diff > 1e-7:
+		push_error("different-RID call should have zeroed lambdas; got max=%f" % max_diff)
+		return false
+	return true
+
+
 # Slice 4M acceptance — multi-contact wedge sweep. A chain whose tip
 # rests at the apex of a V formed by two static spheres should settle
 # without flicker across a wide range of wedge apex angles. Pre-4M, the
@@ -1234,7 +1434,9 @@ func test_substep_friction_matches_single_step() -> bool:
 
 # Default substep_count is 1 and the heuristic doesn't fire for moods
 # without a fast singleton target — so existing scenes with no target or
-# settled chains should still report substep count 1, no behavioural change.
+# settled chains should still report substep count 1, no behavioural
+# change. Slice 4R explored a 1 → 4 default flip; reverted (see
+# PBDSolver.h DEFAULT_ITERATION_COUNT comment).
 func test_substep_count_default_is_one() -> bool:
 	var t: Node3D = _make_tentacle(Vector3(0, 0.6, 0), 12, 0.05)
 	_make_floor(0.0)

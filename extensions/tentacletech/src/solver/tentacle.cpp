@@ -48,6 +48,8 @@ Tentacle::Tentacle() {
 			kinetic_friction_ratio);
 	solver->set_contact_stiffness(contact_stiffness);
 	solver->set_target_softness_when_blocked(target_softness_when_blocked);
+	solver->set_tension_taper_threshold(tension_taper_threshold);
+	solver->set_target_velocity_max(target_velocity_max);
 	solver->set_sor_factor(sor_factor);
 	solver->set_max_depenetration(max_depenetration);
 	solver->set_sleep_threshold(sleep_threshold);
@@ -169,6 +171,21 @@ void Tentacle::tick(float p_delta) {
 	// gets routed to the LAST substep's body. For stable manifolds (the
 	// common case) this matches the single-step result exactly.
 	solver->reset_friction_applied();
+	// Slice 4R — clear contact lambdas at outer-tick boundary. Substep loop
+	// (below) calls set_environment_contacts_multi per substep; the RID-keyed
+	// warm-start there preserves λ across substeps for stable RIDs (Obi 4×1
+	// convergence). Cross-tick warm-start is intentionally out of scope —
+	// see PBDSolver::reset_environment_contact_lambdas comment + slice 4R
+	// prompt's "Out of scope: Cross-tick warm-start ... Defer."
+	solver->reset_environment_contact_lambdas();
+	// Slice 4T — pose-target rate limit. Runs ONCE per outer tick, before
+	// the substep loop below, against the OUTER `p_delta`. Mutates the
+	// solver's `target_position` / `pose_target_positions` in-place so the
+	// substep loop sees the clamped values throughout. Cold-started targets
+	// (first tick after `clear_target` / `clear_pose_targets`) bypass the
+	// clamp; warm-running targets (subsequent ticks) get capped at
+	// `target_velocity_max × p_delta`.
+	solver->apply_target_rate_limit(p_delta);
 
 	float sub_dt = p_delta / (float)sub_steps;
 	for (int s = 0; s < sub_steps; s++) {
@@ -302,11 +319,15 @@ void Tentacle::_run_environment_probe() {
 	if (env_contact_count_scratch.size() != n) {
 		env_contact_count_scratch.resize(n);
 	}
+	if (env_contact_rids_scratch.size() != slot_count) {
+		env_contact_rids_scratch.resize(slot_count);
+	}
 	const auto &contacts = environment_probe.get_contacts();
 	{
 		Vector3 *cp = env_contact_points_scratch.ptrw();
 		Vector3 *cn = env_contact_normals_scratch.ptrw();
 		uint8_t *cc = env_contact_count_scratch.ptrw();
+		int64_t *cr = env_contact_rids_scratch.ptrw();
 		for (int i = 0; i < n; i++) {
 			int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
 			if (i < (int)contacts.size()) {
@@ -316,9 +337,11 @@ void Tentacle::_run_environment_probe() {
 					if (k < c.contact_count) {
 						cp[base + k] = c.hit_point[k];
 						cn[base + k] = c.hit_normal[k];
+						cr[base + k] = (int64_t)c.hit_rid[k].get_id();
 					} else {
 						cp[base + k] = Vector3();
 						cn[base + k] = Vector3();
+						cr[base + k] = 0;
 					}
 				}
 			} else {
@@ -326,12 +349,14 @@ void Tentacle::_run_environment_probe() {
 				for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
 					cp[base + k] = Vector3();
 					cn[base + k] = Vector3();
+					cr[base + k] = 0;
 				}
 			}
 		}
 	}
 	solver->set_environment_contacts_multi(env_contact_points_scratch,
-			env_contact_normals_scratch, env_contact_count_scratch);
+			env_contact_normals_scratch, env_contact_count_scratch,
+			env_contact_rids_scratch);
 
 	// Slice 4N — write the fresh-this-tick snapshot now (after the probe,
 	// before solver->tick). Behaviour drivers running their
@@ -770,6 +795,29 @@ void Tentacle::set_target_softness_when_blocked(float p_v) {
 }
 float Tentacle::get_target_softness_when_blocked() const {
 	return target_softness_when_blocked;
+}
+
+void Tentacle::set_tension_taper_threshold(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	tension_taper_threshold = p_v;
+	if (solver.is_valid()) {
+		solver->set_tension_taper_threshold(p_v);
+	}
+}
+float Tentacle::get_tension_taper_threshold() const {
+	return tension_taper_threshold;
+}
+
+void Tentacle::set_target_velocity_max(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	target_velocity_max = p_v;
+	if (solver.is_valid()) {
+		solver->set_target_velocity_max(p_v);
+	}
+}
+float Tentacle::get_target_velocity_max() const {
+	return target_velocity_max;
 }
 
 void Tentacle::set_sor_factor(float p_v) {
@@ -1672,6 +1720,14 @@ void Tentacle::_bind_methods() {
 			&Tentacle::set_target_softness_when_blocked);
 	ClassDB::bind_method(D_METHOD("get_target_softness_when_blocked"),
 			&Tentacle::get_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("set_tension_taper_threshold", "value"),
+			&Tentacle::set_tension_taper_threshold);
+	ClassDB::bind_method(D_METHOD("get_tension_taper_threshold"),
+			&Tentacle::get_tension_taper_threshold);
+	ClassDB::bind_method(D_METHOD("set_target_velocity_max", "value"),
+			&Tentacle::set_target_velocity_max);
+	ClassDB::bind_method(D_METHOD("get_target_velocity_max"),
+			&Tentacle::get_target_velocity_max);
 	ClassDB::bind_method(D_METHOD("set_sor_factor", "value"),
 			&Tentacle::set_sor_factor);
 	ClassDB::bind_method(D_METHOD("get_sor_factor"),
@@ -1798,6 +1854,12 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "target_softness_when_blocked",
 					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
 			"set_target_softness_when_blocked", "get_target_softness_when_blocked");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "tension_taper_threshold",
+					 PROPERTY_HINT_RANGE, "0.0,1.0,0.001"),
+			"set_tension_taper_threshold", "get_tension_taper_threshold");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "target_velocity_max",
+					 PROPERTY_HINT_RANGE, "0.0,20.0,0.1,or_greater"),
+			"set_target_velocity_max", "get_target_velocity_max");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sor_factor",
 					 PROPERTY_HINT_RANGE, "0.0,4.0,0.05"),
 			"set_sor_factor", "get_sor_factor");

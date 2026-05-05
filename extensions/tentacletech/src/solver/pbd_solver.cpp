@@ -58,6 +58,7 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 	int slot_total = p_n * MAX_CONTACTS;
 	env_contact_normal_lambda.assign((size_t)slot_total, 0.0f);
 	env_contact_tangent_lambda.assign((size_t)slot_total, Vector3());
+	env_contact_rid.assign((size_t)slot_total, 0);
 
 	for (int i = 0; i < p_n; i++) {
 		Vector3 pos(0.0f, 0.0f, -p_segment_length * (float)i);
@@ -133,7 +134,9 @@ void PBDSolver::predict(float p_dt) {
 	for (int i = 0; i < n; i++) {
 		TentacleParticle &p = particles[i];
 		// Slice 4C: clear the per-tick contact flag here so the iteration
-		// loop can set it as collisions are projected.
+		// loop can set it as collisions are projected. Step 2's
+		// 4Q-fix taper has its own probe-count-based gate (slice 4R) so
+		// it doesn't depend on iter step 3 having run yet.
 		p.in_contact_this_tick = false;
 		if (p.inv_mass <= 0.0f) {
 			// Pinned: prev_position tracks position so velocity stays zero.
@@ -232,13 +235,58 @@ void PBDSolver::iterate(float p_dt) {
 		// targets. Lerp-style (soft-by-construction); each call adds a
 		// delta = (target - position) × stiffness. Slice 4M-pre.2 softening
 		// for in-contact particles applies to both paths.
+		//
+		// Slice 4Q-fix — tension-aware taper. For each in-contact particle,
+		// look up the dominant contact slot (max normal_lambda) and compute
+		// the per-slot tension fraction `t = |tangent_lambda| / (mu_s ×
+		// normal_lambda)`. When t exceeds `tension_taper_threshold` (default
+		// 0.8), the target stiffness is further multiplied by `(1 - over)`
+		// where `over = (t - threshold) / (1 - threshold)`, ramping from 1
+		// at threshold to 0 at saturation. Composes multiplicatively with
+		// `target_softness_when_blocked`. Iter 0 sees zero tangent_lambda
+		// (reset in set_environment_contacts_multi) so no taper applies on
+		// the first pass; subsequent iters read the previous iter's friction
+		// step output and back off the target if friction is at its limit.
+		// This extinguishes the 4Q stick-slip cycle by capping how much
+		// elastic tension the chain can build into a static-cone-bounded
+		// contact.
+		const float mu_s_taper = friction_static;
+		const float taper_thr = tension_taper_threshold;
+		auto compute_tension_taper = [&](int p_particle_idx) -> float {
+			// Picks the dominant slot (max normal_lambda) for the particle
+			// and forwards to the static formula helper. Returns 1.0
+			// when no contact / no friction → safe to call unconditionally.
+			if (nlambda_arr == nullptr || tlambda_arr == nullptr) return 1.0f;
+			int base = p_particle_idx * MAX_CONTACTS;
+			float dom_lambda = 0.0f;
+			int dom_slot = -1;
+			for (int k = 0; k < MAX_CONTACTS; k++) {
+				float ln = nlambda_arr[base + k];
+				if (ln > dom_lambda) {
+					dom_lambda = ln;
+					dom_slot = k;
+				}
+			}
+			if (dom_slot < 0) return 1.0f;
+			float tlam_mag = tlambda_arr[base + dom_slot].length();
+			return compute_tension_taper_factor(taper_thr, mu_s_taper,
+					dom_lambda, tlam_mag);
+		};
+
 		if (target_active && target_particle_index >= 0 && target_particle_index < n) {
 			TentacleParticle &pp = particles[target_particle_index];
 			if (pp.inv_mass > 0.0f) {
 				float ts = target_stiffness;
+				// Slice 4M-pre.2: existing in-contact softening (gated on
+				// the iter-side flag). Slice 4Q-fix taper: applied
+				// unconditionally (returns 1.0 when not in a meaningful
+				// contact, so it's a no-op for non-contact particles).
+				// This preserves the previous "iter 0 cold target push,
+				// iter 1+ softened" cycle that 4Q-fix was tuned around.
 				if (pp.in_contact_this_tick) {
 					ts *= target_softness_when_blocked;
 				}
+				ts *= compute_tension_taper(target_particle_index);
 				if (ts > 0.0f) {
 					Vector3 d = (target_position - pp.position) * ts;
 					add_position_delta(target_particle_index, d);
@@ -259,6 +307,7 @@ void PBDSolver::iterate(float p_dt) {
 				if (pp.in_contact_this_tick) {
 					ps *= target_softness_when_blocked;
 				}
+				ps *= compute_tension_taper(idx);
 				if (ps <= 0.0f) continue;
 				Vector3 d = (pose_pos[k] - pp.position) * ps;
 				add_position_delta(idx, d);
@@ -774,6 +823,9 @@ void PBDSolver::clear_target() {
 	target_active = false;
 	target_particle_index = -1;
 	target_position = Vector3();
+	// Slice 4T — clear arms the cold-start bypass for the next set_target.
+	_target_warm = false;
+	prev_target_position = Vector3();
 }
 
 bool PBDSolver::has_target() const { return target_active; }
@@ -791,9 +843,39 @@ void PBDSolver::set_pose_targets(const PackedInt32Array &p_indices,
 	int n_stf = p_stiffnesses.size();
 	int n = (n_idx < n_pos ? n_idx : n_pos);
 	if (n_stf < n) n = n_stf;
+	// Slice 4T — fingerprint check on the pose-target indices array. If the
+	// new indices match the previous call element-wise (same particles same
+	// order), keep the parallel `_pose_target_warm` + `prev_pose_target_positions`
+	// flags so warm-running clamping continues. If indices changed, rebuild
+	// the parallel arrays from scratch (all cold).
+	bool indices_match = ((int)_pose_target_warm.size() == n
+			&& pose_target_indices.size() == n);
+	if (indices_match) {
+		const int *cur_idx = pose_target_indices.ptr();
+		const int *new_idx = p_indices.ptr();
+		for (int i = 0; i < n; i++) {
+			if (cur_idx[i] != new_idx[i]) {
+				indices_match = false;
+				break;
+			}
+		}
+	}
 	pose_target_indices.resize(n);
 	pose_target_positions.resize(n);
 	pose_target_stiffnesses.resize(n);
+	if (!indices_match) {
+		_pose_target_warm.assign((size_t)n, false);
+		prev_pose_target_positions.resize(n);
+		Vector3 *prev_ptr = prev_pose_target_positions.ptrw();
+		for (int i = 0; i < n; i++) {
+			prev_ptr[i] = Vector3();
+		}
+	} else {
+		// Indices preserved; arrays may have been resized above to the same
+		// length, so the parallel buffers stay correct.
+		if ((int)_pose_target_warm.size() != n) _pose_target_warm.resize((size_t)n, false);
+		if (prev_pose_target_positions.size() != n) prev_pose_target_positions.resize(n);
+	}
 	int *idx_ptr = pose_target_indices.ptrw();
 	Vector3 *pos_ptr = pose_target_positions.ptrw();
 	float *stf_ptr = pose_target_stiffnesses.ptrw();
@@ -814,6 +896,9 @@ void PBDSolver::clear_pose_targets() {
 	pose_target_indices.clear();
 	pose_target_positions.clear();
 	pose_target_stiffnesses.clear();
+	// Slice 4T — clear arms the cold-start bypass.
+	_pose_target_warm.clear();
+	prev_pose_target_positions.clear();
 }
 
 int PBDSolver::get_pose_target_count() const {
@@ -823,6 +908,88 @@ int PBDSolver::get_pose_target_count() const {
 PackedInt32Array PBDSolver::get_pose_target_indices() const { return pose_target_indices; }
 PackedVector3Array PBDSolver::get_pose_target_positions() const { return pose_target_positions; }
 PackedFloat32Array PBDSolver::get_pose_target_stiffnesses() const { return pose_target_stiffnesses; }
+
+// Slice 4T — pose-target rate limiting -------------------------------------
+
+void PBDSolver::set_target_velocity_max(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	target_velocity_max = p_v;
+}
+float PBDSolver::get_target_velocity_max() const { return target_velocity_max; }
+
+Vector3 PBDSolver::get_target_position_clamped() const { return prev_target_position; }
+
+PackedVector3Array PBDSolver::get_pose_target_positions_clamped() const {
+	return prev_pose_target_positions;
+}
+
+void PBDSolver::apply_target_rate_limit(float p_dt) {
+	// Slice 4T — clamp target movement velocity. Runs ONCE per outer
+	// Tentacle::tick (NOT per substep — substeps are for physics
+	// integration, not input smoothing). After clamping, the substep loop
+	// inside Tentacle::tick reads the mutated target_position / pose_target_positions
+	// for all of its substeps.
+	//
+	// Cold-start bypass: first set_target after clear_target leaves the
+	// warm flag false. The first call here arms it (warm = true) and sets
+	// prev_target_position = target_position without modifying target_position.
+	// The chain settles to its initial pose immediately on the first frame.
+	//
+	// Warm-running: subsequent calls compute delta = target - prev_target;
+	// if it exceeds max_step, scale to max_step magnitude and rewrite
+	// target_position. Updates prev_target_position to the (possibly
+	// clamped) value for the next tick's delta basis.
+	//
+	// Disabled (target_velocity_max == 0): pass-through, no clamp, but
+	// still update prev_target_position so re-enabling later starts from
+	// the current target.
+	if (p_dt <= 0.0f) return;
+	float max_step = target_velocity_max * p_dt;
+	// Singleton tip target.
+	if (target_active && target_particle_index >= 0) {
+		if (!_target_warm) {
+			prev_target_position = target_position;
+			_target_warm = true;
+		} else if (target_velocity_max > 0.0f) {
+			Vector3 delta = target_position - prev_target_position;
+			float dist = delta.length();
+			if (dist > max_step && dist > 1e-9f) {
+				delta = delta * (max_step / dist);
+				target_position = prev_target_position + delta;
+			}
+			prev_target_position = target_position;
+		} else {
+			// Disabled — track current target for re-enable continuity.
+			prev_target_position = target_position;
+		}
+	}
+	// Distributed pose targets. Parallel `_pose_target_warm` flags + prev
+	// positions sized at set_pose_targets time. Length mismatch is a
+	// defensive bail-out (no-op for that tick, will fix itself at the next
+	// `set_pose_targets`).
+	int n = pose_target_positions.size();
+	if (n > 0 && (int)_pose_target_warm.size() == n
+			&& prev_pose_target_positions.size() == n) {
+		Vector3 *pos_ptr = pose_target_positions.ptrw();
+		Vector3 *prev_ptr = prev_pose_target_positions.ptrw();
+		for (int i = 0; i < n; i++) {
+			if (!_pose_target_warm[i]) {
+				prev_ptr[i] = pos_ptr[i];
+				_pose_target_warm[i] = true;
+			} else if (target_velocity_max > 0.0f) {
+				Vector3 delta = pos_ptr[i] - prev_ptr[i];
+				float dist = delta.length();
+				if (dist > max_step && dist > 1e-9f) {
+					delta = delta * (max_step / dist);
+					pos_ptr[i] = prev_ptr[i] + delta;
+				}
+				prev_ptr[i] = pos_ptr[i];
+			} else {
+				prev_ptr[i] = pos_ptr[i];
+			}
+		}
+	}
+}
 
 // -- Per-particle accessors -------------------------------------------------
 
@@ -941,16 +1108,18 @@ void PBDSolver::set_uniform_rest_length(float p_length) {
 void PBDSolver::set_environment_contacts_multi(
 		const PackedVector3Array &p_points,
 		const PackedVector3Array &p_normals,
-		const PackedByteArray &p_counts) {
+		const PackedByteArray &p_counts,
+		const PackedInt64Array &p_rids) {
 	int np = p_points.size();
 	int nn = p_normals.size();
 	int nc = p_counts.size();
+	int nr = p_rids.size();
 	int n = (int)particles.size();
 	int slot_total = n * MAX_CONTACTS;
-	if (np != slot_total || nn != slot_total || nc != n) {
+	if (np != slot_total || nn != slot_total || nc != n || nr != slot_total) {
 		// Mismatched lengths — clear and bail out rather than reading past
 		// caller-owned arrays. The Tentacle is responsible for sizing these
-		// (points/normals at N×MAX_CONTACTS_PER_PARTICLE, counts at N).
+		// (points/normals/rids at N×MAX_CONTACTS_PER_PARTICLE, counts at N).
 		clear_environment_contacts();
 		return;
 	}
@@ -964,24 +1133,47 @@ void PBDSolver::set_environment_contacts_multi(
 	if ((int)env_contact_tangent_lambda.size() != slot_total) {
 		env_contact_tangent_lambda.assign((size_t)slot_total, Vector3());
 	}
+	if ((int)env_contact_rid.size() != slot_total) {
+		env_contact_rid.assign((size_t)slot_total, 0);
+	}
 	if (n == 0) {
 		return;
 	}
 	const Vector3 *src_p = p_points.ptr();
 	const Vector3 *src_n = p_normals.ptr();
 	const uint8_t *src_c = p_counts.ptr();
+	const int64_t *src_r = p_rids.ptr();
 	Vector3 *dst_p = env_contact_points.ptrw();
 	Vector3 *dst_n = env_contact_normals.ptrw();
 	uint8_t *dst_c = env_contact_count.ptrw();
 	for (int i = 0; i < n; i++) {
 		dst_c[i] = src_c[i];
 		int base = i * MAX_CONTACTS;
+		// Slice 4R — per-particle warm-start. For each new slot k, search
+		// the OLD per-particle slots (0..MAX_CONTACTS-1) for a matching
+		// RID. If found, copy normal_lambda + tangent_lambda from the
+		// matching old slot. If not found, zero. friction_applied is
+		// NOT warm-started here — it's reset once per outer tick by
+		// Tentacle::tick via reset_friction_applied().
+		//
+		// Snapshot OLD lambdas + RIDs into per-particle stack arrays
+		// before touching the destination — slot indices may differ
+		// between tick N and tick N+1 (the probe doesn't guarantee a
+		// stable slot ordering), so the cache makes the search O(M²)
+		// per particle (M = MAX_CONTACTS = 2 → 4 comparisons; trivial).
+		int64_t old_rids[MAX_CONTACTS];
+		float old_nlam[MAX_CONTACTS];
+		Vector3 old_tlam[MAX_CONTACTS];
+		bool claimed[MAX_CONTACTS];
+		for (int k = 0; k < MAX_CONTACTS; k++) {
+			old_rids[k] = env_contact_rid[base + k];
+			old_nlam[k] = env_contact_normal_lambda[base + k];
+			old_tlam[k] = env_contact_tangent_lambda[base + k];
+			claimed[k] = false;
+		}
+
 		for (int k = 0; k < MAX_CONTACTS; k++) {
 			dst_p[base + k] = src_p[base + k];
-			// Defensive normalization — physics server normals are
-			// typically already unit-length, but a malformed mesh could
-			// yield a zero normal which would silently no-op the
-			// projection. Inactive slots (k >= count[i]) get zeroed.
 			Vector3 nrm = src_n[base + k];
 			float l2 = nrm.length_squared();
 			if (l2 > 1e-10f) {
@@ -990,20 +1182,26 @@ void PBDSolver::set_environment_contacts_multi(
 				nrm = Vector3();
 			}
 			dst_n[base + k] = nrm;
-			// Slice 4O — `friction_applied` is NOT zeroed here anymore.
-			// Tentacle::tick() calls reset_friction_applied() once at the
-			// start of an outer physics tick; the substep loop accumulates
-			// across substeps; the reciprocal pass reads the sum at end of
-			// frame. For substep_count = 1 the semantics match the previous
-			// "reset-per-set_environment_contacts_multi" form exactly.
-			//
-			// Slice 4M — per-contact normal/tangent lambdas DO reset every
-			// time fresh probe data lands (per tick today, per substep with
-			// 4O). Persisting across iters within a substep is what makes
-			// friction cones bounded by that substep's accumulated normal
-			// impulse instead of per-iter dn.
-			env_contact_normal_lambda[base + k] = 0.0f;
-			env_contact_tangent_lambda[base + k] = Vector3();
+			int64_t new_rid = src_r[base + k];
+			env_contact_rid[base + k] = new_rid;
+			// Match against old slots. RID 0 is reserved (inactive /
+			// unknown) — never match it; new inactive slots stay zero.
+			float warm_nlam = 0.0f;
+			Vector3 warm_tlam;
+			if (new_rid != 0) {
+				for (int j = 0; j < MAX_CONTACTS; j++) {
+					if (claimed[j]) continue;
+					if (old_rids[j] == 0) continue;
+					if (old_rids[j] == new_rid) {
+						warm_nlam = old_nlam[j];
+						warm_tlam = old_tlam[j];
+						claimed[j] = true;
+						break;
+					}
+				}
+			}
+			env_contact_normal_lambda[base + k] = warm_nlam;
+			env_contact_tangent_lambda[base + k] = warm_tlam;
 		}
 	}
 }
@@ -1013,6 +1211,18 @@ void PBDSolver::clear_environment_contacts() {
 	env_contact_normals.clear();
 	env_contact_count.clear();
 	env_contact_friction_applied.clear();
+	for (size_t i = 0; i < env_contact_normal_lambda.size(); i++) {
+		env_contact_normal_lambda[i] = 0.0f;
+	}
+	for (size_t i = 0; i < env_contact_tangent_lambda.size(); i++) {
+		env_contact_tangent_lambda[i] = Vector3();
+	}
+	for (size_t i = 0; i < env_contact_rid.size(); i++) {
+		env_contact_rid[i] = 0;
+	}
+}
+
+void PBDSolver::reset_environment_contact_lambdas() {
 	for (size_t i = 0; i < env_contact_normal_lambda.size(); i++) {
 		env_contact_normal_lambda[i] = 0.0f;
 	}
@@ -1087,6 +1297,44 @@ PackedFloat32Array PBDSolver::get_environment_normal_lambdas_snapshot() const {
 	return out;
 }
 
+float PBDSolver::compute_tension_taper_factor(float p_threshold, float p_mu_s,
+		float p_normal_lambda, float p_tangent_lambda_mag) {
+	// Slice 4Q-fix — tension-aware target softening factor. Returns a
+	// stiffness multiplier in [0, 1].
+	//   threshold ≥ 1.0 → taper disabled (returns 1.0 always).
+	//   mu_s ≤ 0       → no friction cone to compare against (returns 1.0).
+	//   normal_lambda ≤ ~0 → contact not pressing, no static cone (returns 1.0).
+	//   tlam / static_cone ≤ threshold → not yet saturating (returns 1.0).
+	//   otherwise: linear ramp from 1.0 at threshold to 0.0 at saturation.
+	if (p_threshold >= 1.0f) return 1.0f;
+	if (p_mu_s <= 0.0f) return 1.0f;
+	float static_cone = p_mu_s * p_normal_lambda;
+	if (static_cone <= 1e-7f) return 1.0f;
+	float t_frac = p_tangent_lambda_mag / static_cone;
+	if (t_frac <= p_threshold) return 1.0f;
+	float over = (t_frac - p_threshold) / (1.0f - p_threshold);
+	float scale = 1.0f - over;
+	if (scale < 0.0f) scale = 0.0f;
+	return scale;
+}
+
+PackedVector3Array PBDSolver::get_environment_tangent_lambdas_snapshot() const {
+	// Slice 4Q round-4 diagnostic — per-slot tangent_lambda accumulator.
+	// Stick-slip detection: under static friction the tangent motion is
+	// fully canceled and accumulates into tangent_lambda; magnitude
+	// grows. When the kinetic cone is breached the iteration switches to
+	// kinetic-cone clamping and tangent_lambda saturates / drops. A clean
+	// stick-slip cycle reads as monotone growth of |tangent_lambda|
+	// punctuated by sharp drops.
+	PackedVector3Array out;
+	int n = (int)env_contact_tangent_lambda.size();
+	if (n == 0) return out;
+	out.resize(n);
+	Vector3 *dst = out.ptrw();
+	for (int i = 0; i < n; i++) dst[i] = env_contact_tangent_lambda[i];
+	return out;
+}
+
 void PBDSolver::set_collision_radius(float p_radius) {
 	if (p_radius < 0.0f) p_radius = 0.0f;
 	collision_radius = p_radius;
@@ -1119,6 +1367,15 @@ void PBDSolver::set_target_softness_when_blocked(float p_v) {
 }
 float PBDSolver::get_target_softness_when_blocked() const {
 	return target_softness_when_blocked;
+}
+
+void PBDSolver::set_tension_taper_threshold(float p_v) {
+	if (p_v < 0.0f) p_v = 0.0f;
+	if (p_v > 1.0f) p_v = 1.0f;
+	tension_taper_threshold = p_v;
+}
+float PBDSolver::get_tension_taper_threshold() const {
+	return tension_taper_threshold;
 }
 
 void PBDSolver::set_sor_factor(float p_v) {
@@ -1236,14 +1493,22 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_rest_length", "segment_index"), &PBDSolver::get_rest_length);
 	ClassDB::bind_method(D_METHOD("set_uniform_rest_length", "length"), &PBDSolver::set_uniform_rest_length);
 
-	ClassDB::bind_method(D_METHOD("set_environment_contacts_multi", "points", "normals", "counts"),
+	ClassDB::bind_method(D_METHOD("set_environment_contacts_multi", "points", "normals", "counts", "rids"),
 			&PBDSolver::set_environment_contacts_multi);
 	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
+	ClassDB::bind_method(D_METHOD("reset_environment_contact_lambdas"),
+			&PBDSolver::reset_environment_contact_lambdas);
 	ClassDB::bind_method(D_METHOD("get_environment_contact_count"), &PBDSolver::get_environment_contact_count);
 	ClassDB::bind_method(D_METHOD("get_environment_friction_applied"),
 			&PBDSolver::get_environment_friction_applied);
 	ClassDB::bind_method(D_METHOD("get_environment_normal_lambdas_snapshot"),
 			&PBDSolver::get_environment_normal_lambdas_snapshot);
+	ClassDB::bind_method(D_METHOD("get_environment_tangent_lambdas_snapshot"),
+			&PBDSolver::get_environment_tangent_lambdas_snapshot);
+	ClassDB::bind_static_method("PBDSolver",
+			D_METHOD("compute_tension_taper_factor",
+					"threshold", "mu_s", "normal_lambda", "tangent_lambda_mag"),
+			&PBDSolver::compute_tension_taper_factor);
 	ClassDB::bind_method(D_METHOD("set_collision_radius", "radius"), &PBDSolver::set_collision_radius);
 	ClassDB::bind_method(D_METHOD("get_collision_radius"), &PBDSolver::get_collision_radius);
 	ClassDB::bind_method(D_METHOD("set_friction", "static_coeff", "kinetic_ratio"),
@@ -1259,6 +1524,20 @@ void PBDSolver::_bind_methods() {
 			&PBDSolver::set_target_softness_when_blocked);
 	ClassDB::bind_method(D_METHOD("get_target_softness_when_blocked"),
 			&PBDSolver::get_target_softness_when_blocked);
+	ClassDB::bind_method(D_METHOD("set_target_velocity_max", "value"),
+			&PBDSolver::set_target_velocity_max);
+	ClassDB::bind_method(D_METHOD("get_target_velocity_max"),
+			&PBDSolver::get_target_velocity_max);
+	ClassDB::bind_method(D_METHOD("apply_target_rate_limit", "dt"),
+			&PBDSolver::apply_target_rate_limit);
+	ClassDB::bind_method(D_METHOD("get_target_position_clamped"),
+			&PBDSolver::get_target_position_clamped);
+	ClassDB::bind_method(D_METHOD("get_pose_target_positions_clamped"),
+			&PBDSolver::get_pose_target_positions_clamped);
+	ClassDB::bind_method(D_METHOD("set_tension_taper_threshold", "threshold"),
+			&PBDSolver::set_tension_taper_threshold);
+	ClassDB::bind_method(D_METHOD("get_tension_taper_threshold"),
+			&PBDSolver::get_tension_taper_threshold);
 	ClassDB::bind_method(D_METHOD("set_sor_factor", "factor"),
 			&PBDSolver::set_sor_factor);
 	ClassDB::bind_method(D_METHOD("get_sor_factor"), &PBDSolver::get_sor_factor);

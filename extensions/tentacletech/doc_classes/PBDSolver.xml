@@ -10,6 +10,13 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="apply_target_rate_limit">
+			<return type="void" />
+			<param index="0" name="dt" type="float" />
+			<description>
+				Slice 4T — clamps the per-tick movement of the singleton tip target and every distributed pose target so the magnitude does not exceed [code]target_velocity_max × dt[/code]. Called at the top of [method tick] before [code]predict()[/code]; substeps within the tick see the clamped values. Cold-start (first call after [method set_target] / [method set_pose_targets] / [method clear_target] / [method clear_pose_targets]) bypasses the cap so initial settling isn't artificially slow. No-op when [code]target_velocity_max[/code] is 0.
+			</description>
+		</method>
 		<method name="clear_anchor">
 			<return type="void" />
 			<description>
@@ -28,6 +35,16 @@
 		<method name="clear_target">
 			<return type="void" />
 			<description>
+			</description>
+		</method>
+		<method name="compute_tension_taper_factor" qualifiers="static">
+			<return type="float" />
+			<param index="0" name="threshold" type="float" />
+			<param index="1" name="mu_s" type="float" />
+			<param index="2" name="normal_lambda" type="float" />
+			<param index="3" name="tangent_lambda_magnitude" type="float" />
+			<description>
+				Slice 4Q-fix static helper. Returns the multiplier to apply to target stiffness for an in-contact particle whose dominant contact slot has the given normal_lambda and tangent_lambda magnitude. Returns 1.0 (no taper) when [code]normal_lambda &lt;= 0[/code], when [code]mu_s &lt;= 0[/code], or when [code]tangent_lambda_magnitude / (mu_s × normal_lambda) &lt;= threshold[/code]. Above threshold, ramps linearly to 0 at saturation ([code]tangent_lambda_magnitude == mu_s × normal_lambda[/code]). The iter loop's target-pull step and the unit test both call this so production and test exercise the same formula.
 			</description>
 		</method>
 		<method name="get_anchor_particle_index" qualifiers="const">
@@ -83,6 +100,18 @@
 		<method name="get_environment_friction_applied" qualifiers="const">
 			<return type="PackedVector3Array" />
 			<description>
+			</description>
+		</method>
+		<method name="get_environment_normal_lambdas_snapshot" qualifiers="const">
+			<return type="PackedFloat32Array" />
+			<description>
+				Slice 4Q diagnostic. Per-slot accumulated normal_lambda (depenetration impulse magnitude per contact) after the most recent [method tick]. Size = [code]particle_count × MAX_CONTACTS_PER_PARTICLE[/code], indexed [code][i × MAX + k][/code]. Inactive slots read 0. Used by stick-slip / wedge-stability diagnostics to verify warm-start preservation across calls and to feed the 4Q-fix taper test path.
+			</description>
+		</method>
+		<method name="get_environment_tangent_lambdas_snapshot" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+				Slice 4Q round-4 diagnostic. Per-slot accumulated tangent_lambda (3D friction impulse vector per contact) after the most recent [method tick]. Mirrors [method get_environment_normal_lambdas_snapshot] but holds friction-displacement vectors. Used to detect stick-slip events: monotone growth of [code].length()[/code] indicates a stuck phase building tension against the static-friction cone; sudden drops indicate kinetic-cone slip releases.
 			</description>
 		</method>
 		<method name="get_gravity" qualifiers="const">
@@ -200,14 +229,38 @@
 			<description>
 			</description>
 		</method>
+		<method name="get_target_position_clamped" qualifiers="const">
+			<return type="Vector3" />
+			<description>
+				Slice 4T diagnostic. Returns the post-rate-limit target position used by the most recent [method tick] — i.e., the actual target the solver projected toward after [method apply_target_rate_limit] applied. Differs from [method get_target_position] (which returns the raw driver-supplied value) when rate-limiting is engaged. Read for tests + tooling that need to see what the solver actually pulled toward this tick.
+			</description>
+		</method>
 		<method name="get_target_position" qualifiers="const">
 			<return type="Vector3" />
 			<description>
 			</description>
 		</method>
+		<method name="get_target_softness_when_blocked" qualifiers="const">
+			<return type="float" />
+			<description>
+				Slice 4M-pre.2. Multiplier on target-pull stiffness for in-contact particles. Composes multiplicatively with the slice 4Q-fix tension taper. See [method set_target_softness_when_blocked].
+			</description>
+		</method>
 		<method name="get_target_stiffness" qualifiers="const">
 			<return type="float" />
 			<description>
+			</description>
+		</method>
+		<method name="get_target_velocity_max" qualifiers="const">
+			<return type="float" />
+			<description>
+				Slice 4T pose-target rate cap (m/s). See [method set_target_velocity_max].
+			</description>
+		</method>
+		<method name="get_tension_taper_threshold" qualifiers="const">
+			<return type="float" />
+			<description>
+				Slice 4Q-fix tension taper engagement threshold. See [method set_tension_taper_threshold].
 			</description>
 		</method>
 		<method name="has_anchor" qualifiers="const">
@@ -225,6 +278,12 @@
 			<param index="0" name="particle_count" type="int" />
 			<param index="1" name="segment_length" type="float" />
 			<description>
+			</description>
+		</method>
+		<method name="reset_environment_contact_lambdas">
+			<return type="void" />
+			<description>
+				Slice 4R. Zeros all per-slot [code]normal_lambda[/code] and [code]tangent_lambda[/code] accumulators without touching contact points / normals / RIDs. Called by [Tentacle] once at the start of each outer physics tick (alongside [code]reset_friction_applied[/code]) so the RID-keyed warm-start in [method set_environment_contacts_multi] only persists [i]within[/i] a tick (across substeps) and not across outer ticks. Cross-tick lambda persistence was deliberately excluded from 4R scope because it interacts destructively with the slice 4Q-fix taper formula.
 			</description>
 		</method>
 		<method name="set_anchor">
@@ -276,12 +335,14 @@
 			<description>
 			</description>
 		</method>
-		<method name="set_environment_contacts_per_particle">
+		<method name="set_environment_contacts_multi">
 			<return type="void" />
 			<param index="0" name="points" type="PackedVector3Array" />
 			<param index="1" name="normals" type="PackedVector3Array" />
-			<param index="2" name="active" type="PackedByteArray" />
+			<param index="2" name="counts" type="PackedByteArray" />
+			<param index="3" name="rids" type="PackedInt64Array" />
 			<description>
+				Replaces the older single-contact [code]set_environment_contacts_per_particle[/code] since slice 4M (multi-contact manifold) and slice 4R (RID-keyed warm-start). Per-particle up to [code]MAX_CONTACTS_PER_PARTICLE[/code] slots; [code]points[/code] / [code]normals[/code] / [code]rids[/code] are flat arrays sized [code]N × MAX[/code] (slot k for particle i at index [code]i × MAX + k[/code]); [code]counts[/code] is N bytes (active slots per particle, 0..MAX). The [code]rids[/code] entries are slot collider RIDs from [code]RID.get_id()[/code]; on intake, an incoming slot whose RID matches the previous tick's slot for the same particle warm-starts its [code]normal_lambda[/code] + [code]tangent_lambda[/code] (Obi-style stable contact pairs). Non-matching RIDs zero the slot's lambdas. Slot ordering between calls does not have to be stable — the warm-start search is RID-keyed.
 			</description>
 		</method>
 		<method name="set_friction">
@@ -344,6 +405,27 @@
 			<param index="1" name="world_pos" type="Vector3" />
 			<param index="2" name="stiffness" type="float" />
 			<description>
+			</description>
+		</method>
+		<method name="set_target_softness_when_blocked">
+			<return type="void" />
+			<param index="0" name="softness" type="float" />
+			<description>
+				Slice 4M-pre.2. Multiplier on target-pull stiffness when an in-contact particle is being pulled. Below 1.0 lets the chain *give* to constraints instead of fighting them — fixes the "tentacle jitters / tries to break out" failure mode in tight spaces. Default 0.3. Composes multiplicatively with the slice 4Q-fix tension taper.
+			</description>
+		</method>
+		<method name="set_target_velocity_max">
+			<return type="void" />
+			<param index="0" name="value" type="float" />
+			<description>
+				Slice 4T. Maximum per-tick movement of the singleton target and pose targets (m/s). Cold-start bypasses the cap so initial settling isn't artificially slow. Default 5.0 m/s allows the bundled probing mood's 1.5 Hz × 0.15 m thrust (~1.4 m/s peak) with headroom. 0 disables. Source-side complement to the slice 4Q-fix tension taper — taper caps tension at the friction cone, this caps tension at the source. See [method apply_target_rate_limit].
+			</description>
+		</method>
+		<method name="set_tension_taper_threshold">
+			<return type="void" />
+			<param index="0" name="threshold" type="float" />
+			<description>
+				Slice 4Q-fix engagement threshold. When an in-contact particle's dominant slot has [code]tangent_lambda &gt; threshold × static_cone[/code] (where [code]static_cone = mu_s × normal_lambda[/code]), the target stiffness is scaled linearly to zero at saturation ([code]tangent_lambda == static_cone[/code]). Default 0.8 — chain stops adding tension the static-friction cone can't hold, eliminating the build-then-slip stick-slip cycle observed under probing + low-lubricity contact. 1.0 disables (taper never engages); 0.0 always-engaged. See [method compute_tension_taper_factor] for the formula.
 			</description>
 		</method>
 		<method name="set_uniform_rest_length">
