@@ -106,7 +106,6 @@ void PBDSolver::tick(float p_dt) {
 }
 
 void PBDSolver::predict(float p_dt) {
-	float dt2 = p_dt * p_dt;
 	int n = (int)particles.size();
 	// Slice 4M-XPBD — distance constraint Lagrange multipliers reset each
 	// tick (per-substep once 4O lands). Forgetting this reset = compounding
@@ -122,15 +121,29 @@ void PBDSolver::predict(float p_dt) {
 	// Slice 4K: gravity-support preconditions. Probe runs before solver.tick(),
 	// so env_contact_count / env_contact_normals reflect THIS tick's contacts
 	// already. Slice 4M: with multi-contact, project gravity onto the
-	// tangent plane of the deepest contact (slot 0). Two-contact wedge:
-	// the bisector argument applies to friction, but for gravity support
-	// the deepest contact carries the load and the second contact's
-	// projection in iterate step 3 will absorb the residual normal
-	// component if needed.
+	// tangent plane of the deepest contact (slot 0).
 	bool have_contact_data = (env_contact_count.size() == n &&
 			env_contact_normals.size() == n * MAX_CONTACTS);
 	const uint8_t *cnt = have_contact_data ? env_contact_count.ptr() : nullptr;
 	const Vector3 *cn_arr = have_contact_data ? env_contact_normals.ptr() : nullptr;
+
+	// Slice 4S.1 — symplectic Euler integration. Replaces position-Verlet
+	// (`p.position += velocity + gravity*dt²`). Pattern from Obi
+	// `Resources/Compute/Solver.compute:128-156` + `Integration.cginc:6-9`:
+	//   velocity += gravity_acceleration × dt
+	//   position += velocity × dt
+	//
+	// Velocity is now first-class state on TentacleParticle; finalize()
+	// recomputes it post-constraint (from `(position - prev_position) / dt`)
+	// so position-modifying constraints map back to correct velocity.
+	//
+	// Note (spec divergence flagged in 4S.1 report): symplectic Euler from
+	// rest gives x_N = (N+1)/(2N) × g·dt² across N substeps — same quadratic
+	// truncation as position-Verlet (5/8 × g·dt² at N=4). Velocity IS
+	// substep-invariant: v_N = N × g × sub_dt = g·dt. Position invariance
+	// would require velocity-Verlet (`x += v·dt + ½·a·dt²`); not in this
+	// slice's scope.
+	const Vector3 gravity_velocity_delta_base = gravity * p_dt;
 	for (int i = 0; i < n; i++) {
 		TentacleParticle &p = particles[i];
 		// Slice 4C: clear the per-tick contact flag here so the iteration
@@ -139,28 +152,32 @@ void PBDSolver::predict(float p_dt) {
 		// it doesn't depend on iter step 3 having run yet.
 		p.in_contact_this_tick = false;
 		if (p.inv_mass <= 0.0f) {
-			// Pinned: prev_position tracks position so velocity stays zero.
+			// Pinned: prev_position tracks position so the friction step's
+			// per-tick tangent read sees zero motion; velocity stays zero
+			// (set in finalize for consistency).
 			p.prev_position = p.position;
+			p.velocity = Vector3();
 			continue;
 		}
-		Vector3 temp_prev = p.prev_position;
+		// Snapshot position-at-substep-start. Friction step (iterate step 5)
+		// reads `position - prev_position` for per-substep tangent motion.
 		p.prev_position = p.position;
-		Vector3 velocity = (p.position - temp_prev) * damping;
-		Vector3 gravity_step = gravity * dt2;
+		// Build the gravity-velocity delta for this particle. Slice 4K
+		// support_in_contact: in contact, project the gravity-velocity
+		// delta onto the deepest contact's tangent plane so the contact
+		// supports the normal-direction gravity component. Only tangent
+		// (slope-driven) gravity drives the particle. Eliminates the
+		// "gravity sinks particle into surface, iter loop pushes back out"
+		// cycle that seeds tick-rate jitter.
+		Vector3 g_delta = gravity_velocity_delta_base;
 		if (support_in_contact && have_contact_data && cnt[i] != 0) {
-			// In contact: project gravity onto the deepest contact's tangent
-			// plane. The contact supports the normal-direction gravity
-			// component; only tangent component (slope-driven sliding)
-			// acts on the particle. Eliminates the per-tick "gravity sinks
-			// particle into surface, iter loop pushes back out" cycle
-			// which seeds the tick-rate jitter the user reported (slice
-			// 4K). Slot 0 is the deepest contact (slice 4M.2 ordering).
 			Vector3 cn = cn_arr[i * MAX_CONTACTS + 0];
 			if (cn.length_squared() > 1e-10f) {
-				gravity_step -= cn * gravity_step.dot(cn);
+				g_delta -= cn * g_delta.dot(cn);
 			}
 		}
-		p.position += velocity + gravity_step;
+		p.velocity += g_delta;
+		p.position += p.velocity * p_dt;
 	}
 }
 
@@ -636,47 +653,76 @@ void PBDSolver::finalize(float p_dt) {
 		}
 	}
 
-	// Slice 4I — contact velocity damping (§4.3 footnote, addresses tick-rate
-	// jitter from constraint conflict during contact). PBD's iterate loop
-	// can fail to converge when bending / pose / distance pull a contacting
-	// particle in directions collision must reverse — each iter introduces
-	// non-zero net displacement, summed across iter_count this becomes
-	// implicit per-tick velocity that carries forward via Verlet
-	// integration in next predict(). Lerp prev_position toward position for
-	// in-contact particles to bleed off that residual velocity at tick end.
-	// 0 = disabled, 1 = fully kill velocity. 0.5 default halves it per
-	// tick, killing visible oscillation in 4–5 ticks while leaving
-	// legitimate sliding (high tick-to-tick velocity, decays slowly) intact.
-	if (contact_velocity_damping > 1e-5f) {
-		float t = contact_velocity_damping;
-		if (t > 1.0f) t = 1.0f;
+	// Slice 4S.1 — UpdateVelocities. Lifted from Obi `Solver.compute:160-186`
+	// (the `UpdateVelocities` kernel + `DifferentiateLinear`):
+	//   v_post = (position - prev_position) / dt
+	//
+	// Recomputes velocity AFTER all constraint passes so position-only
+	// constraint deltas map back to a coherent velocity for the next
+	// substep's predict(). Damping (per-tentacle) + contact_velocity_damping
+	// (per-mood, in-contact only) + sleep_threshold (per-mood, in-contact
+	// only) all migrate from prev_position-side modifications (Verlet) to
+	// velocity-side decays here.
+	//
+	// Damping: legacy semantics were `velocity *= damping` per tick at the
+	// 60 Hz reference. dt-correct exponential form: `v *= damping^(dt × 60)`.
+	// For dt = 1/60: scale = damping (matches old). For sub_dt = 1/240:
+	// scale = damping^(1/4) (correctly less per-substep damping when we
+	// have more substeps; total per-outer-tick damping = damping × itself
+	// over 4 substeps = damping itself, matching the legacy 60 Hz default).
+	if (p_dt > 0.0f) {
+		float ref_60_factor = p_dt * 60.0f;
+		float vel_scale = (damping > 0.0f && damping <= 1.0f)
+				? Math::pow(damping, ref_60_factor)
+				: damping;
 		for (int i = 0; i < n; i++) {
 			TentacleParticle &p = particles[i];
-			if (!p.in_contact_this_tick) continue;
-			if (p.inv_mass <= 0.0f) continue;
-			p.prev_position = p.prev_position.lerp(p.position, t);
+			if (p.inv_mass <= 0.0f) {
+				p.velocity = Vector3();
+				continue;
+			}
+			p.velocity = (p.position - p.prev_position) / p_dt;
+			p.velocity *= vel_scale;
 		}
-	}
 
-	// Slice 4P — sleep threshold. In-contact particles whose tick-rate
-	// velocity falls below `sleep_threshold` (m/s) have their position
-	// snapped to prev_position, killing residual implicit velocity from
-	// un-converged constraints. Default 0 = disabled. Pattern from
-	// `pbd_research/Obi/Resources/Compute/Solver.compute:204-217`. Free
-	// (out-of-contact) particles never sleep so a tentacle hanging in air
-	// keeps integrating gravity normally; only settled-against-surface
-	// particles get clamped. The check uses `(Δx)² ≤ (threshold·dt)²` so
-	// the comparison is a single multiply per particle.
-	if (sleep_threshold > 0.0f) {
-		float thr_dx = sleep_threshold * p_dt;
-		float thr_dx2 = thr_dx * thr_dx;
-		for (int i = 0; i < n; i++) {
-			TentacleParticle &p = particles[i];
-			if (!p.in_contact_this_tick) continue;
-			if (p.inv_mass <= 0.0f) continue;
-			Vector3 v = p.position - p.prev_position;
-			if (v.length_squared() <= thr_dx2) {
-				p.position = p.prev_position;
+		// Slice 4I → 4S.1 — contact velocity damping. Verlet form lerped
+		// prev_position toward position for in-contact particles. Euler
+		// equivalent: `v *= (1 - cvd × dt × 60)` for in-contact particles.
+		// Same dt-correct exponential pattern; same intent (bleed off
+		// residual velocity from un-converged iterate loop in tight
+		// contact). 0 = disabled, 1 = full per-tick kill at 60 Hz.
+		if (contact_velocity_damping > 1e-5f) {
+			float t = contact_velocity_damping;
+			if (t > 1.0f) t = 1.0f;
+			float cvd_factor = 1.0f - t * ref_60_factor;
+			if (cvd_factor < 0.0f) cvd_factor = 0.0f;
+			for (int i = 0; i < n; i++) {
+				TentacleParticle &p = particles[i];
+				if (!p.in_contact_this_tick) continue;
+				if (p.inv_mass <= 0.0f) continue;
+				p.velocity *= cvd_factor;
+			}
+		}
+
+		// Slice 4P → 4S.1 — sleep threshold (m/s). In-contact particles
+		// whose post-damping velocity magnitude falls below the threshold
+		// get position snapped back to prev_position AND velocity zeroed.
+		// Verlet form was `(position - prev_position).length²() ≤
+		// (threshold × dt)²` — equivalent under Euler is `velocity.length()
+		// ≤ threshold` since `v = (pos - prev) / dt` (post-damping; the
+		// scale only matters by a small factor). Default 0 = disabled.
+		// Free (out-of-contact) particles never sleep so a hanging
+		// tentacle keeps integrating gravity normally.
+		if (sleep_threshold > 0.0f) {
+			float thr2 = sleep_threshold * sleep_threshold;
+			for (int i = 0; i < n; i++) {
+				TentacleParticle &p = particles[i];
+				if (!p.in_contact_this_tick) continue;
+				if (p.inv_mass <= 0.0f) continue;
+				if (p.velocity.length_squared() <= thr2) {
+					p.position = p.prev_position;
+					p.velocity = Vector3();
+				}
 			}
 		}
 	}
@@ -1007,6 +1053,21 @@ void PBDSolver::set_particle_position(int i, const Vector3 &p) {
 	if (i < 0 || i >= (int)particles.size()) return;
 	particles[i].position = p;
 	particles[i].prev_position = p;
+	// Slice 4S.1 — external position writes also zero explicit velocity.
+	// Without this, the next finalize would synthesize a huge velocity
+	// from the (large) position step, kicking the chain on the next
+	// substep's predict.
+	particles[i].velocity = Vector3();
+}
+
+Vector3 PBDSolver::get_particle_velocity(int i) const {
+	if (i < 0 || i >= (int)particles.size()) return Vector3();
+	return particles[i].velocity;
+}
+
+void PBDSolver::set_particle_velocity(int i, const Vector3 &p_v) {
+	if (i < 0 || i >= (int)particles.size()) return;
+	particles[i].velocity = p_v;
 }
 
 float PBDSolver::get_particle_inv_mass(int i) const {
@@ -1047,6 +1108,17 @@ PackedVector3Array PBDSolver::get_particle_positions() const {
 	Vector3 *ptr = out.ptrw();
 	for (int i = 0; i < n; i++) {
 		ptr[i] = particles[i].position;
+	}
+	return out;
+}
+
+PackedVector3Array PBDSolver::get_particle_velocities() const {
+	PackedVector3Array out;
+	int n = (int)particles.size();
+	out.resize(n);
+	Vector3 *ptr = out.ptrw();
+	for (int i = 0; i < n; i++) {
+		ptr[i] = particles[i].velocity;
 	}
 	return out;
 }
@@ -1478,6 +1550,8 @@ void PBDSolver::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_particle_position", "index"), &PBDSolver::get_particle_position);
 	ClassDB::bind_method(D_METHOD("set_particle_position", "index", "position"), &PBDSolver::set_particle_position);
+	ClassDB::bind_method(D_METHOD("get_particle_velocity", "index"), &PBDSolver::get_particle_velocity);
+	ClassDB::bind_method(D_METHOD("set_particle_velocity", "index", "velocity"), &PBDSolver::set_particle_velocity);
 	ClassDB::bind_method(D_METHOD("get_particle_prev_position", "index"), &PBDSolver::get_particle_prev_position);
 	ClassDB::bind_method(D_METHOD("get_particle_inv_mass", "index"), &PBDSolver::get_particle_inv_mass);
 	ClassDB::bind_method(D_METHOD("set_particle_inv_mass", "index", "inv_mass"), &PBDSolver::set_particle_inv_mass);
@@ -1486,6 +1560,7 @@ void PBDSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_particle_girth_scale", "index"), &PBDSolver::get_particle_girth_scale);
 
 	ClassDB::bind_method(D_METHOD("get_particle_positions"), &PBDSolver::get_particle_positions);
+	ClassDB::bind_method(D_METHOD("get_particle_velocities"), &PBDSolver::get_particle_velocities);
 	ClassDB::bind_method(D_METHOD("get_particle_inv_masses"), &PBDSolver::get_particle_inv_masses);
 	ClassDB::bind_method(D_METHOD("get_segment_stretch_ratios"), &PBDSolver::get_segment_stretch_ratios);
 	ClassDB::bind_method(D_METHOD("get_particle_girth_scales"), &PBDSolver::get_particle_girth_scales);

@@ -107,17 +107,19 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 	# Both knob-defaults (5.0 m/s) leave headroom for probing's 1.4 m/s peak,
 	# so A and B should match the 4Q-fix baseline. C clamps probing thrust.
 	# Runs are deterministic (randomize_phase_on_ready=false on driver).
-	var disabled: Dictionary = await _run_one_arm(1.0, 5.0)
-	var defaultv: Dictionary = await _run_one_arm(0.8, 5.0)
+	# Default sub=1, iter=4 for arms A/B/C (preserve 4Q-fix baseline).
+	var disabled: Dictionary = await _run_one_arm(1.0, 5.0, 1, 4)
+	var defaultv: Dictionary = await _run_one_arm(0.8, 5.0, 1, 4)
 	# Aggressive cap for this scene's chain (0.4 m × probing thrust). Per-
-	# particle peak velocity is ~0.5 m/s (chain × thrust amplitude × ω,
-	# scaled by s_norm + attractor lerp). Sweep showed the cap engages
-	# meaningfully at tvm=0.2 (~16% leg_ang reduction). Tighter caps
-	# (tvm < 0.1) hit a U-shape where the chain can't keep up with the
-	# driver and leg motion increases. Flagged as a spec divergence in
-	# the 4T report — the slice prompt's tvm=1.5 + < 0.5 rad/s bound
-	# was sized for longer chains; this scene's optimum is tvm≈0.2.
-	var aggressive: Dictionary = await _run_one_arm(0.8, 0.2)
+	# particle peak velocity is ~0.5 m/s. Sweep showed cap engages at
+	# tvm=0.2 (~16% leg_ang reduction). Spec divergence in 4T report.
+	var aggressive: Dictionary = await _run_one_arm(0.8, 0.2, 1, 4)
+	# Slice 4S.1 spot-check: 4×1 substep flip under symplectic Euler.
+	# Pre-4S.1 (4R): same arm regressed to leg_ang_max=2.03 (taper feedback
+	# loop). Post-4S.1: explicit velocity field + UpdateVelocities pattern
+	# may shift behaviour. Reported informationally; bounds asserted only
+	# loosely (no regression below the 4Q-fix baseline at sub=1).
+	var sub4_default: Dictionary = await _run_one_arm(0.8, 5.0, 4, 1)
 
 	print("    [taper OFF (thr=1.0) tvm=5.0]  leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
 			% [disabled.leg_ang_max, disabled.saturation_events,
@@ -128,6 +130,9 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 	print("    [taper ON  (thr=0.8) tvm=0.2]  leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
 			% [aggressive.leg_ang_max, aggressive.saturation_events,
 				aggressive.max_tlam, aggressive.static_cone, aggressive.tlam_over_cone])
+	print("    [4S.1 sub=4 iter=1 tvm=5.0]    leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
+			% [sub4_default.leg_ang_max, sub4_default.saturation_events,
+				sub4_default.max_tlam, sub4_default.static_cone, sub4_default.tlam_over_cone])
 	print("    Expected bounds:")
 	print("      taper-ON default vs OFF:   leg_ang_max ≤ %.2f × disabled" % ANG_MAX_REDUCTION_RATIO)
 	print("      taper-ON default vs OFF:   saturation ≤ disabled")
@@ -183,10 +188,30 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 		push_error("4T aggressive saturation_events %d > default %d — rate limit made stick-slip worse"
 				% [aggressive.saturation_events, defaultv.saturation_events])
 		return false
+
+	# Slice 4S.1 spot-check: sub=4/iter=1 must NOT regress below the
+	# taper-OFF baseline (the disabled arm at sub=1). That's the sanity
+	# floor — pre-4S.1 (4R) the sub=4 arm went to 2.03 rad/s (ABOVE
+	# the disabled baseline of 1.39). Post-4S.1 we expect the explicit
+	# velocity field to keep the chain bounded.
+	# Bound: sub4_default.leg_ang_max ≤ disabled.leg_ang_max × 1.05 (5%
+	# tolerance for stochastic noise; tighter would risk false fails).
+	# Whether sub=4 BEATS sub=1 is informational — symplectic Euler still
+	# under-integrates gravity at N=4 by 5/8× per the 4S.1 spec divergence
+	# analysis (the same as Verlet did), so we don't expect strict
+	# improvement. The proof point is: no regression past the disabled
+	# floor.
+	if sub4_default.leg_ang_max > disabled.leg_ang_max * 1.05:
+		push_error(("4S.1 sub=4 leg_ang_max %.3f > 1.05 × disabled %.3f (= %.3f) — "
+				+ "substep flip regresses past taper-OFF baseline; see 4R / 4S.1 spec divergences")
+				% [sub4_default.leg_ang_max, disabled.leg_ang_max,
+					disabled.leg_ang_max * 1.05])
+		return false
 	return true
 
 
-func _run_one_arm(p_threshold: float, p_target_velocity_max: float) -> Dictionary:
+func _run_one_arm(p_threshold: float, p_target_velocity_max: float,
+		p_substep_count: int = 1, p_iter_count: int = 4) -> Dictionary:
 	for c in root.get_children():
 		root.remove_child(c)
 		c.free()
@@ -234,12 +259,16 @@ func _run_one_arm(p_threshold: float, p_target_velocity_max: float) -> Dictionar
 	driver.mood = mood_res
 	driver.rest_direction = Vector3(0.0, -1.0, 0.0)
 	t.add_child(driver)
-	# Mood applies its own tension_taper_threshold (default 0.8) and
-	# target_velocity_max (default 5.0) on _apply_mood. Re-apply the
-	# test's chosen values AFTER the driver's _ready / _apply_mood has
-	# propagated.
+	# Mood applies its own tension_taper_threshold (default 0.8),
+	# target_velocity_max (default 5.0), and substep_count (default 1).
+	# Re-apply test's chosen values AFTER the driver's _ready /
+	# _apply_mood has propagated. iter_count is per-PBDSolver and
+	# isn't mood-driven, but we override here to nail the configuration
+	# for the 4S.1 sub=4 / iter=1 spot-check.
 	t.tension_taper_threshold = p_threshold
 	t.target_velocity_max = p_target_velocity_max
+	t.substep_count = p_substep_count
+	t.iteration_count = p_iter_count
 
 	for _i in SETTLE_TICKS:
 		await physics_frame

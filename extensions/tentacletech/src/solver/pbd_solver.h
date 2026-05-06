@@ -155,6 +155,13 @@ public:
 
 	godot::Vector3 get_particle_position(int p_index) const;
 	void set_particle_position(int p_index, const godot::Vector3 &p_pos);
+	// Slice 4S.1 — explicit velocity accessors (symplectic Euler).
+	// `set_particle_velocity` is for external state injection (tests,
+	// orifice impulse application). For predict()/finalize() the solver
+	// reads/writes the field directly. Snapshot accessor in the snapshot
+	// block below returns the full per-particle velocity array.
+	godot::Vector3 get_particle_velocity(int p_index) const;
+	void set_particle_velocity(int p_index, const godot::Vector3 &p_v);
 	// Slice 5C-C — read-only access to `prev_position` so external
 	// contact sources (e.g. type-2 friction in `Orifice`) can compute
 	// per-tick slip relative to the tentacle's velocity. Implicit
@@ -169,6 +176,8 @@ public:
 	// Snapshot accessors (PackedArray copies; never live pointers) ---------
 
 	godot::PackedVector3Array get_particle_positions() const;
+	// Slice 4S.1 — explicit velocity snapshot. By-copy; size = particle_count.
+	godot::PackedVector3Array get_particle_velocities() const;
 	godot::PackedFloat32Array get_particle_inv_masses() const;
 	godot::PackedFloat32Array get_segment_stretch_ratios() const;
 	godot::PackedFloat32Array get_particle_girth_scales() const;
@@ -415,9 +424,13 @@ public:
 	// orifice writes the tentacle-side delta here; the rim-side delta
 	// goes through the orifice's per-loop accumulator.
 	//
-	// Critical: this path does NOT touch `prev_position`, so the
-	// implicit Verlet velocity is preserved — what looks like a
-	// "snap" via `set_particle_position` would zero velocity instead.
+	// Critical: this path does NOT touch `prev_position` or `velocity`,
+	// so the explicit velocity (slice 4S.1) is preserved — what looks
+	// like a "snap" via `set_particle_position` would zero both prev
+	// and velocity. Use add_external_position_delta when the orifice
+	// wants to displace the chain through Jacobi accumulation while
+	// keeping the chain's existing momentum; use set_particle_position
+	// when explicitly resetting state.
 	void add_external_position_delta(int p_index, const godot::Vector3 &p_delta);
 	void apply_external_position_deltas();
 
