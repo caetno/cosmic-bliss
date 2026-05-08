@@ -1,0 +1,5 @@
+[gd_scene format=3 uid="uid://chv2fvro5cfw7"]
+
+[ext_resource type="PackedScene" uid="uid://cpsqdsqmhbg5c" path="res://tests/general/model/lux_v4.glb" id="1_jly0q"]
+
+[node name="lux_v4" unique_id=1212846389 instance=ExtResource("1_jly0q")]

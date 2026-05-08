@@ -2,14 +2,14 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bafickviorw38"
+uid="uid://bhicf37ycd2ke"
 path.s3tc="res://.godot/imported/lux_v4_legs bump.png-45edd69495c804212df84b2df42174e6.s3tc.ctex"
 metadata={
 "imported_formats": ["s3tc_bptc"],
 "vram_texture": true
 }
 generator_parameters={
-"md5": "81dc10b1793c8984e110ea8cfa754b85"
+"md5": "b42679b010512f761efb97ef22b9d6d5"
 }
 
 [deps]

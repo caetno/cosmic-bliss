@@ -2,14 +2,14 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://c4hf0d0gohxh1"
+uid="uid://bmpivwoq5yaw4"
 path.s3tc="res://.godot/imported/lux_v4_Lux_GlossTeethTongue.png-cf0b1fc1c0d2995f76b6935813cedff0.s3tc.ctex"
 metadata={
 "imported_formats": ["s3tc_bptc"],
 "vram_texture": true
 }
 generator_parameters={
-"md5": "f4be92059ecbcc34d1d1df141d2f96e8"
+"md5": "bcb2b3527e831c0c8c901e9df5c374d2"
 }
 
 [deps]
