@@ -37,3 +37,11 @@ blender/
 *.png
 *.glb
 *.gltf
+
+# Godot import metadata follows the binary it describes. Already-tracked
+# .import files stay tracked (gitignore doesn't retroactively untrack); new
+# .import files for ignored binaries are also ignored to avoid dangling
+# references on fresh checkouts.
+*.png.import
+*.glb.import
+*.gltf.import
