@@ -1,0 +1,68 @@
+[gd_scene load_steps=4 format=3 uid="uid://cml5h5h7i1j8h"]
+
+[ext_resource type="PackedScene" path="res://assets/models/HumanEyeModel.fbx" id="1_mwx1n"]
+[ext_resource type="Material" path="res://assets/materials/eye/eye_material.tres" id="2_j48oi"]
+[ext_resource type="Script" path="res://scenes/eye_test_controller.gd" id="3_c4kia"]
+
+[node name="EyeTest" type="Node3D"]
+script = ExtResource("3_c4kia")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.5)
+current = true
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.707107, -0.5, 0.5, 0, 0.866025, 0.5, -0.707107, -0.353553, 0.612372, 0, 2, 0)
+energy_multiplier = 1.5
+shadow_enabled = true
+
+[node name="Eye" type="Node3D" parent="." instance=ExtResource("1_mwx1n")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="Panel" parent="UI"]
+anchors_left = 0.0
+anchors_top = 0.0
+anchors_right = 0.2
+anchors_bottom = 0.4
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 10.0
+offset_bottom = 10.0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Panel"]
+anchors_left = 0.0
+anchors_top = 0.0
+anchors_right = 1.0
+anchors_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="TitleLabel" type="Label" parent="UI/Panel/VBoxContainer"]
+text = "Eye Shader Test"
+custom_minimum_size = Vector2(0, 30)
+
+[node name="PupilLabel" type="Label" parent="UI/Panel/VBoxContainer"]
+text = "Pupil Aperture: 0.50"
+custom_minimum_size = Vector2(0, 25)
+
+[node name="PupilSlider" type="HSlider" parent="UI/Panel/VBoxContainer"]
+min_value = 0.0
+max_value = 1.0
+value = 0.5
+custom_minimum_size = Vector2(0, 30)
+
+[node name="DebugLabel" type="Label" parent="UI/Panel/VBoxContainer"]
+text = "Debug Mode: OFF"
+custom_minimum_size = Vector2(0, 25)
+
+[node name="DebugButton" type="CheckButton" parent="UI/Panel/VBoxContainer"]
+button_pressed = false
+custom_minimum_size = Vector2(0, 30)
+text = "Show Debug"
+
+[connection signal="value_changed" from="UI/Panel/VBoxContainer/PupilSlider" to="." method="_on_pupil_slider_changed"]
+[connection signal="toggled" from="UI/Panel/VBoxContainer/DebugButton" to="." method="_on_debug_button_toggled"]

@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Cosmic Bliss"
-run/main_scene="uid://hff1bdxe6arh"
+run/main_scene="uid://cpsqdsqmhbg5c"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -28,3 +28,4 @@ jolt_physics_3d/limits/max_angular_velocity=4.71238898038469
 [rendering]
 
 rendering_device/driver.windows="d3d12"
+environment/subsurface_scattering/subsurface_scattering_quality=3
