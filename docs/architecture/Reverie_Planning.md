@@ -306,15 +306,32 @@ Reaction profiles select pattern stacks per mindset:
 
 ### 4.3 Vocalization
 
-Reverie maintains a vocal state (current audibility, timbre, pace) and queues one-shot lines when events warrant.
+Reverie maintains a vocal state (current audibility, timbre, pace) across two layered sound sources — a **discrete one-shot line layer** and a **sustained synthesized layer**. They run simultaneously and address different aspects of vocal expression.
 
-Inputs to vocalization selection:
+**Layer 1 — One-shot lines (sample bank).** Reverie queues prerecorded vocal lines when events warrant.
+
+Inputs to line selection:
 - Recent events (BulbPop often triggers a sharp gasp; GripBroke often triggers a release sigh)
 - State distribution (what emotional color)
 - Mindset (tone/pacing — feral = louder, tender = softer)
 - Duration since last line (don't spam)
 
 Output: line ID + volume + pitch + timbre. Consumed by an audio playback subsystem that holds the voice samples.
+
+**Layer 2 — Sustained vocal synthesis (procedural).** A continuous formant + breath synthesizer produces the *sustained* vocal layer (moans, sighs, ragged breath, drawn-out gasps) that one-shot samples cannot cover without combinatorial sample-bank work. Lives underneath the line layer; both can be active at once (a sharp line cuts through a sustained moan bed naturally).
+
+Inputs to the synthesizer (all from Reverie's existing bus reads/writes — no new state):
+- `body_rhythm_phase` (read; integrated, shared with Marionette + tentacle RhythmSyncedProbe per §3.1) — drives the moan envelope's amplitude oscillation, locking vocal rhythm to body rhythm.
+- `breath_rate_mult`, `breath_depth_mult` (own writes; §3.2) — drive breath amplitude and rate.
+- `body_strain` (read; §3.6) — modulates timbre toward strained / ragged.
+- State distribution — base formant set selection (aroused / pained / overwhelmed produce distinct vowel-tract resonances).
+- Mindset — global timbre and breathiness shaping.
+
+Output: an additive synth bus — formant filter bank + breath noise generator + glottal envelope — mixed alongside the line samples through the same `AudioStreamPlayer3D`. No new bus channels; no new authoring resources at v1 (synth parameters bake from state + mindset via a fixed mapping; per-hero overrides are a future addition if needed).
+
+**Why both layers.** Discrete vocalizations (gasps, words, grunts) are events; sample is the right grain. Sustained moan-bed and breath are continuous; synthesis is the right grain — a sample bank cannot match the continuous variation in pitch, breathiness, and rhythm that the bus already gives us for free. Forcing the sustained layer through samples produces audible looping or rate-discretization; forcing the discrete layer through synthesis loses transient quality.
+
+**Phase placement.** Layer 1 ships in **Phase R5 — Vocalization queue** (§9). Layer 2 — sustained synthesized vocalization — lands as a follow-on (call it **Phase R5.5**), gated on TentacleTech Phase 6 having shipped the audio-thread `AudioStreamPlayback` infrastructure that §9.1 of `docs/architecture/TentacleTech_Architecture.md` describes. Reverie can ship its full feature set with Layer 1 only; Layer 2 is a quality upgrade rather than a feature dependency.
 
 ### 4.4 Shader parameters
 
@@ -469,7 +486,8 @@ Not starting yet; rough outline for later:
 3. **Phase R3 — Facial blendshape output.** Author a first set of reaction profiles. Verify faces blend smoothly across state transitions.
 3.5. **Phase R3.5 — Attention and gaze.** Implement salience function, attention-target selection with hysteresis, modulation-channel write-out. Verify that Marionette's neck driver and the facial system's eye aim both respond correctly to the attention channel. Test player-control branching by toggling `tentacle_controlled_by` manually and confirming gaze tracks.
 4. **Phase R4 — Shader parameters.** Flushing, sweat, tear tracks. Hero looks alive in response to physics.
-5. **Phase R5 — Vocalization queue.** Basic one-shot lines tied to major events.
+5. **Phase R5 — Vocalization queue (Layer 1).** Basic one-shot lines tied to major events. See §4.3 Layer 1.
+5.5. **Phase R5.5 — Sustained vocal synthesis (Layer 2).** Formant + breath synthesizer driven by `body_rhythm_phase` + breath modulation + `body_strain` + state. Mixed alongside Layer 1 line samples. Gated on TentacleTech Phase 6 audio-thread `AudioStreamPlayback` infrastructure (`TentacleTech_Architecture.md` §9.1). See §4.3 Layer 2.
 6. **Phase R6 — Posture patterns + engagement vector + frequency compliance.** When Marionette's composer (P10) is ready, drive body postures via the pattern library (§5.5), publish the engagement vector (§3.4 / §5.6), and write the active frequency-compliance curve (§3.5 / §5.7). Reverie does not write joint angles; the composer turns the per-tick triple (`engagement_vector`, `pattern_stack`, `frequency_compliance_curve`) into per-bone effort. Read `body_strain` (§3.6) and feed back into mindset drift toward Overwhelmed.
 6.5. **Phase R6.5 — Peristalsis and ritual reactions.** Wire Reverie to write `peristalsis_*` channels based on state (e.g., high `Surrendered` + event pressure → expulsion waves; high `Anxious` → retention waves). Implement reaction profile branches for `PayloadDeposited` / `PayloadExpelled` / `RingTransitStart` / `RingTransitEnd` (distinct vocalizations and facial beats). Test with Scenario 12 and Scenario 13 setups.
 7. **Phase R7 — Mindset dynamics.** Long-term accumulators affecting state gains.

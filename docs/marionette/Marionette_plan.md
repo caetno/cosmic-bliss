@@ -1062,6 +1062,8 @@ demo/
 
 ## Soft-tissue jiggle bone clusters
 
+> **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires the "jiggle bones must be in the Blender skeleton at modeling time" gotcha. Jiggle attachments become Godot-side `SurfaceJiggleAttachment` nodes placed under the hero scene; the surface field auto-derives the per-vertex skinning weight. The shipped breast jiggle on kasumi (translation-only SPD) keeps the same physics; only the authoring path migrates. New jiggle attachments (glutes, jowls) become trivially addable without re-export. Apply this amendment after §17.5 lands.
+
 Non-rim soft tissue regions (gluteus, breast, belly, jowls, etc.) currently have no autonomous dynamics: TentacleTech's bulger system (`docs/architecture/TentacleTech_Architecture.md` §7) deforms them while a contact is active, but bulger eviction fade is 2 frames (§7.5) — once contact ends, motion stops. Real fat tissue keeps wobbling for ~1 second after impact.
 
 **Solution: jiggle bone clusters.** Per soft region, 1–2 child bones with translation-only SPD (rotational SPD deferred — see below), parented to a host bone (hip / ribcage / pelvis). Authored once per hero in Blender; skin weights paint the soft region's vertices to the jiggle bone with falloff.
@@ -1098,6 +1100,156 @@ Same SPD code Marionette already runs on the spine; copy with different paramete
 **Authoring.** Jiggle bones are added by the same Blender script that authors orifice rim anchors (`docs/architecture/TentacleTech_Architecture.md` §10.4 / §10.6, post-2026-05-03 amendment), under a separate "soft regions" pass. Per-hero parameter overrides land on a `JiggleProfile` resource analogous to `OrificeProfile`.
 
 **Acceptance.** Slap the gluteus with a tentacle and detach. Visible wobble persists ≥ 0.6 s after detachment, decaying smoothly.
+
+---
+
+## Soft-region particle clusters (post-jiggle deformation layer)
+
+> Opened 2026-05-07. Brief in `docs/Cosmic_Bliss_Update_2026-05-07_procedural_audio_and_soft_regions.md`. Architectural prerequisite: TentacleTech Phase 4.5 (Oriented Particles + body-local persistent contacts).
+>
+> **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires the volume-SDF blend for visual mesh deformation in favor of geodesic surface-field weights derived from a prefactored cotan-Laplacian on the body mesh. The volume primitive remains as the particle spawn scaffold; only the visual blend math changes. Authoring contract (host bone + volume + numeric profile) is unchanged for the artist. **Implementation should not begin past §16.1 (resource schemas) until the BodySurfaceField §17 infrastructure lands** — implementing the volume-SDF blend in §16.2+ is wasted work.
+
+### What this is, and what it is not
+
+Jiggle bones (above) give each soft region a *single rigid-with-spring proxy*: the bone wobbles relative to its parent under SPD, and the entire skin region under it follows by skin weights. This produces good wobble after impact but **the region still acts rigidly under penetrating contact** — a tentacle pushing into the inner thigh displaces the thigh-jiggle bone uniformly; the tissue does not part around the tentacle, the tentacle cannot glide *through* a tissue gap, and the silhouette under the tentacle cannot deform locally.
+
+Soft-region clusters add a **deformation layer on top of the jiggle bone**: a sparse set of particles inside the region's volume, shape-matched against a bone-driven rest pose, that deform locally under tentacle contact and re-skin the visible mesh accordingly. Tentacle particles and cluster particles contact each other in the *same* PBD pass (this is why TentacleTech Phase 4.5 Oriented Particles is a prerequisite — it unifies the particle representation across the two systems).
+
+This is **not** a tetrahedral FEM proxy. No tet meshing of the body. No artist-authored tet weights. The reference architecture is shape-matching on overlapping particle clusters (Müller, Heidelberger, Teschner, Gross 2005; Müller 2022 physically-based shape matching) with per-particle rotational state (Müller & Chentanez 2011). Obi's softbody implementation is the closest off-the-shelf analog — same primitives, same authoring shape (volume + parameters), same skinning approach.
+
+### Authoring contract — must stay easy
+
+Per soft region the artist provides exactly three things, all numeric or simple primitive picks:
+
+1. **Host bone** (`NodePath`) — the jiggle bone or anatomical bone the region rides on. Existing rig; nothing new.
+2. **Volume primitive** (`SoftRegionVolume` enum: `Sphere | Capsule | Ellipsoid`, plus extents in host-bone-local space). Authored as a gizmo in the editor — drag a capsule end-cap, pinch the radius. No vertex-painting, no tet authoring, no per-vertex weights.
+3. **A handful of `@export` numbers** on the `SoftRegionProfile` resource: cluster particle count (default 16), shape-match compliance, contact compliance, internal damping, boundary blend radius. Per-hero overrides land on a child resource analogous to `JiggleProfile`.
+
+That is the entire authoring surface. No painting, no per-vertex anything, no resource files authored in third-party tools.
+
+The "mixing simulated and un-simulated body regions" problem is resolved by the **boundary blend** scheme below: it is a per-vertex smooth weight derived automatically from the volume SDF, not artist-painted. The artist never deals with the boundary directly.
+
+### `SoftRegionProfile` resource
+
+```gdscript
+class_name SoftRegionProfile
+extends Resource
+
+# Authoring — three things
+@export var host_bone: NodePath                 # parent rig bone or jiggle bone
+@export var volume_shape: Volume                # Sphere | Capsule | Ellipsoid
+@export var volume_extents: Vector3             # host-bone-local; gizmo-edited
+@export_group("Tuning (defaults are fine)")
+@export var particle_count: int = 16            # 8–32 is the useful range
+@export var shape_match_compliance: float = 1e-4    # XPBD compliance, internal cohesion
+@export var contact_compliance: float = 1e-5        # contact with tentacle particles
+@export var internal_damping: float = 0.10
+@export var boundary_blend_radius: float = 0.04 # metres in bone-local; smooths sim/un-sim transition
+```
+
+Per-hero override container `SoftRegionLibrary` parallel to `JiggleProfile`. Default values produce plausible thigh / glute / breast deformation without per-hero tuning; tuning is parameter sliders, not resource authoring.
+
+### What gets generated automatically (bake time)
+
+A `SoftRegionBaker` editor tool runs once per hero and produces, for each authored region:
+
+1. **Particle lattice.** Uniform-stratified sample of `particle_count` particles inside the volume, in host-bone-local coordinates. Boundary particles snapped onto the volume surface. Stored as a baked array on the resource.
+2. **Cluster rest configuration.** Particle positions in host-bone-local frame at bake time = the rest configuration the shape-match constraint targets each tick.
+3. **Per-vertex influence weights.** For every mesh vertex skinned to the host bone with weight ≥ ε:
+   - Compute signed distance to the volume primitive (cheap: closed-form for sphere / capsule / ellipsoid).
+   - `cluster_blend = 1 - smoothstep(-boundary_blend_radius, 0, signed_distance)` — smooth 1 inside, smooth 0 outside, smooth ramp across the boundary.
+   - For vertices with `cluster_blend > ε`, find the nearest K=4 cluster particles, store K indices + barycentric-style weights in a CUSTOM vertex attribute (analogous to TentacleTech's per-vert `(s, θ, …)` bake).
+   - Vertices with `cluster_blend < ε` get *zero* extra data — they remain pure-LBS.
+
+   This is the only place the simulated/un-simulated mix appears. It is fully automatic from the volume primitive and the existing skin weights.
+
+4. **Tentacle-contact AABB.** Cached per region, refreshed per tick from the host-bone transform.
+
+### Runtime — particle dynamics
+
+Cluster particles share the existing TentacleTech PBD solver (Phase 4.5 Oriented Particles representation; same `TentacleParticle` struct or a sibling `ClusterParticle` with the same SE(3) state). Per tick:
+
+```
+for each soft region:
+    rest_world[i] = host_bone_world * rest_local[i]      // bone-driven rest follows the jiggle bone
+    predict_positions()                                  // semi-implicit Euler with internal damping
+    shape_match_constraint(rest_world, compliance)       // XPBD positional + rotational
+    contact_with_tentacle_particles(contact_compliance)  // same PBD contact loop as tentacle ↔ ragdoll
+    contact_with_other_soft_regions(...)                 // optional, opt-in per profile
+    update_velocities()
+```
+
+Crucially `rest_world` follows the **jiggle bone**, not the parent rigid bone. That means the jiggle layer (bone wobble) and the cluster layer (local tissue deformation) compose: the jiggle bone moves the rest pose; the cluster particles deform around that moving rest. Slap response = jiggle wobble. Penetrating tentacle = local cluster deformation. Both at once = both visible.
+
+Shape matching is the standard Müller 2005 form (Procrustes match against rest, pull toward target). XPBD compliance ≠ pure stiffness gives soft response that doesn't explode at small dt. Per-particle rotational state (Phase 4.5 Oriented Particles) gives the cluster torsional rigidity for free — without it, sparse clusters under tangential tentacle drag spin without resistance. This is why the two systems share particle representation.
+
+### Runtime — visual mesh deformation
+
+The body's `hero_skin.gdshader` (or its appearance equivalent) gains a CUSTOMx-channel cluster-displacement read for vertices marked as soft-region-influenced:
+
+```
+// vertex shader — pseudocode
+vec3 lbs_position = standard_lbs(VERTEX);
+
+// soft-region branch (cluster_blend > 0 only)
+if (cluster_blend > 0.0) {
+    vec3 cluster_offset = vec3(0);
+    for (int k = 0; k < 4; k++) {
+        int pid = cluster_indices[k];
+        cluster_offset += cluster_weights[k] *
+                          (cluster_particle_position[pid] - cluster_rest_position[pid]);
+    }
+    VERTEX = lbs_position + cluster_blend * cluster_offset;
+}
+```
+
+`cluster_particle_position` and `cluster_rest_position` arrive via an RGBA32F data texture (same pattern as TentacleTech's centerline encoding — no SSBOs in spatial shaders in 4.6). Per-frame texture upload is `particle_count × num_regions × 16 bytes`; for 6 regions × 16 particles that's 1.5 kB / frame, trivial.
+
+`cluster_blend` is a per-vertex baked float; `cluster_indices` and `cluster_weights` are per-vertex baked ivec4 / vec4. All three live in CUSTOM channels and are baked once at hero load — no per-frame GDScript work.
+
+### Mixing simulated and un-simulated tissue — the design constraint
+
+This was flagged as the hardest part of the system. The resolution is:
+
+- The mix is **continuous, not discrete.** Every vertex has a `cluster_blend ∈ [0, 1]` and the visual deformation is a linear blend between LBS-only (cluster_blend = 0) and LBS + cluster offset (cluster_blend = 1). There is no boolean "soft vs rigid" partition.
+- The blend weight is **derived automatically** from the volume primitive's signed distance and the existing skin weights; the artist never paints it.
+- The blend is **C1 smooth** at the volume boundary because `smoothstep` is C1.
+- A vertex outside the volume but skin-weighted to the host bone follows the host bone exactly (cluster_blend = 0). Inside the volume, it follows the host bone *plus* cluster offset (cluster_blend ≈ 1). In the boundary band, it follows a smooth interpolation.
+
+The artist's only authoring decision about the boundary is "where is the volume primitive". That's one capsule.
+
+### Cost
+
+| Item | Cost |
+|---|---|
+| Per region per tick | ~16 particles × XPBD shape-match + contact ~ 5 µs |
+| Texture upload | ~1.5 kB/frame total, trivial |
+| Vertex shader add | 4 cluster-position fetches + linear combination per soft-region vertex |
+| Bake (one-time per hero) | seconds — closed-form SDF + nearest-K particle for each vertex |
+
+For 6 soft regions on the hero (gluteus L/R, breast L/R, inner thigh L/R; abdomen optional), total per-tick cost stays well under 50 µs. This is on top of, not instead of, the jiggle-bone SPD layer.
+
+### Phase placement
+
+This work is gated on **TentacleTech Phase 4.5** (Oriented Particles + body-local persistent contacts, see `docs/architecture/TentacleTech_Architecture.md` Phase 4.5). It cannot ship before then because the cluster particles need rotational state and need to share the tentacle's contact persistence machinery. After Phase 4.5 lands:
+
+- **§16.1 — `SoftRegionProfile` + `SoftRegionLibrary` resources.** Schema only; no runtime.
+- **§16.2 — `SoftRegionBaker` editor tool.** Particle lattice, rest config, per-vertex blend / indices / weights, all baked into resources.
+- **§16.3 — `SoftRegionSolver` C++ component.** Reuses TentacleTech's Phase 4.5 PBD solver code (shared `ClusterParticle` representation). Per-tick shape match + contact. RGBA32F upload to skin shader.
+- **§16.4 — Skin shader CUSTOMx fetch + linear combination.** Vertex-shader branch keyed on `cluster_blend > 0`.
+- **§16.5 — Author 2 regions on kasumi (one breast + one inner thigh) end-to-end.** Verify deformation under tentacle penetration; verify silhouette stays plausible at boundary.
+- **§16.6 — Acceptance:** tentacle pushed against inner thigh visibly parts the tissue (tentacle and tissue both show local deformation, tissue closes back when tentacle withdraws); breast deformation under penetrating contact visibly distinct from jiggle-bone-only case. No artist authoring beyond the volume gizmo + numeric profile fields.
+
+### What we explicitly do not do
+
+- **No tetrahedral mesh.** Tet authoring is the canonical "fiddly artistic aspect" we are avoiding. Volume primitive + particle lattice does the job for the body regions in scope (rounded, soft, no internal hard structure).
+- **No `SoftBody3D`.** Forbidden by repo convention.
+- **No per-vertex artist-painted soft mask.** The blend weight is a derived quantity, not authored.
+- **No bidirectional coupling between cluster and ragdoll dynamics this phase.** The jiggle bone is the only ragdoll-side handle; the cluster lives entirely in the PBD layer, contacting only tentacle particles and (optionally) other clusters. If a future scenario needs cluster ↔ ragdoll force feedback, that's a separate phase.
+
+### Open question (deferred)
+
+Whether the cluster shape-matching uses **single global cluster** (Müller 2005) or **overlapping subclusters** (Müller, Heidelberger, Teschner, Gross 2005 §6 "lattice shape matching") is left as a tuning decision. Single-cluster ships first; if visible deformation looks too uniform under non-uniform contact, subclusters land as a §16.7 follow-on. Same particles, just multiple shape-match constraints. No re-authoring required.
 
 ---
 

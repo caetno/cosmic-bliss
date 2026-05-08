@@ -1552,6 +1552,13 @@ Single autoload (`StimulusBus`) holding all events, continuous channels, and mod
 
 Physics-driven sound lives in TentacleTech. Character voice lives in Reverie.
 
+Two consumer paths run side-by-side off the same bus:
+
+1. **Event-trigger sample bank** — discrete events fire one-shot samples with physics-modulated pitch/volume. The table below.
+2. **Continuous procedural synthesis** — sustained contact textures (slimy slide, squelch bed, ring creak, fluid film) are *synthesized* from continuous channels rather than sampled. Slimy/slippery soft-contact sound especially benefits because the physics already publishes the right inputs (friction energy, slip velocity, lubricity, wetness) and a sample-only path cannot match the variability of those channels without combinatorial sample-bank work. See §9.1.
+
+### Event-trigger sample bank
+
 Each tentacle and orifice has a `MechanicalSoundEmitter` component subscribing to stimulus bus events and continuous state:
 
 | Sound | Triggered by | Volume from | Pitch from |
@@ -1566,6 +1573,42 @@ Each tentacle and orifice has a `MechanicalSoundEmitter` component subscribing t
 | Bulb pop | Girth spike through entry | Girth differential | Orifice stiffness |
 
 Spatialized as `AudioStreamPlayer3D`. Priority-capped to prevent mixer saturation (impacts high, squelch capped at 2 concurrent per hero).
+
+### 9.1 Continuous procedural synthesis layer
+
+A `ProceduralContactSynth` C++ component (custom `AudioStreamPlayback` subclass, fills audio buffers on the audio thread at 48 kHz) runs alongside the sample emitter and consumes the same bus channels. It generates *sustained* contact texture from physics inputs without a sample bank. Reference: Farnell, *Designing Sound* (2010); friction-driven primitives modulated by physics state.
+
+**Voices** (each is a small DSP graph driven by per-tentacle / per-orifice state):
+
+| Voice | Output | Driven by |
+|---|---|---|
+| **Slip-friction noise** | Wet/dry granular noise band | `slip_velocity`, `lubricity`, contact pressure |
+| **Squelch bed** | Filtered noise + low-rate amplitude jitter (bubble-pop train) | Wetness, contact-pressure rate, fluid-pocket count |
+| **Stretch tone** | Resonant filtered noise (creak / strain) | Ring or canal radial-strain rate |
+| **Fluid film** | Granular noise + high-pass shelf | `wetness_per_orifice`, `wetness_per_surface_region` |
+
+Each voice is gated by a **presence signal** derived from continuous channels (e.g. slip-friction voice presence = `smoothstep(0.05, 0.20, slip_velocity) * lubricity_low_band`); below threshold the voice idles at zero amplitude, no DSP cost. This avoids the sample-bank's "discrete event vs no event" boundary problem.
+
+**Inputs.** The synth consumes channels that are *already* published by the existing physics/bus layer:
+- `slip_velocity` (per particle, ‖tangential velocity‖ at the contact); aggregated per tentacle and per orifice.
+- `friction_energy` (already in §8 continuous channels).
+- `lubricity = mix(μ_dry, μ_wet, surface_wetness)` derived from the §4.4 friction-modulator stack — exposed as a read-only continuous channel for the synth.
+- `wetness_per_orifice`, `wetness_per_surface_region` (§4.6).
+- `contact_pressure` (per-particle accumulated normal-lambda, §4.3) — aggregated per tentacle and per orifice.
+
+No new physics state is required. The continuous-channel surface is the sole input.
+
+**No new GDScript driver.** The synth subscribes to the bus directly from its C++ component (audio thread); no per-frame GDScript glue.
+
+**Cost.** ~4 voices × few-tap filter + granular generator per active emitter at 48 kHz ≈ <100 µs/buffer on the audio thread. Voice-presence gating bypasses idle voices. Negligible vs the physics tick.
+
+**Authoring.** A `ProceduralContactSynthProfile` resource holds per-hero / per-tentacle / per-orifice DSP parameters (filter cutoffs, granular-rate ranges, presence thresholds, mix weights). No sample-bank curation; tuning is parameter sliders not WAV editing. Default profile ships with TentacleTech; per-hero overrides are optional.
+
+**Spatialization.** Same `AudioStreamPlayer3D` machinery as the sample bank.
+
+**Why both layers.** Discrete events (BulbPop, StickSlipBreak, Impact, FluidSeparation) genuinely *are* one-shots — a sampled hit is the right grain. Sustained contact texture genuinely *is* continuous — synthesis is the right grain. Forcing either through the wrong path produces obvious artifacts (samples loop / discretize; synthesis can't capture sharp transients well). The two layers are orthogonal and complementary.
+
+**Phase placement.** Lands in **Phase 6** alongside the bus + `MechanicalSoundEmitter`. The synth is a sibling component, not a refactor — Phase 6 closes both at once.
 
 ### Fluid system (slime / drool / wetness)
 
@@ -1848,6 +1891,8 @@ For hero-asset tentacles:
 
 ### 10.4 Hero authoring
 
+> **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires Blender rim-anchor weight-painting in favor of Godot-side `SurfaceOrificeRimAttachment` nodes whose per-vertex weights are auto-derived from a prefactored cotan-Laplacian on the body mesh. Steps 5–7 below collapse to "place a node, pick a host bone." The runtime physics for orifices does not change. The Blender pipeline collapses to a vanilla ARP+toes export. Apply this amendment after BodySurfaceField §17.4 lands; existing kasumi rim anchors can stay as no-op zero-weight bones until next re-export.
+
 The hero is **one continuous mesh** with multiple material surfaces. The surface invaginates at each orifice to form the corresponding cavity wall, terminates at the cavity's closed end, or chains to another orifice (through-path). Normals are consistently outward across the whole surface — no duplicated or flipped vertices at rim edges.
 
 Material assignment uses per-surface splits:
@@ -1985,6 +2030,12 @@ extensions/tentacletech/
 │   │   ├── stimulus_bus.{h,cpp}
 │   │   ├── stimulus_event.h
 │   │   └── modulation_state.h
+│   ├── audio/                          # Phase 6 — §9.1 procedural contact synth
+│   │   ├── procedural_contact_synth.{h,cpp}    # AudioStreamPlayback subclass; runs on audio thread
+│   │   ├── friction_voice.{h,cpp}              # slip-friction noise voice
+│   │   ├── squelch_voice.{h,cpp}               # bubble-pop bed voice
+│   │   ├── stretch_voice.{h,cpp}               # creak/strain resonator voice
+│   │   └── fluid_film_voice.{h,cpp}            # wet-film texture voice
 │   └── register_types.{h,cpp}
 │
 ├── gdscript/                           # GDScript glue (deployed to game/addons/)
@@ -2001,6 +2052,7 @@ extensions/tentacletech/
 │   │   └── scenario_library.gd
 │   ├── stimulus/
 │   │   ├── mechanical_sound_emitter.gd
+│   │   ├── procedural_contact_synth_profile.gd  # @tool Resource — DSP parameter holder for §9.1
 │   │   └── fluid_strand.gd
 │   ├── orifice/
 │   │   ├── orifice_setup.gd
@@ -2148,6 +2200,15 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 
 **Phase 4 close-out cluster reference docs** (all 2026-05-03): plan in `Cosmic_Bliss_Update_2026-05-03_phase4_wedge_robustness.md`; Obi 7.x source synthesis in `docs/pbd_research/findings_obi_synthesis.md`. Phase 4 fully landed 2026-05-03; Phase 5 unblocked.
 
+**Phase 4.5 — XPBD warm-start cluster + Oriented Particles** (opened 2026-05-07; brief in `Cosmic_Bliss_Update_2026-05-07_procedural_audio_and_soft_regions.md`)
+
+Previously parked as a placeholder. Opened explicitly because (a) several Phase 4 wedge fixes asymptotically point at warm-started λ as the next robustness step, and (b) Marionette §16 soft-region clusters require per-particle rotational state (Oriented Particles) to share a single PBD solver pass with the tentacle chain rather than coupling via snapshot-and-react.
+
+15a. **4.5.A — Body-local persistent contacts** (extends 4S Obi contact-persistence brief). Contacts keyed by `(other_RID, feature_id)`; stored in body-local frame so the contact rotates *with* the host bone. Per-particle ring of `MAX_CONTACTS_PER_PARTICLE = 3` (was 2 in 4M; the third slot keeps a transient contact from displacing a stable persistent pair). Eviction after >2 frames absent. Reference: Catto / Box2D persistent-manifold convention; Müller-Macklin-Chentanez 2020 §3.6.
+15b. **4.5.B — λ warm-start.** Per-contact `normal_lambda` and `tangent_lambda` carried across ticks (not just across iterations as in 4M). Warm-start gated on contact identity persistence — naive warm-start of a fresh contact with stale λ is the documented instability. Reference: Müller et al. 2020 §3.5–3.6.
+15c. **4.5.C — Oriented Particles** (Müller & Chentanez 2011). Add per-particle quaternion + angular velocity to `TentacleParticle`. Quaternion integrated via `q ← q + 0.5 Δt ω q` then renormalized; rotational inertia derived from particle radius. Replaces the centerline RMF parallel-transport scheme — feature placement (warts/ribs anchored at `(s, θ_material)`) now uses the particle's own material frame, which can twist with friction torque from canal walls. **Architectural prerequisite for Marionette §16 soft-region clusters** — those clusters share this particle representation.
+15d. **Acceptance:** wedge thrust scenarios converge in ≤ 4 outer iterations across all wedge half-angles ≥ 30°; tentacle wart silhouettes anatomically anchored under host-bone roll; particle quat drift bounded over a 30-second simulation.
+
 **Phase 5 — Orifice system** (rim particle loop model per `Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md`; supersedes the pre-2026-05-03 driven 8-direction ring-bone draft)
 16. Rim anchor authoring + skin weighting in Blender (rim anchors are kinematic targets for rim particle rest positions in Center frame, NOT driven outputs; mesh skin weights bind to anchor names but skinning shader reads live rim particle world positions)
 17. `RimParticle` / `RimLoopState` data structures + `Orifice` C++ owning per-loop XPBD constraint set (closed-loop distance + volume on enclosed area + per-particle spring-back to authored rest position + soft attachment to host bone via orifice frame)
@@ -2159,9 +2220,10 @@ Phase 1 is the immediate focus. Subsequent phases are each self-contained and te
 
 **Phase 6 — Stimulus bus + mechanical sound**
 21. StimulusBus autoload with events, continuous channels, modulation channels
-22. MechanicalSoundEmitter components
+22. MechanicalSoundEmitter components (event-trigger sample-bank path, §9 table)
+22a. **`ProceduralContactSynth`** + four voices (slip-friction, squelch, stretch, fluid film) per §9.1; consumes the same bus channels (`slip_velocity`, `friction_energy`, `lubricity`, `wetness_per_*`, `contact_pressure`); custom `AudioStreamPlayback` on the audio thread; `ProceduralContactSynthProfile` resource for DSP parameters.
 23. Body area mapping per hero
-24. Acceptance: physics events produce spatial sounds, bus events visible in debug overlay
+24. Acceptance: physics events produce spatial sounds; sustained slimy/slippery contact sound *modulates continuously* with slip velocity and lubricity (no audible sample looping or rate-discretization); presence-gated voices idle to zero amplitude when below thresholds.
 
 **Phase 7 — Hero skin bulges**
 25. SkinBulgeDriver + bulger shader
