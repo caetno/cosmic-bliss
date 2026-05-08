@@ -74,6 +74,7 @@ Game-layer design docs live in `docs/` (not owned by any extension):
 - **`docs/Save_Persistence.md`** — single-save-per-profile schema, versioned with migrations. Persists mindset + appearance + currency + unlocks + stats.
 - **`docs/Gameplay_Loop.md`** — committed gameplay decisions (persistent mindset, no fail state, single-type currency, roguelite under consideration). Loop design deliberately deferred until the four extensions stabilize.
 - **`docs/Gameplay_Mechanics.md`** — skill surface on top of physics (grip-break timing, rib resonance, wedge reading, overwhelm management, pain-pleasure edge), hidden-phenomenon achievements, sensitivity-map discovery, tentacle loadout.
+- **`docs/Eye_Shader.md`** — single-layer Godot port of HDRP eye shader. Cross-cutting decisions, calibration steps, gotchas (NORMAL_MAP corruption fix, iris-bumps-not-via-NORMAL, SSS off, hard-cut surface mask). Source files at `game/assets/materials/eye/`.
 
 These three architecture docs supersede all prior design documents. If older fragmented docs (main plan, interaction detail, collision-and-friction, authoring/girth/multi, scenarios-and-AI-model, narrative scenarios, stimulus bus, reaction-to-physics-feedback) are found, they are obsolete and should be ignored or deleted.
 
