@@ -10,7 +10,9 @@ Monorepo containing a Godot 4.6 game (Cosmic Bliss) and its supporting GDExtensi
 | **TentacleTech** | PBD tentacle physics, orifices, collision, stimulus bus | C++ core (PBD hot path) + GDScript glue |
 | **Tenticles** | GPU particle system (NGP-style) | C++ core (RenderingDevice-driven, no GDScript hot path possible) |
 | **Marionette** | Active ragdoll solver (SPD), cost-weighted IK composer | C++ core (SPD, composer, IK, strain, engagement) + GDScript glue (resources, authoring-time solvers, gizmos, editor tooling) |
-| **Reverie** | Reaction system, facial rig, state/mindset, expressions | GDScript (future) |
+| **Reverie** | Reaction system, state / mindset, attention. Publishes dimensional state + vocal-intent events; consumed by Sonance and Visage. | GDScript (future) |
+| **Sonance** | Audio synthesis. Voice (sample-bank-with-modulation by default; per-region procedural modules as stretch graduations) + physics-driven non-vocal sound (modal contact, Dahl friction, Minnaert bubble, reed-tube). Subscribes to Reverie state + TentacleTech bus events. | C++ core (audio thread DSP, sample modulation, motor-state publishing) + GDScript glue (sample tagger, breath-bed editor, episode-arc editor, vocal profiles) |
+| **Visage** | Facial expression, eye gaze, lip sync. Authors blendshape weights + bone-target jaw/lip-ring offsets to Marionette's IK composer and TentacleTech's rim rest-position offsets (peer-author pattern). Subscribes to Reverie emotional state + Sonance's path-agnostic motor channel. | C++ core (gaze IK, viseme math) + GDScript glue (face puppet editor, posture pattern resources) |
 | **dpg** | Legacy DPG port (broken) — kept as reference for spline math salvage | Being phased out |
 
 ## Repository layout

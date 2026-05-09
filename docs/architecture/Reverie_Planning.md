@@ -280,6 +280,8 @@ Hysteresis (Schmitt-trigger): emit "high strain" when strain > 0.6; emit "strain
 
 ### 4.1 Facial expressions
 
+> **Pending amendment 2026-05-09** — `docs/Cosmic_Bliss_Update_2026-05-09_sonance_visage.md` opens a dedicated **Visage** GDExtension that owns facial blendshape authoring + eye gaze + lip sync. §4.1's "Reverie outputs a dictionary of blendshape weights at ~20 Hz" model retires. New model: Reverie writes dimensional emotional state on the bus (`arousal`, `valence`, `breathiness`, `pain_index`, `pleasure_index`, etc.); Visage's emotional-layer reads that state and authors blendshape weights per its own per-character profiles. Reverie does not author blendshapes directly; the dictionary surface goes away. Apply this amendment when Visage work opens.
+
 Face mesh rigged with blendshapes. Reverie's output is a dictionary of blendshape weights, updated ~20 Hz (interpolate on render thread for smooth motion).
 
 Blendshapes grouped:
@@ -305,6 +307,8 @@ Reaction profiles select pattern stacks per mindset:
 `pose_stiffness_mult` is no longer the right knob; expression intensity is governed by pattern weights and engagement magnitude. The `BodyAreaModulation` channels remain for non-postural bone-area modulation (e.g., voluntary motion vector), but posture itself flows through the pattern library.
 
 ### 4.3 Vocalization
+
+> **Pending amendment 2026-05-09** — `docs/Cosmic_Bliss_Update_2026-05-09_sonance_visage.md` opens a dedicated **Sonance** GDExtension that owns voice production. §4.3's two-layer model (Layer 1 one-shot lines, Layer 2 sustained vocal synthesis), and Phase R5 / R5.5 implementing them, all retire. New model: Reverie publishes vocal-intent events on a queue (`VocalEvent` with dimensional payload, optional category tag as hint) and writes dimensional state (`arousal`, `valence`, `effort`, `breathiness`, `pain_index`, `pleasure_index`, `social_visibility`, `body_size_signal`) on the bus. Sonance subscribes, picks the production path (sample-bank-with-modulation by default; per-region procedural modules where they've graduated), renders audio, publishes motor state for Visage. Selection logic for *which discrete event to trigger when* stays in Reverie; *how it sounds* moves to Sonance. Apply this amendment when Sonance work opens.
 
 Reverie maintains a vocal state (current audibility, timbre, pace) across two layered sound sources — a **discrete one-shot line layer** and a **sustained synthesized layer**. They run simultaneously and address different aspects of vocal expression.
 
@@ -478,6 +482,8 @@ For the bus to serve Reverie correctly when it's built:
 The TentacleTech architecture already specifies all of this. This section is a checklist that nothing gets dropped.
 
 ## 9. Phase plan for Reverie
+
+> **Pending amendment 2026-05-09** — Phase R3 (Facial blendshape output) and Phase R4 (Shader parameters) retire to Visage; Phase R5 (Vocalization queue) and Phase R5.5 (Sustained vocal synthesis) retire to Sonance. The remaining Reverie phases (R1 state skeleton, R2 modulation writes, R3.5 attention/gaze, R6 posture patterns + engagement vector + frequency compliance, R6.5 peristalsis + ritual reactions, R7 mindset dynamics, R8 polish) are unaffected. Apply this amendment when Visage / Sonance work opens.
 
 Not starting yet; rough outline for later:
 

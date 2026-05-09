@@ -1550,6 +1550,8 @@ Single autoload (`StimulusBus`) holding all events, continuous channels, and mod
 
 ## 9. Mechanical sound
 
+> **Pending amendment 2026-05-09** — `docs/Cosmic_Bliss_Update_2026-05-09_sonance_visage.md` opens a dedicated **Sonance** GDExtension that owns audio synthesis (both voice and physics-driven non-vocal). §9 / §9.1's specific implementation (`MechanicalSoundEmitter`, `ProceduralContactSynth` with four voices, `extensions/tentacletech/src/audio/`, gdscript profile resource) all retire. The bus events and continuous channels TentacleTech publishes (impulse, friction, slip velocity, lubricity, wetness, contact pressure) are unchanged — those are the inputs Sonance subscribes to. What retires is *which extension owns the synthesis*. Phase 6 item 22a retires; Sonance phase **S4** (modal contact + Dahl friction + Minnaert bubble + reed-tube — physics-grounded primitives that beat the ad-hoc voices specced here) replaces it. Apply this amendment when Sonance work opens; the framing paragraphs below stay accurate as a description of *what Sonance reads from the bus*, not of what TentacleTech implements.
+
 Physics-driven sound lives in TentacleTech. Character voice lives in Reverie.
 
 Two consumer paths run side-by-side off the same bus:
