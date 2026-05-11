@@ -43,15 +43,17 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 		update_gizmos()
 
 ## Translates BoneProfile / SkeletonProfile bone names to the rig's
-## actual bone names. Optional — when null, build_ragdoll falls back to
-## direct name match (which works after Godot's import-time retargeting
-## renames bones to canonical profile names).
+## actual bone names. When null, "Auto-fill BoneMap from Skeleton" creates
+## one populated against `MarionetteHumanoidProfile` from the bound rig's
+## bone names. Or build manually via the BoneMap inspector.
 @export var bone_map: BoneMap:
 	set(value):
 		if bone_map == value:
 			return
 		bone_map = value
 		update_gizmos()
+
+@export_tool_button("Auto-fill BoneMap from Skeleton", "BoneMap") var _autofill_btn: Callable = auto_fill_bone_map_from_skeleton
 
 ## Optional source for "Build Convex Colliders". When empty, the build
 ## auto-discovers every skinned MeshInstance3D under the skeleton's
@@ -535,6 +537,31 @@ func stop_simulation() -> void:
 	if sim == null:
 		return
 	sim.physical_bones_stop_simulation()
+
+
+## Drop-in skeleton support: scans the bound `Skeleton3D`'s bone names and
+## populates `bone_map` against `MarionetteHumanoidProfile` using
+## `BoneMapAutoFiller` (name dictionary covering ARP Standard, ARP UE, Mixamo,
+## Rigify DEF, Bip01, and SkeletonProfileHumanoid-native). When `bone_map` is
+## null, creates a fresh in-memory one (right-click → Save As to persist).
+## When set, only fills empty slots — manual edits are preserved.
+func auto_fill_bone_map_from_skeleton() -> void:
+	var skel: Skeleton3D = resolve_skeleton()
+	if skel == null:
+		push_warning("Marionette.auto_fill: skeleton not resolvable from %s" % skeleton)
+		return
+	if bone_map == null:
+		bone_map = BoneMap.new()
+		bone_map.profile = load("res://addons/marionette/data/marionette_humanoid_profile.tres")
+	if bone_map.profile == null:
+		push_warning("Marionette.auto_fill: bone_map.profile is null — assign MarionetteHumanoidProfile first")
+		return
+	var results: Dictionary = BoneMapAutoFiller.auto_fill(skel, bone_map)
+	BoneMapAutoFiller.apply_to_bone_map(bone_map, results)
+	BoneMapAutoFiller.log_results(results, BoneNameDictionary.SLOT_NAMES.size())
+	bone_map.emit_changed()
+	notify_property_list_changed()
+	update_gizmos()
 
 
 ## Re-runs the BoneProfile pipeline against this Marionette's live

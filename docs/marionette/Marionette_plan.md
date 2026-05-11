@@ -1060,6 +1060,107 @@ demo/
 
 ---
 
+## Phase 15 — Drop-in Skeleton Auto-Mapping
+
+**Goal**: drop almost any standard humanoid rig (ARP Standard, ARP UE,
+Mixamo, Rigify DEF, Bip01, Godot-native `SkeletonProfileHumanoid`) into
+the project, attach a `Marionette` node, click one button — `BoneMap`
+populates against `MarionetteHumanoidProfile` from the rig's bone names.
+No more hand-authored `BoneMap.tres` per character, no more
+import-dialog bone renaming.
+
+Brief: `docs/Cosmic_Bliss_Update_2026-05-10_marionette_auto_bone_map.md`.
+Two-pass design: name dictionary (slice 1, this phase), structural
+classifier (slice 2, gated on observed slice-1 failures).
+
+### Slice 1 — Name dictionary + tool button
+
+- **P15.1** — `BoneNameNormalizer` (gdscript/runtime/bone_name_normalizer.gd).
+  Pipeline: strip raw namespace prefixes (`bip01_`, `mixamorig:`), insert
+  separator after `Left`/`Right` word-prefix, camelCase + letter↔digit
+  split, lowercase, tokenize on `_-.: `, drop noise tokens (namespace +
+  helper markers), extract side from first/last token, normalize
+  digit-only tokens (`01` → `1`).
+- **P15.2** — `BoneNameDictionary` (gdscript/runtime/bone_name_dictionary.gd).
+  Per-convention dicts mapping every `MarionetteHumanoidProfile` slot to
+  expected source-bone names. Source of truth: `docs/marionette/arp_mapping.md`
+  for ARP, real-rig listings under `game/tests/marionette/skeletons/`
+  for Mixamo / Rigify / godot_ARP. Symmetric slots derived from a single
+  Left entry via name-mirror rules (`.l→.r`, `_l→_r`, `Left→Right`,
+  `_L_→_R_`).
+- **P15.3** — `BoneMapAutoFiller` (gdscript/runtime/bone_map_auto_filler.gd).
+  Skip-list filters out helper / control / IK / FK bones by raw substring
+  (`_ik`, `_pole`, `mch-`, `c_p_`, etc.). For each unlocked slot scores
+  every candidate against every dictionary entry: exact-raw match → 1.0,
+  normalized token equality → 0.9, Jaccard partial → score. Side-tag is
+  a hard constraint. Greedy assignment by score across all (slot,
+  candidate) pairs prevents one bone filling two slots.
+- **P15.4** — Tool button on `Marionette.gd` Bind group: `Auto-fill
+  BoneMap from Skeleton`. When `bone_map` is null, creates a fresh
+  in-memory one with `MarionetteHumanoidProfile` assigned. When set,
+  fills only empty slots — manual edits preserved (per user policy).
+  Console-logs per-slot score / convention / source bone for diagnostics.
+- **P15.5** — Tests in `extensions/marionette/tests/run_tests.gd`:
+  normalizer round-trips against ARP / Mixamo / Rigify / godot_ARP raw
+  names; dictionary completeness + L/R mirror consistency + within-conv
+  collision check; auto-fill against the four reference rigs in
+  `game/tests/marionette/skeletons/` (ARP.glb, godot_ARP.glb, Mixamo.glb,
+  Rigify_nomesh.glb) with per-rig minimum fill counts; preservation of
+  pre-existing BoneMap entries.
+
+### Slice 2 — Structural classifier (gated, not committed)
+
+`skeleton_topology_classifier.gd` for rigs whose bone names don't match
+any encoded convention. Only opens if slice 1 leaves slots unmapped on
+real rigs the user wants to support. Per `feedback_phase_slicing.md`
+spatial algorithms ship with their gizmo or the user cannot debug them
+— this slice pairs with a debug visualization (spine chain, arm/leg
+chains, helper-pruned bones, sagittal plane, mirror pairs) using the
+CMY+RGB+size palette per `feedback_godot_gizmo_colors.md`.
+
+### Constraints
+
+- **Authoring-time only.** No runtime `_physics_process` involvement.
+- **No changes to `BoneProfileGenerator`, `permutation_matcher.gd`,
+  `archetype_solvers/`, `muscle_frame_builder.gd`, or any C++.** This
+  feature is upstream of all axis-derivation work — it only produces a
+  populated `BoneMap`.
+- **Yellow-tripod calibration signal stays untouched.** Auto-fill
+  produces `BoneMap` entries; whether they bake to permutation or
+  calculated-frame fallback is the existing matcher's call.
+- **`BoneMap` writes via `set_skeleton_bone_name`**, not direct
+  `set("bone_map/X")` — sidesteps the silent-overwrite trap from
+  `reference_godot_bonemap_property.md`.
+
+### Milestone
+
+- One-click ragdoll workflow: drop rig in scene, add `Marionette` node,
+  set `skeleton`, click "Auto-fill BoneMap from Skeleton", click
+  "Calibrate Profile from Skeleton", click "Build Ragdoll" — no .tres
+  files authored by hand.
+- Slice 1 tests pass against the four reference rigs.
+
+### Files
+
+```
+extensions/marionette/
+├── gdscript/
+│   ├── runtime/
+│   │   ├── bone_name_normalizer.gd     (P15.1)
+│   │   ├── bone_name_dictionary.gd     (P15.2)
+│   │   ├── bone_map_auto_filler.gd     (P15.3)
+│   │   └── marionette.gd               (P15.4 — tool button + method added)
+│   └── tests/
+│       └── run_tests.gd                (P15.5 — tests added)
+game/tests/marionette/skeletons/
+├── ARP.glb           (user-provided reference rig — ARP Standard)
+├── godot_ARP.glb     (user-provided — ARP with "Rename for Godot")
+├── Mixamo.glb        (user-provided — Mixamo standard)
+└── Rigify_nomesh.glb (user-provided — Rigify metarig deform layer)
+```
+
+---
+
 ## Soft-tissue jiggle bone clusters
 
 > **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires the "jiggle bones must be in the Blender skeleton at modeling time" gotcha. Jiggle attachments become Godot-side `SurfaceJiggleAttachment` nodes placed under the hero scene; the surface field auto-derives the per-vertex skinning weight. The shipped breast jiggle on kasumi (translation-only SPD) keeps the same physics; only the authoring path migrates. New jiggle attachments (glutes, jowls) become trivially addable without re-export. Apply this amendment after §17.5 lands.

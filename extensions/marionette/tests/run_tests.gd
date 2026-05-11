@@ -106,6 +106,19 @@ func _init() -> void:
 		_test_anatomical_pose_subtracts_rest_offset,
 		_test_anatomical_pose_canonical_zero_at_offset,
 		_test_build_ragdoll_rom_shifted_by_rest_offset,
+		_test_normalizer_arp_examples,
+		_test_normalizer_mixamo_examples,
+		_test_normalizer_rigify_examples,
+		_test_normalizer_godot_arp_examples,
+		_test_normalizer_side_compatibility,
+		_test_dictionary_all_slots_have_some_entry,
+		_test_dictionary_left_right_mirror_consistent,
+		_test_dictionary_no_collisions_within_convention,
+		_test_auto_filler_arp_glb,
+		_test_auto_filler_godot_arp_glb,
+		_test_auto_filler_mixamo_glb,
+		_test_auto_filler_rigify_glb,
+		_test_auto_filler_preserves_existing_entries,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -2727,3 +2740,296 @@ func _test_build_ragdoll_rom_shifted_by_rest_offset() -> bool:
 					"%s = %f, expected %f (rest_offset shift)" % [path, got, want])
 	m.free()
 	return _ok("build_ragdoll_rom_shifted_by_rest_offset")
+
+
+# ---------- BoneNameNormalizer / BoneNameDictionary / BoneMapAutoFiller ------
+
+const _TEST_RIG_DIR := "res://tests/marionette/skeletons/"
+
+
+func _normalizer_check(raw: String, expected_tokens: Array, expected_side: int,
+		test_name: String) -> bool:
+	var got: Dictionary = BoneNameNormalizer.normalize(raw)
+	var got_tokens: PackedStringArray = got["tokens"]
+	if got["side"] != expected_side:
+		return _fail(test_name,
+				"%s → side=%d, expected %d" % [raw, got["side"], expected_side])
+	if got_tokens.size() != expected_tokens.size():
+		return _fail(test_name, "%s → tokens=%s, expected %s"
+				% [raw, str(got_tokens), str(expected_tokens)])
+	for i: int in got_tokens.size():
+		if got_tokens[i] != String(expected_tokens[i]):
+			return _fail(test_name, "%s → tokens=%s, expected %s"
+					% [raw, str(got_tokens), str(expected_tokens)])
+	return true
+
+
+func _test_normalizer_arp_examples() -> bool:
+	var cases: Array = [
+		# raw, expected_tokens, expected_side
+		["root.x", ["root"], BoneNameNormalizer.Side.CENTER],
+		["spine_01.x", ["spine", "1"], BoneNameNormalizer.Side.CENTER],
+		["head.x", ["head"], BoneNameNormalizer.Side.CENTER],
+		["shoulder.l", ["shoulder"], BoneNameNormalizer.Side.LEFT],
+		["arm_stretch.l", ["arm"], BoneNameNormalizer.Side.LEFT],
+		["forearm_stretch.r", ["forearm"], BoneNameNormalizer.Side.RIGHT],
+		["c_thumb1.l", ["thumb", "1"], BoneNameNormalizer.Side.LEFT],
+		["c_pinky3.r", ["pinky", "3"], BoneNameNormalizer.Side.RIGHT],
+		["thigh_stretch.l", ["thigh"], BoneNameNormalizer.Side.LEFT],
+		["c_toes_thumb1.l", ["toes", "thumb", "1"], BoneNameNormalizer.Side.LEFT],
+	]
+	for case: Array in cases:
+		if not _normalizer_check(case[0], case[1], case[2], "normalizer_arp"):
+			return false
+	return _ok("normalizer_arp_examples")
+
+
+func _test_normalizer_mixamo_examples() -> bool:
+	var cases: Array = [
+		["mixamorig:Hips", ["hips"], BoneNameNormalizer.Side.NONE],
+		["mixamorig:Spine", ["spine"], BoneNameNormalizer.Side.NONE],
+		["mixamorig:Spine1", ["spine", "1"], BoneNameNormalizer.Side.NONE],
+		["mixamorig:LeftShoulder", ["shoulder"], BoneNameNormalizer.Side.LEFT],
+		["mixamorig:LeftArm", ["arm"], BoneNameNormalizer.Side.LEFT],
+		["mixamorig:LeftForeArm", ["fore", "arm"], BoneNameNormalizer.Side.LEFT],
+		["mixamorig:LeftHandThumb1", ["hand", "thumb", "1"], BoneNameNormalizer.Side.LEFT],
+		["mixamorig:LeftUpLeg", ["up", "leg"], BoneNameNormalizer.Side.LEFT],
+		["mixamorig:RightToeBase", ["toe"], BoneNameNormalizer.Side.RIGHT],  # _base in noise
+	]
+	for case: Array in cases:
+		if not _normalizer_check(case[0], case[1], case[2], "normalizer_mixamo"):
+			return false
+	return _ok("normalizer_mixamo_examples")
+
+
+func _test_normalizer_rigify_examples() -> bool:
+	var cases: Array = [
+		["DEF-spine", ["spine"], BoneNameNormalizer.Side.NONE],
+		["DEF-spine.001", ["spine", "1"], BoneNameNormalizer.Side.NONE],
+		["DEF-spine.006", ["spine", "6"], BoneNameNormalizer.Side.NONE],
+		["DEF-shoulder.L", ["shoulder"], BoneNameNormalizer.Side.LEFT],
+		["DEF-upper_arm.L", ["upper", "arm"], BoneNameNormalizer.Side.LEFT],
+		["DEF-forearm.R", ["forearm"], BoneNameNormalizer.Side.RIGHT],
+		["DEF-f_index.01.L", ["index", "1"], BoneNameNormalizer.Side.LEFT],  # `f` in noise
+		["DEF-thumb.02.L", ["thumb", "2"], BoneNameNormalizer.Side.LEFT],
+		["DEF-thigh.L", ["thigh"], BoneNameNormalizer.Side.LEFT],
+		["DEF-toe.R", ["toe"], BoneNameNormalizer.Side.RIGHT],
+	]
+	for case: Array in cases:
+		if not _normalizer_check(case[0], case[1], case[2], "normalizer_rigify"):
+			return false
+	return _ok("normalizer_rigify_examples")
+
+
+func _test_normalizer_godot_arp_examples() -> bool:
+	# godot_ARP rig (ARP with "Rename for Godot" enabled): standard humanoid
+	# names get Godot-native PascalCase, but ARP's toe extensions keep their
+	# `c_toes_*` names with `Left`/`Right` prefixed → `Leftc_toes_thumb1`.
+	var cases: Array = [
+		["Hips", ["hips"], BoneNameNormalizer.Side.NONE],
+		["Spine", ["spine"], BoneNameNormalizer.Side.NONE],
+		["LeftFoot", ["foot"], BoneNameNormalizer.Side.LEFT],
+		["LeftUpperArm", ["upper", "arm"], BoneNameNormalizer.Side.LEFT],
+		["RightThumbMetacarpal", ["thumb", "metacarpal"], BoneNameNormalizer.Side.RIGHT],
+		# `Leftc_toes_thumb1` — the Step 1 Left/Right prefix split is what makes
+		# this case work; without it `Leftc` would become a single token.
+		["Leftc_toes_thumb1", ["toes", "thumb", "1"], BoneNameNormalizer.Side.LEFT],
+		["Rightc_toes_pinky3", ["toes", "pinky", "3"], BoneNameNormalizer.Side.RIGHT],
+	]
+	for case: Array in cases:
+		if not _normalizer_check(case[0], case[1], case[2], "normalizer_godot_arp"):
+			return false
+	return _ok("normalizer_godot_arp_examples")
+
+
+func _test_normalizer_side_compatibility() -> bool:
+	var S := BoneNameNormalizer.Side
+	# Slot side derivation.
+	if BoneNameNormalizer.slot_required_side(&"LeftShoulder") != S.LEFT:
+		return _fail("side_compat", "slot_required_side(LeftShoulder) != LEFT")
+	if BoneNameNormalizer.slot_required_side(&"RightFoot") != S.RIGHT:
+		return _fail("side_compat", "slot_required_side(RightFoot) != RIGHT")
+	if BoneNameNormalizer.slot_required_side(&"Hips") != S.NONE:
+		return _fail("side_compat", "slot_required_side(Hips) != NONE")
+	# Compatibility table.
+	if not BoneNameNormalizer.sides_compatible(S.LEFT, S.LEFT):
+		return _fail("side_compat", "L vs L should be compatible")
+	if BoneNameNormalizer.sides_compatible(S.RIGHT, S.LEFT):
+		return _fail("side_compat", "R vs L should NOT be compatible")
+	if BoneNameNormalizer.sides_compatible(S.LEFT, S.NONE):
+		return _fail("side_compat", "L vs NONE should NOT be compatible")
+	if not BoneNameNormalizer.sides_compatible(S.NONE, S.NONE):
+		return _fail("side_compat", "NONE vs NONE should be compatible")
+	if not BoneNameNormalizer.sides_compatible(S.CENTER, S.NONE):
+		return _fail("side_compat", "CENTER vs NONE should be compatible")
+	return _ok("normalizer_side_compatibility")
+
+
+func _test_dictionary_all_slots_have_some_entry() -> bool:
+	# Every slot except {Root, LeftEye, RightEye, Jaw} (intentionally sparse)
+	# should resolve at least one expected name across all conventions.
+	var expected_empty: Dictionary = {
+		&"Root": true,  # ARP `c_traj` is locomotion-only — intentionally unmapped.
+	}
+	for slot_str: String in BoneNameDictionary.SLOT_NAMES:
+		var slot: StringName = StringName(slot_str)
+		var names: PackedStringArray = BoneNameDictionary.expected_names(slot)
+		if names.is_empty() and not expected_empty.has(slot):
+			return _fail("dict_complete",
+					"slot %s has no expected names across any convention" % slot_str)
+	return _ok("dictionary_all_slots_have_some_entry")
+
+
+func _test_dictionary_left_right_mirror_consistent() -> bool:
+	# For every Left* slot, the corresponding Right* slot's expected names
+	# should be bone-for-bone mirrors (same conventions, just sided).
+	var d: Dictionary = BoneNameDictionary.slot_dict()
+	for slot_str: String in BoneNameDictionary.SLOT_NAMES:
+		if not slot_str.begins_with("Left"):
+			continue
+		var right_slot_str: String = "Right" + slot_str.substr(4)
+		var left_dict: Dictionary = d.get(StringName(slot_str), {})
+		var right_dict: Dictionary = d.get(StringName(right_slot_str), {})
+		if left_dict.size() != right_dict.size():
+			return _fail("dict_mirror",
+					"%s has %d entries but %s has %d"
+					% [slot_str, left_dict.size(), right_slot_str, right_dict.size()])
+		for conv in left_dict:
+			if not right_dict.has(conv):
+				return _fail("dict_mirror",
+						"%s convention %s missing from %s"
+						% [slot_str, conv, right_slot_str])
+	return _ok("dictionary_left_right_mirror_consistent")
+
+
+func _test_dictionary_no_collisions_within_convention() -> bool:
+	# Within a single convention, no two slots should share the same expected
+	# bone name (would mean two slots fight for the same source bone).
+	var d: Dictionary = BoneNameDictionary.slot_dict()
+	var per_conv_seen: Dictionary = {}
+	for slot in d:
+		var entries: Dictionary = d[slot]
+		for conv: String in entries:
+			var name: String = entries[conv]
+			if name.is_empty():
+				continue
+			var key: String = "%s|%s" % [conv, name]
+			if per_conv_seen.has(key):
+				return _fail("dict_collision",
+						"convention %s assigns %s to both %s and %s"
+						% [conv, name, per_conv_seen[key], slot])
+			per_conv_seen[key] = slot
+	return _ok("dictionary_no_collisions_within_convention")
+
+
+func _load_glb_skeleton(rel_path: String) -> Skeleton3D:
+	var doc: GLTFDocument = GLTFDocument.new()
+	var state: GLTFState = GLTFState.new()
+	var abs_path: String = ProjectSettings.globalize_path(_TEST_RIG_DIR + rel_path)
+	var err: int = doc.append_from_file(abs_path, state)
+	if err != OK:
+		push_error("load_glb_skeleton: append_from_file(%s) returned %d" % [abs_path, err])
+		return null
+	var root: Node = doc.generate_scene(state)
+	if root == null:
+		return null
+	return _find_skeleton3d(root)
+
+
+func _find_skeleton3d(n: Node) -> Skeleton3D:
+	if n is Skeleton3D:
+		return n
+	for c in n.get_children():
+		var r: Skeleton3D = _find_skeleton3d(c)
+		if r != null:
+			return r
+	return null
+
+
+func _auto_fill_glb(rel_path: String, min_filled: int, test_name: String) -> bool:
+	var skel: Skeleton3D = _load_glb_skeleton(rel_path)
+	if skel == null:
+		return _fail(test_name, "could not load %s" % rel_path)
+	var results: Dictionary = BoneMapAutoFiller.auto_fill(skel)
+	skel.queue_free()
+	# Report fill counts per confidence bucket for diagnostic purposes.
+	var exact: int = 0
+	var strong: int = 0
+	var partial: int = 0
+	for slot in results:
+		var c: float = results[slot]["confidence"]
+		if c >= 0.95: exact += 1
+		elif c >= 0.85: strong += 1
+		else: partial += 1
+	print("  [%s] %s → filled=%d (exact=%d strong=%d partial=%d) of %d slots"
+			% [test_name, rel_path, results.size(), exact, strong, partial,
+			BoneNameDictionary.SLOT_NAMES.size()])
+	if results.size() < min_filled:
+		return _fail(test_name, "only %d slots filled, expected ≥ %d"
+				% [results.size(), min_filled])
+	return true
+
+
+func _test_auto_filler_arp_glb() -> bool:
+	# Full ARP rig with 432 bones — most are helpers/IK/FK. Should still find
+	# the deform-bone subset for the body axis, arms, hands, legs, toes.
+	# Expecting: 7 spine + 8 arms + 30 fingers + 8 legs + 28 toes = 81.
+	# Allow some slack for unmapped Root/Eyes/Jaw (4 expected unmapped).
+	if not _auto_fill_glb("ARP.glb", 75, "auto_filler_arp"):
+		return false
+	return _ok("auto_filler_arp_glb")
+
+
+func _test_auto_filler_godot_arp_glb() -> bool:
+	# Godot-renamed ARP: 96 bones, native humanoid + ARP toe extensions.
+	# Should fill nearly all slots (no eyes/jaw on this rig either).
+	if not _auto_fill_glb("godot_ARP.glb", 75, "auto_filler_godot_arp"):
+		return false
+	return _ok("auto_filler_godot_arp_glb")
+
+
+func _test_auto_filler_mixamo_glb() -> bool:
+	# Mixamo: 65 bones. No metacarpals (except thumb), no individual toes
+	# (only LeftToeBase / RightToeBase aggregate), no UpperChest. Expect:
+	# Hips, Spine, Spine1=Chest, Spine2=UpperChest? actually three spines:
+	# (Hips, Spine, Chest, UpperChest, Neck, Head) = 6
+	# + 4×2 = 8 arms + 6 thumbs (3×2) + 24 fingers (3×4×2) = 30 hand
+	# + 4×2 = 8 legs (incl ToeBase as Toes) = 6 + 8 + 30 + 8 = 52.
+	if not _auto_fill_glb("Mixamo.glb", 50, "auto_filler_mixamo"):
+		return false
+	return _ok("auto_filler_mixamo_glb")
+
+
+func _test_auto_filler_rigify_glb() -> bool:
+	# Rigify rig: 918 bones, only DEF-* are deform. After helper exclusion:
+	# 7 spine + 8 arms + 6 thumbs + 24 fingers + 8 legs + 2 toes (DEF-toe
+	# only, no phalanges) = ~55.
+	if not _auto_fill_glb("Rigify_nomesh.glb", 50, "auto_filler_rigify"):
+		return false
+	return _ok("auto_filler_rigify_glb")
+
+
+func _test_auto_filler_preserves_existing_entries() -> bool:
+	# When an existing BoneMap has a non-empty entry, auto-fill must NOT
+	# overwrite it — even if the auto-fill would have picked something else.
+	var skel: Skeleton3D = _load_glb_skeleton("Mixamo.glb")
+	if skel == null:
+		return _fail("autofill_preserve", "could not load Mixamo.glb")
+	var bm: BoneMap = BoneMap.new()
+	bm.profile = load("res://addons/marionette/data/marionette_humanoid_profile.tres")
+	# Pre-set an entry the auto-filler would choose differently.
+	bm.set_skeleton_bone_name(&"Hips", &"_user_pinned_value")
+	var results: Dictionary = BoneMapAutoFiller.auto_fill(skel, bm)
+	BoneMapAutoFiller.apply_to_bone_map(bm, results)
+	skel.queue_free()
+	var hips_after: StringName = bm.get_skeleton_bone_name(&"Hips")
+	if String(hips_after) != "_user_pinned_value":
+		return _fail("autofill_preserve",
+				"Hips overwritten to %s — should have stayed _user_pinned_value"
+				% String(hips_after))
+	# But empty slots should still be filled — verify Spine got something.
+	var spine_after: StringName = bm.get_skeleton_bone_name(&"Spine")
+	if String(spine_after).is_empty():
+		return _fail("autofill_preserve",
+				"Spine slot stayed empty — auto-fill didn't run for unfilled slots")
+	return _ok("auto_filler_preserves_existing_entries")
