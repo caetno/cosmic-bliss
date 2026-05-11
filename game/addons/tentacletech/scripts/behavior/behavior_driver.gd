@@ -610,6 +610,19 @@ func _apply_mood() -> void:
 		# the resource default; presets that want slower / faster motion
 		# author their own value. 0 disables.
 		_tentacle.target_velocity_max = mood.target_velocity_max
+		# Slice 4S.2 — body-local-frame contact persistence. Default ON;
+		# radius / jump factors at 1.0 = nominal. Caressing / idle moods
+		# can push radius factor higher for longer persistence; probing /
+		# aggressive moods lower it for fast invalidation. Resource
+		# defaults are 1.0 across the board so legacy presets see no
+		# behavioural change (cache still active, kills lub=1.0 jitter
+		# without per-mood tuning).
+		if "contact_persistence_enabled" in mood:
+			_tentacle.contact_persistence_enabled = mood.contact_persistence_enabled
+		if "contact_persistence_radius_factor" in mood:
+			_tentacle.contact_persistence_radius_factor = mood.contact_persistence_radius_factor
+		if "contact_persistence_jump_threshold_factor" in mood:
+			_tentacle.contact_persistence_jump_threshold_factor = mood.contact_persistence_jump_threshold_factor
 
 
 # Pulled out of `_ready` and exposed via the property setters so

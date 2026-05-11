@@ -13,8 +13,12 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/vector3.hpp>
+
+#include <vector>
 
 #include "../collision/environment_probe.h"
 #include "../spline/catmull_spline.h"
@@ -244,6 +248,30 @@ public:
 	// user saw in wedged configurations.
 	void set_support_in_contact(bool p_value);
 	bool get_support_in_contact() const;
+	// Slice 4S.2 — body-local-frame contact persistence (Cosmic_Bliss
+	// 2026-05-06). Per-(particle, slot) cache survives across outer ticks:
+	// last contact point + normal stored in the body's LOCAL frame, lambdas
+	// preserved through the 4R reset by a post-reset re-seed step. Probe
+	// results within hysteresis of a cached slot override the world contact
+	// point with the body-local→world transformed cached point — kills the
+	// per-face hit_point churn that drove the lub=1.0 jitter signature
+	// (round-4 diagnostic). Default ON; mood-tunable hysteresis radius so
+	// caressing moods can hold longer / probing moods invalidate faster.
+	void set_contact_persistence_enabled(bool p_enabled);
+	bool get_contact_persistence_enabled() const;
+	void set_contact_persistence_radius_factor(float p_factor);
+	float get_contact_persistence_radius_factor() const;
+	void set_contact_persistence_jump_threshold_factor(float p_factor);
+	float get_contact_persistence_jump_threshold_factor() const;
+
+	// Slice 4S.2 — debug snapshot: per-particle count of cache slots that
+	// invalidated this outer tick (body dead, transform jumped past
+	// threshold, particle drifted past hysteresis, end-of-tick clamp not
+	// counted). PackedInt32Array, one entry per particle. Used by the
+	// 4S.2 test scaffold to verify teleport invalidation and the gizmo
+	// overlay to color particles by cache activity.
+	godot::PackedInt32Array get_persistence_invalidation_count_snapshot() const;
+
 	// Slice 4F — global multiplier on the type-1 friction reciprocal impulse
 	// applied to dynamic bodies (RigidBody3D / PhysicalBone3D / etc.) via
 	// PhysicsServer3D.body_apply_impulse. PBD friction in the kinetic regime
@@ -503,6 +531,38 @@ private:
 	// solver for RID-keyed lambda warm-start across substeps.
 	godot::PackedInt64Array env_contact_rids_scratch;
 
+	// Slice 4S.2 — body-local-frame contact persistence buffer. One entry
+	// per (particle, slot) pair, flat-indexed as `i * MAX_CONTACTS + k`.
+	// Sized in `rebuild_chain` to `particle_count × MAX_CONTACTS_PER_PARTICLE`.
+	// Survives across outer ticks; invalidated entries flip `valid = false`
+	// and zero their lambdas. `cached_body_xform` is the body's
+	// `global_transform` at last snapshot — used to detect teleports.
+	// `body_local_point` / `body_local_normal` are the contact in the
+	// body's local frame so a rotating / translating body's contact tracks
+	// the body cleanly.
+	struct PersistedContactSlot {
+		bool valid = false;
+		godot::Vector3 body_local_point;
+		godot::Vector3 body_local_normal;
+		godot::Transform3D cached_body_xform;
+		godot::RID body_rid;
+		uint64_t body_object_id = 0;
+		float persisted_normal_lambda = 0.0f;
+		godot::Vector3 persisted_tangent_lambda;
+	};
+	std::vector<PersistedContactSlot> persistence_buffer;
+	godot::PackedInt32Array persistence_invalidation_count_snapshot;
+	// Slice 4S.2 — DEFAULT OFF. Body-local-frame contact persistence is
+	// opt-in per mood: settled / slowly-sliding chains (caressing, idle)
+	// benefit; actively probing chains across rotating rigid bodies do
+	// not (cache locks friction lambdas → leg kick reciprocals saturate
+	// Jolt's max_angular_velocity in the 4Q regression scene). Moods that
+	// hang at rest can set `contact_persistence_enabled = true` on their
+	// TentacleMood resource to opt in; active moods leave it off.
+	bool contact_persistence_enabled = false;
+	float contact_persistence_radius_factor = 1.0f;
+	float contact_persistence_jump_threshold_factor = 1.0f;
+
 	// Slice 4N — fresh-this-tick contact flags. Written by
 	// `_run_environment_probe()` from `contact_count > 0` *before* the solver
 	// iterates, so behaviour drivers consuming
@@ -515,6 +575,24 @@ private:
 	godot::PackedByteArray _in_contact_this_tick_snapshot;
 
 	void _run_environment_probe();
+	// Slice 4S.2 — outer-tick boundary helpers (called from Tentacle::tick).
+	// Order: reset_friction_applied → reset_environment_contact_lambdas (4R)
+	// → _validate_and_reseed_persistence → apply_target_rate_limit → substep
+	// loop → _snapshot_persistence_post_tick. Reseed runs ONCE per outer
+	// tick (cache survives across ticks); snapshot runs ONCE per outer tick
+	// post-last-substep, applies the end-of-tick cone clamp on persisted
+	// tangent_lambda.
+	void _validate_and_reseed_persistence();
+	void _snapshot_persistence_post_tick();
+	// Slice 4S.2 — in-probe override: for each particle, walk cached slots
+	// and check whether any new probe result references the same body.
+	// If yes + particle within hysteresis of body-local→world cached point:
+	// replace the probe's world contact point/normal with the cached
+	// body-local→world transformed value (stability win — point doesn't
+	// flip per-face as the chain slides tangentially across a faceted
+	// hull). Drops cache entries whose body isn't found in this tick's
+	// probe results.
+	void _apply_contact_persistence_to_probe_results();
 	// Slice 5H — refresh per-particle arc-length + body-frame X axis
 	// once per outer tick so the contact paths can sample the feature
 	// silhouette in O(1) without recomputing the chain frame.

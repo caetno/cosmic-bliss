@@ -138,6 +138,33 @@ extends Resource
 ## flip; reverted after a regression in active-probing scenarios. See
 ## PBDSolver.h DEFAULT_ITERATION_COUNT comment for context.
 @export_range(1, 4) var substep_count: int = 1
+## Slice 4S.2 — body-local-frame contact persistence (Cosmic_Bliss
+## 2026-05-06). When true, the chain caches contact points in the
+## colliding body's local frame so faceted convex hulls don't generate
+## per-tick hit_point churn as the chain slides tangentially. DEFAULT
+## OFF: opt-in for moods that hang at rest (caressing, idle). Active-
+## probing moods leave OFF — cache locks friction lambdas against
+## rotating Jolt rigidbody legs and saturates the angular velocity cap
+## (validated in test_4q_probing_regression). Forwarded to
+## [code]Tentacle.contact_persistence_enabled[/code].
+@export var contact_persistence_enabled: bool = false
+## Slice 4S.2 — hysteresis radius multiplier. The cache invalidates when
+## a particle drifts more than [code]0.5 × collision_radius × factor[/code]
+## from the cached body-local→world contact point. Caressing / idle moods
+## that hang at rest can push higher (~2.0) for longer persistence;
+## probing / aggressive moods that whip the chain should lower (~0.5) so
+## the cache invalidates promptly. Default 1.0. Forwarded to
+## [code]Tentacle.contact_persistence_radius_factor[/code].
+@export_range(0.0, 8.0, 0.01, "or_greater") var contact_persistence_radius_factor: float = 1.0
+## Slice 4S.2 — body-teleport detection multiplier. The cache invalidates
+## when the cached body's [code]global_transform.origin[/code] moves more
+## than [code]2.0 × collision_radius × factor[/code] in one outer tick.
+## Default 1.0. Lower (~0.5) for scenes with fast-moving bodies where
+## stale cache reads would otherwise produce contact ghosting; raise
+## (~2.0) for tolerant scenes where small body steps shouldn't break
+## persistence. Forwarded to
+## [code]Tentacle.contact_persistence_jump_threshold_factor[/code].
+@export_range(0.0, 8.0, 0.01, "or_greater") var contact_persistence_jump_threshold_factor: float = 1.0
 
 # --- Attractor -------------------------------------------------------------
 

@@ -120,6 +120,16 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 	# may shift behaviour. Reported informationally; bounds asserted only
 	# loosely (no regression below the 4Q-fix baseline at sub=1).
 	var sub4_default: Dictionary = await _run_one_arm(0.8, 5.0, 4, 1)
+	# Slice 4S.2 opt-in arm: persistence_enabled=true at sub=1, taper OFF.
+	# Locks in the known regression — body-local contact persistence
+	# stabilises hit_point against rapidly-rotating Jolt rigid-body legs
+	# so contact-frame friction accumulators stay locked, driving the
+	# reciprocal impulse high enough to saturate Jolt's max angular
+	# velocity cap (= 1.5π ≈ 4.7124 rad/s). Default is OFF — moods opt
+	# in only for settled-contact scenarios. This arm asserts the
+	# regression magnitude as observed so future tuning can't silently
+	# shift behaviour in either direction.
+	var s2_opt_in: Dictionary = await _run_one_arm(1.0, 5.0, 1, 4, true)
 
 	print("    [taper OFF (thr=1.0) tvm=5.0]  leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
 			% [disabled.leg_ang_max, disabled.saturation_events,
@@ -133,6 +143,9 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 	print("    [4S.1 sub=4 iter=1 tvm=5.0]    leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
 			% [sub4_default.leg_ang_max, sub4_default.saturation_events,
 				sub4_default.max_tlam, sub4_default.static_cone, sub4_default.tlam_over_cone])
+	print("    [4S.2 persist=ON sub=1 tvm=5.0] leg_ang_max=%.4f  sat=%d  tlam=%.6f  cone=%.6f  tlam/cone=%.3f"
+			% [s2_opt_in.leg_ang_max, s2_opt_in.saturation_events,
+				s2_opt_in.max_tlam, s2_opt_in.static_cone, s2_opt_in.tlam_over_cone])
 	print("    Expected bounds:")
 	print("      taper-ON default vs OFF:   leg_ang_max ≤ %.2f × disabled" % ANG_MAX_REDUCTION_RATIO)
 	print("      taper-ON default vs OFF:   saturation ≤ disabled")
@@ -207,11 +220,38 @@ func _test_stick_slip_taper_reduces_leg_motion_at_lub_zero() -> bool:
 				% [sub4_default.leg_ang_max, disabled.leg_ang_max,
 					disabled.leg_ang_max * 1.05])
 		return false
+
+	# Slice 4S.2 opt-in arm: persistence ON is known to regress active
+	# probing (cache-locked contact + active rotating-leg-body friction
+	# reciprocal saturates Jolt's max angular velocity cap = 1.5π). At
+	# the regression baseline measurement (2026-05-11) the persistence-ON
+	# arm produces leg_ang_max ≈ 3.3× the disabled arm. We assert a
+	# loose upper bound (≤ 4.0× disabled) AND a loose lower bound
+	# (≥ 1.8× disabled) so that:
+	#  - if persistence ever stops regressing (drops below 1.8×), we
+	#    catch it (means the underlying mechanism changed — could be
+	#    intentional but should be reviewer-visible).
+	#  - if persistence regresses dramatically MORE than 4× disabled,
+	#    something else is breaking (e.g. Jolt cap changed, scenery
+	#    integration shifted).
+	# The bound is NOT a primary acceptance — it's a "locked-in observed
+	# regression" snapshot, per 4S.2 review (2026-05-11).
+	if s2_opt_in.leg_ang_max > disabled.leg_ang_max * 4.0:
+		push_error(("4S.2 persist=ON leg_ang_max %.3f > 4.0 × disabled %.3f — "
+				+ "regression worse than observed baseline; investigate")
+				% [s2_opt_in.leg_ang_max, disabled.leg_ang_max])
+		return false
+	if s2_opt_in.leg_ang_max < disabled.leg_ang_max * 1.8:
+		push_error(("4S.2 persist=ON leg_ang_max %.3f < 1.8 × disabled %.3f — "
+				+ "regression less severe than observed (mechanism may have changed); investigate")
+				% [s2_opt_in.leg_ang_max, disabled.leg_ang_max])
+		return false
 	return true
 
 
 func _run_one_arm(p_threshold: float, p_target_velocity_max: float,
-		p_substep_count: int = 1, p_iter_count: int = 4) -> Dictionary:
+		p_substep_count: int = 1, p_iter_count: int = 4,
+		p_contact_persistence_enabled: bool = false) -> Dictionary:
 	for c in root.get_children():
 		root.remove_child(c)
 		c.free()
@@ -269,6 +309,7 @@ func _run_one_arm(p_threshold: float, p_target_velocity_max: float,
 	t.target_velocity_max = p_target_velocity_max
 	t.substep_count = p_substep_count
 	t.iteration_count = p_iter_count
+	t.contact_persistence_enabled = p_contact_persistence_enabled
 
 	for _i in SETTLE_TICKS:
 		await physics_frame

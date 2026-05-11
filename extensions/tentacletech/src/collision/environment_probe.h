@@ -90,6 +90,11 @@ public:
 	int get_contact_count() const { return (int)contacts.size(); }
 	const EnvironmentContact &get_contact(int i) const { return contacts[i]; }
 	const godot::LocalVector<EnvironmentContact> &get_contacts() const { return contacts; }
+	// Slice 4S.2 — Tentacle's `_apply_contact_persistence_to_probe_results`
+	// overrides world hit_point/hit_normal with body-local→world transformed
+	// cached values. Mutable accessor scoped to that path; do not call
+	// from outside the Tentacle's probe pipeline.
+	godot::LocalVector<EnvironmentContact> &get_contacts_mut() { return contacts; }
 
 private:
 	godot::Ref<godot::PhysicsShapeQueryParameters3D> shape_query;

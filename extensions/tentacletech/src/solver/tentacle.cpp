@@ -174,10 +174,16 @@ void Tentacle::tick(float p_delta) {
 	// Slice 4R — clear contact lambdas at outer-tick boundary. Substep loop
 	// (below) calls set_environment_contacts_multi per substep; the RID-keyed
 	// warm-start there preserves λ across substeps for stable RIDs (Obi 4×1
-	// convergence). Cross-tick warm-start is intentionally out of scope —
-	// see PBDSolver::reset_environment_contact_lambdas comment + slice 4R
-	// prompt's "Out of scope: Cross-tick warm-start ... Defer."
+	// convergence). 4S.2 re-seeds persisted lambdas AFTER this reset fires;
+	// the reset's "post-call all live lambdas == 0" invariant is preserved
+	// verbatim — the re-seed is the explicit override mechanism.
 	solver->reset_environment_contact_lambdas();
+	// Slice 4S.2 — body-local-frame contact persistence: re-inject persisted
+	// (RID, normal_lambda, tangent_lambda) for cache slots whose body is
+	// still alive and hasn't teleported. Runs ONCE per outer tick. Composes
+	// with 4R by addition (post-reset write), not by mutating the reset
+	// path. See PersistedContactSlot + Cosmic_Bliss_Update note.
+	_validate_and_reseed_persistence();
 	// Slice 4T — pose-target rate limit. Runs ONCE per outer tick, before
 	// the substep loop below, against the OUTER `p_delta`. Mutates the
 	// solver's `target_position` / `pose_target_positions` in-place so the
@@ -192,6 +198,11 @@ void Tentacle::tick(float p_delta) {
 		_run_environment_probe();
 		solver->tick(sub_dt);
 	}
+
+	// Slice 4S.2 — snapshot live contact state back into body-local-frame
+	// persistence buffer for next tick's reseed. Applies the end-of-tick
+	// cone clamp on tangent_lambda. Runs AFTER the last substep.
+	_snapshot_persistence_post_tick();
 
 	// Reciprocal impulse (§4.3 type-1) uses the OUTER tick dt — `m × Δx / dt`
 	// is "impulse per frame the user sees." Per-substep friction_applied
@@ -305,6 +316,14 @@ void Tentacle::_run_environment_probe() {
 			(uint32_t)environment_collision_layer_mask,
 			feature_silhouette_max_outward);
 
+	// Slice 4S.2 — override world hit_point/hit_normal in EnvironmentContact
+	// with body-local→world cached values, BEFORE the scratch arrays are
+	// built from EnvironmentContact below. Stability win: contact point
+	// doesn't flip per-face as the chain slides tangentially across a
+	// faceted convex hull. Cache misses drop their entry here; valid
+	// entries survive into the scratch-array build and reach the solver.
+	_apply_contact_persistence_to_probe_results();
+
 	// Slice 4M: probe returns up to MAX_CONTACTS_PER_PARTICLE contacts per
 	// particle. Pack into 2N flat arrays for the solver, plus an N-byte
 	// count array (replaces slice 4D's `active` flag — count == 0 is
@@ -371,6 +390,245 @@ void Tentacle::_run_environment_probe() {
 		uint8_t *dst = _in_contact_this_tick_snapshot.ptrw();
 		for (int i = 0; i < n; i++) {
 			dst[i] = (src[i] > 0) ? 1 : 0;
+		}
+	}
+}
+
+void Tentacle::_apply_contact_persistence_to_probe_results() {
+	// Slice 4S.2 — runs inside _run_environment_probe AFTER probe.probe()
+	// populates EnvironmentContact slots but BEFORE the scratch arrays are
+	// written from those contacts. Mutates the EnvironmentContact array
+	// in-place: for each (particle, probe_slot) whose hit_rid matches a
+	// valid cached slot AND whose particle is within hysteresis of the
+	// body-local→world cached point, REPLACE hit_point/hit_normal with
+	// the cached body-local→world values. For cached slots whose body
+	// doesn't appear in this tick's probe results for the same particle,
+	// drop the cache slot (next reseed will see valid=false and not
+	// inject lambdas — slot starts cold).
+	if (!contact_persistence_enabled) return;
+	if (solver.is_null()) return;
+	auto &contacts = environment_probe.get_contacts_mut();
+	int n = (int)contacts.size();
+	if (n == 0) return;
+	if ((int)persistence_buffer.size() <
+			n * tentacletech::MAX_CONTACTS_PER_PARTICLE) {
+		// Buffer not yet sized (rebuild_chain not called) — skip.
+		return;
+	}
+	float radius_base = particle_collision_radius;
+	float hysteresis_radius = radius_base * 0.5f *
+			contact_persistence_radius_factor;
+	float hysteresis_radius_sq = hysteresis_radius * hysteresis_radius;
+
+	for (int i = 0; i < n; i++) {
+		auto &c = contacts[i];
+		int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+		// Track which probe slots we've matched a cache entry to (so two
+		// cached slots can't both claim the same probe slot).
+		bool probe_slot_claimed[tentacletech::MAX_CONTACTS_PER_PARTICLE] = {};
+		for (int ck = 0; ck < tentacletech::MAX_CONTACTS_PER_PARTICLE; ck++) {
+			PersistedContactSlot &cached = persistence_buffer[base + ck];
+			if (!cached.valid) continue;
+			// Resolve cached body.
+			Object *body_obj = ObjectDB::get_instance(
+					ObjectID((uint64_t)cached.body_object_id));
+			if (body_obj == nullptr) {
+				cached.valid = false;
+				continue;
+			}
+			Node3D *body_node = Object::cast_to<Node3D>(body_obj);
+			if (body_node == nullptr) {
+				cached.valid = false;
+				continue;
+			}
+			Transform3D body_xform = body_node->get_global_transform();
+			Vector3 cached_world_point = body_xform.xform(cached.body_local_point);
+			Vector3 cached_world_normal = body_xform.basis.xform(cached.body_local_normal);
+			float l2 = cached_world_normal.length_squared();
+			if (l2 > 1e-10f) {
+				cached_world_normal /= Math::sqrt(l2);
+			}
+			// Find a probe slot referencing the same body.
+			int matched_pk = -1;
+			for (int pk = 0; pk < c.contact_count; pk++) {
+				if (probe_slot_claimed[pk]) continue;
+				if (c.hit_object_id[pk] == cached.body_object_id) {
+					matched_pk = pk;
+					break;
+				}
+			}
+			if (matched_pk < 0) {
+				// Cached body not in this tick's probe results for this
+				// particle — drop. (The brief's "perf win" path of
+				// inserting cached body into an empty slot without probe
+				// confirmation is deferred; per Phase Log spec divergence
+				// (d) we keep probe firing for every slot this slice.)
+				cached.valid = false;
+				continue;
+			}
+			// Hysteresis check: probe's new world hit_point must be close
+			// to the cached body-local→world point. Measures how far the
+			// contact has slid along the body's surface since cache
+			// capture. If the slide exceeds `hysteresis_radius`, the cache
+			// is no longer a good stand-in for the current contact —
+			// drop and let the fresh probe own the slot. This is the
+			// pre-fix-2026-05-06 mistake corrected: previously the check
+			// compared particle position to surface contact point, which
+			// is always ≈ collision_radius and produced no useful signal.
+			float dsq = (c.hit_point[matched_pk] - cached_world_point).length_squared();
+			if (dsq > hysteresis_radius_sq) {
+				cached.valid = false;
+				continue;
+			}
+			probe_slot_claimed[matched_pk] = true;
+			c.hit_point[matched_pk] = cached_world_point;
+			c.hit_normal[matched_pk] = cached_world_normal;
+			c.hit_object_id[matched_pk] = cached.body_object_id;
+			c.hit_rid[matched_pk] = cached.body_rid;
+		}
+	}
+}
+
+void Tentacle::_validate_and_reseed_persistence() {
+	// Slice 4S.2 — outer-tick boundary, after solver->reset_friction_applied()
+	// and solver->reset_environment_contact_lambdas() have fired. For each
+	// cached slot: confirm body still alive, transform hasn't jumped past
+	// threshold. Valid slots survive into _apply_contact_persistence_to_probe_results
+	// (which runs per-substep) and override the probe's world contact point
+	// with the body-local→world transformed cached value.
+	//
+	// LAMBDA PERSISTENCE INTENTIONALLY DROPPED — see spec divergence (a) in
+	// the 4S.2 PHASE_LOG entry: warm-starting lambdas across outer ticks
+	// recreates the taper-feedback oscillation that 4R reverted the substep
+	// flip for (warm tlam at the cone boundary → tlam/cone at saturation
+	// from iter 0 → taper kills target pull → cone collapses → contacts
+	// lost → chain slams in). The 4S.2 stability win is the CONTACT POINT
+	// stability (kills per-face hit_point churn on faceted hulls); lambdas
+	// continue to reset every outer tick per the 4R invariant.
+	if (solver.is_null()) return;
+	int n = solver->get_particle_count();
+	int expected = n * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	if ((int)persistence_buffer.size() != expected) {
+		persistence_buffer.assign((size_t)expected, PersistedContactSlot());
+	}
+	if (persistence_invalidation_count_snapshot.size() != n) {
+		persistence_invalidation_count_snapshot.resize(n);
+	}
+	// Zero the invalidation counter at outer-tick start; only this tick's
+	// invalidations populate it.
+	for (int i = 0; i < n; i++) {
+		persistence_invalidation_count_snapshot.set(i, 0);
+	}
+	if (!contact_persistence_enabled) {
+		// Cleared so a toggle-off run doesn't leave stale cached state
+		// influencing the next toggle-on run.
+		for (size_t i = 0; i < persistence_buffer.size(); i++) {
+			persistence_buffer[i] = PersistedContactSlot();
+		}
+		return;
+	}
+	float radius_base = particle_collision_radius;
+	float jump_threshold = radius_base * 2.0f *
+			contact_persistence_jump_threshold_factor;
+	float jump_threshold_sq = jump_threshold * jump_threshold;
+
+	for (int i = 0; i < n; i++) {
+		int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+		int invalidations_this_particle = 0;
+		for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
+			PersistedContactSlot &cached = persistence_buffer[base + k];
+			if (!cached.valid) continue;
+			Object *body_obj = ObjectDB::get_instance(
+					ObjectID((uint64_t)cached.body_object_id));
+			if (body_obj == nullptr) {
+				cached.valid = false;
+				invalidations_this_particle++;
+				continue;
+			}
+			Node3D *body_node = Object::cast_to<Node3D>(body_obj);
+			if (body_node == nullptr) {
+				cached.valid = false;
+				invalidations_this_particle++;
+				continue;
+			}
+			Transform3D current_xform = body_node->get_global_transform();
+			Vector3 origin_delta = current_xform.origin - cached.cached_body_xform.origin;
+			if (origin_delta.length_squared() > jump_threshold_sq) {
+				// Body teleported — invalidate; let the fresh probe own
+				// this slot.
+				cached.valid = false;
+				invalidations_this_particle++;
+				continue;
+			}
+			// Survived all checks — slot stays valid; the per-substep
+			// _apply_contact_persistence_to_probe_results step will use
+			// it to override world contact point/normal.
+		}
+		if (invalidations_this_particle > 0) {
+			persistence_invalidation_count_snapshot.set(i,
+					persistence_invalidation_count_snapshot[i]
+							+ invalidations_this_particle);
+		}
+	}
+}
+
+void Tentacle::_snapshot_persistence_post_tick() {
+	// Slice 4S.2 — runs ONCE per outer tick after the last substep's
+	// solver->tick(sub_dt) completes. Reads the live last-substep
+	// EnvironmentContact array (post any _apply_contact_persistence_to_probe_results
+	// overrides) and stores world contact point/normal in body-local frame
+	// so next tick's reseed can re-apply them via _apply_contact_persistence_to_probe_results.
+	// Lambdas are NOT persisted (see _validate_and_reseed_persistence
+	// rationale — would recreate the 4R taper-feedback oscillation).
+	if (!contact_persistence_enabled) return;
+	if (solver.is_null()) return;
+	int n = solver->get_particle_count();
+	int expected = n * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	if ((int)persistence_buffer.size() != expected) return;
+	const auto &contacts = environment_probe.get_contacts();
+	int contact_count_n = (int)contacts.size();
+
+	for (int i = 0; i < n; i++) {
+		int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+		const tentacletech::EnvironmentContact *c =
+				(i < contact_count_n) ? &contacts[i] : nullptr;
+		int active_count = (c != nullptr) ? c->contact_count : 0;
+
+		for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
+			int slot = base + k;
+			PersistedContactSlot &cached = persistence_buffer[slot];
+			if (k >= active_count || c == nullptr) {
+				// Slot inactive this tick — clear cache.
+				cached.valid = false;
+				continue;
+			}
+			Vector3 world_point = c->hit_point[k];
+			Vector3 world_normal = c->hit_normal[k];
+			uint64_t body_oid = c->hit_object_id[k];
+			godot::RID body_rid = c->hit_rid[k];
+			if (body_oid == 0) {
+				cached.valid = false;
+				continue;
+			}
+			Object *body_obj = ObjectDB::get_instance(ObjectID(body_oid));
+			Node3D *body_node = (body_obj != nullptr)
+					? Object::cast_to<Node3D>(body_obj) : nullptr;
+			if (body_node == nullptr) {
+				cached.valid = false;
+				continue;
+			}
+			Transform3D body_xform = body_node->get_global_transform();
+			Transform3D body_inv = body_xform.affine_inverse();
+			cached.valid = true;
+			cached.body_local_point = body_inv.xform(world_point);
+			cached.body_local_normal = body_inv.basis.xform(world_normal);
+			cached.cached_body_xform = body_xform;
+			cached.body_rid = body_rid;
+			cached.body_object_id = body_oid;
+			// Lambdas not persisted across outer ticks (spec divergence
+			// (a)); these fields stay at default 0.
+			cached.persisted_normal_lambda = 0.0f;
+			cached.persisted_tangent_lambda = Vector3();
 		}
 	}
 }
@@ -520,6 +778,19 @@ void Tentacle::rebuild_chain() {
 		solver->set_rigid_base_count(desired_rigid);
 	}
 	anchor_override = false;
+
+	// Slice 4S.2 — resize persistence buffer + per-particle invalidation
+	// counter. Cache content is discarded on rebuild (chain has changed
+	// shape; old body-local points no longer correspond to particles
+	// anywhere reasonable). `valid=false` default-initializes via the
+	// struct's defaults.
+	persistence_buffer.assign(
+			(size_t)(particle_count * tentacletech::MAX_CONTACTS_PER_PARTICLE),
+			PersistedContactSlot());
+	persistence_invalidation_count_snapshot.resize(particle_count);
+	for (int i = 0; i < particle_count; i++) {
+		persistence_invalidation_count_snapshot.set(i, 0);
+	}
 
 	// Particle count may have changed; resize the per-tick buffers and the
 	// data texture to match the new chain. Safe to call before _ready (does
@@ -818,6 +1089,33 @@ void Tentacle::set_target_velocity_max(float p_v) {
 }
 float Tentacle::get_target_velocity_max() const {
 	return target_velocity_max;
+}
+
+void Tentacle::set_contact_persistence_enabled(bool p_enabled) {
+	contact_persistence_enabled = p_enabled;
+}
+bool Tentacle::get_contact_persistence_enabled() const {
+	return contact_persistence_enabled;
+}
+
+void Tentacle::set_contact_persistence_radius_factor(float p_factor) {
+	if (p_factor < 0.0f) p_factor = 0.0f;
+	contact_persistence_radius_factor = p_factor;
+}
+float Tentacle::get_contact_persistence_radius_factor() const {
+	return contact_persistence_radius_factor;
+}
+
+void Tentacle::set_contact_persistence_jump_threshold_factor(float p_factor) {
+	if (p_factor < 0.0f) p_factor = 0.0f;
+	contact_persistence_jump_threshold_factor = p_factor;
+}
+float Tentacle::get_contact_persistence_jump_threshold_factor() const {
+	return contact_persistence_jump_threshold_factor;
+}
+
+PackedInt32Array Tentacle::get_persistence_invalidation_count_snapshot() const {
+	return persistence_invalidation_count_snapshot;
 }
 
 void Tentacle::set_sor_factor(float p_v) {
@@ -1762,6 +2060,20 @@ void Tentacle::_bind_methods() {
 			&Tentacle::get_environment_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("get_in_contact_this_tick_snapshot"),
 			&Tentacle::get_in_contact_this_tick_snapshot);
+	ClassDB::bind_method(D_METHOD("set_contact_persistence_enabled", "enabled"),
+			&Tentacle::set_contact_persistence_enabled);
+	ClassDB::bind_method(D_METHOD("get_contact_persistence_enabled"),
+			&Tentacle::get_contact_persistence_enabled);
+	ClassDB::bind_method(D_METHOD("set_contact_persistence_radius_factor", "factor"),
+			&Tentacle::set_contact_persistence_radius_factor);
+	ClassDB::bind_method(D_METHOD("get_contact_persistence_radius_factor"),
+			&Tentacle::get_contact_persistence_radius_factor);
+	ClassDB::bind_method(D_METHOD("set_contact_persistence_jump_threshold_factor", "factor"),
+			&Tentacle::set_contact_persistence_jump_threshold_factor);
+	ClassDB::bind_method(D_METHOD("get_contact_persistence_jump_threshold_factor"),
+			&Tentacle::get_contact_persistence_jump_threshold_factor);
+	ClassDB::bind_method(D_METHOD("get_persistence_invalidation_count_snapshot"),
+			&Tentacle::get_persistence_invalidation_count_snapshot);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &Tentacle::tick);
 
 	ClassDB::bind_method(D_METHOD("set_tentacle_mesh", "mesh"), &Tentacle::set_tentacle_mesh);
@@ -1880,6 +2192,16 @@ void Tentacle::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "body_impulse_scale",
 					 PROPERTY_HINT_RANGE, "0.0,2.0,0.001,or_greater"),
 			"set_body_impulse_scale", "get_body_impulse_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "contact_persistence_enabled"),
+			"set_contact_persistence_enabled", "get_contact_persistence_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_persistence_radius_factor",
+					 PROPERTY_HINT_RANGE, "0.0,8.0,0.01,or_greater"),
+			"set_contact_persistence_radius_factor",
+			"get_contact_persistence_radius_factor");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "contact_persistence_jump_threshold_factor",
+					 PROPERTY_HINT_RANGE, "0.0,8.0,0.01,or_greater"),
+			"set_contact_persistence_jump_threshold_factor",
+			"get_contact_persistence_jump_threshold_factor");
 
 	ADD_GROUP("Debug", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "draw_gizmo"),
