@@ -1343,7 +1343,7 @@ This work is gated on **TentacleTech Phase 4.5** (Oriented Particles + body-loca
 
 ### What we explicitly do not do
 
-- **No tetrahedral mesh.** Tet authoring is the canonical "fiddly artistic aspect" we are avoiding. Volume primitive + particle lattice does the job for the body regions in scope (rounded, soft, no internal hard structure).
+- **No tetrahedral mesh at §16's scope.** Tet *authoring* is the canonical "fiddly artistic aspect" we are avoiding. Volume primitive + particle lattice does the job for the body regions in §16's scope (rounded, soft, no internal hard structure). The §18 stretch path *does* introduce a bake-time tet substrate of the body interior, but tetrahedralisation is automatic (libigl tetgen against the closed body surface) and the artist still only ever sees volume primitives + numeric sliders — the no-fiddly-authoring rule holds. §18 only opens when "tentacle visibly parts the tissue, gap closes when withdrawn" becomes a load-bearing visible-quality target.
 - **No `SoftBody3D`.** Forbidden by repo convention.
 - **No per-vertex artist-painted soft mask.** The blend weight is a derived quantity, not authored.
 - **No bidirectional coupling between cluster and ragdoll dynamics this phase.** The jiggle bone is the only ragdoll-side handle; the cluster lives entirely in the PBD layer, contacting only tentacle particles and (optionally) other clusters. If a future scenario needs cluster ↔ ragdoll force feedback, that's a separate phase.
@@ -1351,6 +1351,269 @@ This work is gated on **TentacleTech Phase 4.5** (Oriented Particles + body-loca
 ### Open question (deferred)
 
 Whether the cluster shape-matching uses **single global cluster** (Müller 2005) or **overlapping subclusters** (Müller, Heidelberger, Teschner, Gross 2005 §6 "lattice shape matching") is left as a tuning decision. Single-cluster ships first; if visible deformation looks too uniform under non-uniform contact, subclusters land as a §16.7 follow-on. Same particles, just multiple shape-match constraints. No re-authoring required.
+
+---
+
+## §17 — Body Surface Field (cross-cutting infrastructure)
+
+> **Drafted 2026-05-07 per `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md`. Canonical write-up of the subsystem referenced by §15 / §16 pending-amendment banners and by `docs/architecture/TentacleTech_Architecture.md §10.4`.** Cross-cutting infrastructure spanning Marionette (jiggle + soft-region authoring), TentacleTech (orifice rim authoring), and the appearance system (decal diffusion). Slice §17.5 retires the Blender-authored jiggle-bone requirement; §17.4 retires the Blender rim weight-painting workflow. Sub-Claude reads this section in place of the 05-07-02 brief once the brief's status is flipped to "applied."
+
+### What this is
+
+A Cholesky-prefactored cotan-Laplacian on the rest-pose body surface mesh. Built once at hero load. Reused for every attachment, every diffusion query. Drives:
+
+- **Per-vertex skinning weights for particle-driven deformation** (jiggle, soft-region cluster, orifice rim). Geodesic-on-mesh-surface, not Euclidean-in-3D — so a left-thigh attachment cannot leak to the right thigh, an inner-thigh attachment cannot wrap to the front of the leg.
+- **Decal diffusion across the body surface** (oil, sweat, bruise spread) tick-by-tick via the same back-substitution.
+- **Vector-θ baking** (vector heat method, deferred but architectural slot) for globally consistent canal axis registration.
+- **Procedural mesh fairing** (cotan-Laplacian smoothing falls out for free).
+
+The load-bearing application is skinning weight derivation. The user authors a vanilla ARP+toes rig in Blender; all soft-region / orifice rim / jiggle attachments are nodes in Godot. The surface field bakes per-vertex weights automatically. This unifies three currently-separate authoring paths into one.
+
+### Mathematical primitive
+
+Discrete cotan-Laplacian `L` on the body mesh, mass matrix `M`:
+
+```
+L : sparse SPD, V × V where V ≈ 5k for kasumi
+M : sparse diagonal
+factor = cholesky(M − t*L)              // heat-method falloff
+factor_bb = cholesky(L * M⁻¹ * L)        // BBW (one factor per use case)
+```
+
+Reference: Crane et al., *The Heat Method for Distance Computation* (2013). For REPLACE-mode weights (orifice rim — partition-of-unity required) the more principled primitive is **Bounded Biharmonic Weights** (Jacobson, Baran, Popović, Sorkine 2011); same prefactored Cholesky, different linear system. Heat-method falloff vs BBW choice lands at §17.2 implementation; bench on a real hero.
+
+Factor is permanent for hero lifetime — body topology is locked at Blender export. Build cost: sub-second to a few seconds for a 5k-vert body on any current CPU.
+
+### `SurfaceAttachment` node hierarchy
+
+```
+SurfaceAttachment : Node3D                      # abstract base
+├── host_bone: NodePath                         # bone the attachment moves with rigidly
+├── falloff_radius: float                       # geodesic radius (metres)
+├── blend_mode: enum {ADDITIVE, REPLACE, PARTIAL_REPLACE}
+├── bilateral_mask: bool = true                 # mask field by host_bone LBS weight
+├── (baked) mesh_projected_position: Vector3
+├── (baked) per_vertex_weight: PackedFloat32Array     # sparse, only verts within falloff
+└── (baked) per_vertex_index: PackedInt32Array        # which vertices the weights belong to
+
+SurfaceSoftRegionAttachment : SurfaceAttachment       # particle spawn scaffold + cluster blend
+├── volume_shape: enum {Sphere, Capsule, Ellipsoid}
+├── volume_extents: Vector3
+├── soft_region_profile: SoftRegionProfile
+└── blend_mode = ADDITIVE
+
+SurfaceOrificeRimAttachment : SurfaceAttachment       # replaces Blender rim weight-painting
+├── rim_loop_count: int = 1                          # 1 default, 2 for decorated rim (jewelry)
+├── particles_per_loop: int = 16
+├── orifice_profile: OrificeProfile
+└── blend_mode = REPLACE
+
+SurfaceJiggleAttachment : SurfaceAttachment           # replaces Blender-authored jiggle bones
+├── jiggle_profile: JiggleProfile
+└── blend_mode = ADDITIVE
+
+# Future subclasses use the same base:
+#   SurfaceSensitivityProbe : SurfaceAttachment       # Reverie sensitivity field
+#   SurfaceDecalSource : SurfaceAttachment            # one-shot appearance decal splat
+#   MouseTouchProbe : SurfaceAttachment               # test-only external-contact probe (see §17.7)
+```
+
+### Blend modes
+
+**ADDITIVE** (jiggle, soft regions). Body vertex is bone-LBS-skinned normally; the field weight modulates a *secondary offset* contributed by the attachment's particles:
+
+```glsl
+vec3 lbs_pos = standard_lbs(VERTEX, BONES, WEIGHTS);
+vec3 secondary_offset = vec3(0);
+for (each attachment a in additive set) {
+    if (a.field_weight > 0)
+        secondary_offset += a.field_weight * (a.particle_pos - a.particle_rest);
+}
+VERTEX = lbs_pos + secondary_offset;
+```
+
+**REPLACE** (orifice rim). Rim particles wholly drive rim vertices; bone-LBS is unused for those verts:
+
+```glsl
+vec3 rim_pos = vec3(0);
+float rim_total = 0;
+for (each rim particle p in attachment) {
+    rim_pos += a.weight_to_p * p.world_pos;
+    rim_total += a.weight_to_p;
+}
+VERTEX = rim_pos / rim_total;
+```
+
+Replace-mode weights need partition-of-unity per vertex (BBW or post-bake normalization pass).
+
+**PARTIAL_REPLACE** (transition zones). Scalar `replace_strength ∈ [0, 1]` lerps between LBS and particle-driven:
+
+```glsl
+VERTEX = mix(lbs_pos, rim_pos / rim_total, a.replace_strength * a.field_weight);
+```
+
+### Bilateral mask + falloff
+
+A node placed on the left thigh must not influence the right thigh. The body is one continuous mesh (mucosa is part of it per TT §10), so the geodesic field can reach across via the pelvis perineum. Two stacked guards, both default-on:
+
+1. **`bilateral_mask = true`**: multiply the field weight by the attachment's host-bone LBS weight per vertex. Uses the *existing ARP skinning weights* as a domain mask — no extra authoring.
+2. **`falloff_radius`**: hard-cap geodesic distance. Verts beyond `R` get zero weight.
+
+Both apply by default. The radius bounds storage and compute cost; the bilateral mask cleans cross-anatomy leakage that the radius didn't catch.
+
+### Bake pipeline
+
+`BodySurfaceFieldBaker` editor tool runs once per hero. Per attachment:
+
+```
+1. Read body mesh from MeshInstance3D
+2. Build cotan-Laplacian L and mass matrix M
+3. Cholesky factor (M − t*L); optionally factor (L M⁻¹ L) for BBW
+4. For each SurfaceAttachment a:
+     mesh_proj = closest_point_on_mesh(a.global_position)
+     source = delta at mesh_proj's barycentric position
+     field = back_substitute(factor, source)
+     if a.bilateral_mask:
+         field *= host_bone_lbs_weight_per_vert
+     field = clamp_to_radius(field, a.falloff_radius)
+     field = normalize(field)
+     a.per_vertex_index, a.per_vertex_weight = sparsify(field)
+5. Serialize back to attachment resources
+```
+
+Total bake time on 5k-vert body with 30 attachments: seconds. No per-frame cost. The factor itself is cached in a side resource `BodySurfaceFieldFactor` — attachment-only edits don't trigger refactor; only body mesh topology changes do.
+
+### Runtime
+
+```
+particle positions arrive via RGBA32F data texture (no SSBOs; same pattern as TT centerline)
+per-vertex weights live in CUSTOM vertex attributes (sparse: 4–8 attachment slots per vert)
+shader sums contributions per blend mode
+```
+
+Per-frame texture upload: ~8 kB for 30 attachments × 16 particles. Trivial. **No per-frame heat-method solve.** Surface field is static structural data, baked once and consumed forever.
+
+### Architectural unification — what changes per consumer
+
+| Consumer | Before (current) | After (post-§17 migration) |
+|---|---|---|
+| **Orifice rim** (TT §6.1, §10.4) | Rim anchor bones in Blender + skin weights painted in Blender to anchor names; skinning shader reads live rim particle pos in place of anchor bone transforms (the rebind trick) | `SurfaceOrificeRimAttachment` in Godot scene; weights baked from surface field in REPLACE mode; same rim PBD particles drive the bake; no anchor bones in Blender |
+| **Jiggle bones** (Marionette §15) | Child bones in skeleton hierarchy at modeling time + skin weights painted in Blender; translation-only SPD on the bone | `SurfaceJiggleAttachment` in Godot scene; virtual particle runs the same translation-only SPD; weights baked from surface field in ADDITIVE mode |
+| **Soft-region clusters** (Marionette §16) | Volume primitive + auto-derived `cluster_blend` from Euclidean SDF in 3D | Volume primitive still spawns particles; `cluster_blend` now derived from surface field (geodesic-on-mesh) |
+| **External-contact bulger** (TT §7.2, "External contacts") | Sphere bulger A==B at contact point; uniform-array displacement; 2-frame eviction fade — no persistence past contact | Unchanged. Bulger system is orthogonal to surface attachments; both compose at the shader. The post-contact wobble gap remains closed by §17.5 jiggle attachments, same as today's §15. |
+| **Decal accumulator** (`docs/Appearance.md`) | UV-space splat with per-channel timer fade | Splat + geodesic diffusion via `(I − ε L)` back-substitute per channel per second |
+
+None of these change runtime *physics*. Only the authoring path and the visual mesh skinning math change. The bulger system (TT §7) is unaffected — it composes additively with surface-attachment offsets in the shader.
+
+### Authoring contract
+
+1. **Blender**: vanilla ARP rig with toes (per Phase 1). Body mesh + body skin weights against ARP bones. No orifice rim anchors. No jiggle bones. No soft-region helper bones. Export.
+2. **Godot**: under the hero scene, place attachment nodes — orifice rims, jiggle attachments, soft-region attachments. Pick `host_bone`, set `falloff_radius` + numeric params.
+3. **Run the bake.** Editor tool computes all per-vertex weights once at hero load.
+4. **Tune.** All parameters are numeric `@export` sliders. No Blender round-trip.
+
+### §17 slice plan
+
+- **§17.1 — `BodySurfaceField` core.** Cotan-Laplacian builders (sparse, CPU), Cholesky factorization, `BodySurfaceFieldFactor` resource, `SurfaceAttachment` base + three concrete subclasses with empty bake hooks, `BodySurfaceFieldBaker` editor tool. Acceptance: test attachment on a sphere mesh produces a smooth radial field with expected falloff.
+- **§17.2 — Heat-method falloff vs BBW (decision).** Bench both on a real hero mesh. Pick one for additive-mode (likely heat-method, simpler) and one for replace-mode (likely BBW, partition-of-unity by construction). Document the choice.
+- **§17.3 — Marionette §16 amendment.** Migrate soft-region cluster blend from volume-SDF to surface-field. Run §16.5 end-to-end acceptance (kasumi inner thigh + breast); validate boundary smoothness improves.
+- **§17.4 — TentacleTech orifice rim authoring amendment.** Replace Blender rim anchor weight-painting with `SurfaceOrificeRimAttachment` Godot-side authoring. Migrate kasumi's existing orifices. Verify rim deformation matches the Blender-painted baseline within visual tolerance.
+- **§17.5 — Marionette jiggle amendment.** Migrate kasumi breast jiggle from Blender skeleton to `SurfaceJiggleAttachment`. Verify §15 acceptance (slap and detach, ≥ 0.6 s wobble) still passes. Author glute jiggle on kasumi (impossible before because she has no glute bones in Blender). Belly jiggle becomes trivially addable as a third attachment.
+- **§17.6 — Appearance decal diffusion** (non-blocking). Add `(I − ε L)` diffusion step to the decal accumulator's per-tick update. One channel at a time; tune `ε` per channel.
+
+§17.1–§17.2 are infrastructure; they can land in parallel with TentacleTech Phase 4.5 (Oriented Particles). §17 itself is independent of TT 4.5. §17.3 must land before Marionette §16 progresses past §16.1 (resource schema); otherwise §16.2+ implements blend math that's about to be retired.
+
+Extension home: probably a new top-level `extensions/body_surface_field/` since it's cross-cutting (TentacleTech, Marionette, appearance all consume). Decide at §17.1 implementation.
+
+### §17.7 — `MouseTouchProbe` (test fixture)
+
+Not in the 05-07-02 brief; called out here because the "mouse-controlled touch for testing" gap is structural. A `MouseTouchProbe : SurfaceAttachment` synthesizes an external-contact bulger from a screen-space raycast: camera-ray → body mesh hit → emit a Transient-tier bulger into the existing `SkinBulgeDriver` aggregate (TT §7.2 path) with strength controlled by mouse-drag or a debug slider. Optional ADDITIVE-mode surface-field weighting if a softer falloff than the bulger's r×2.5 reach is desired. Test-only; not a gameplay primitive. Slice opens when QA needs interactive deformation poking without scripting a tentacle.
+
+### Caveats
+
+1. **Mesh topology locked at hero load.** Topology changes at runtime invalidate the factor. Consistent with existing static-body-mesh rule.
+2. **Mesh must be reasonably manifold.** Cotan-Laplacian breaks down on non-manifold edges or degenerate triangles. Bake-time tool errors visibly rather than producing silently-wrong weights.
+3. **Surface Laplacian on a deforming skinned mesh is approximate.** Factor is baked against rest pose; geodesic distances are exact at rest, approximate under stretch. Acceptable per the heat-method paper's option (a) — degrades gracefully under typical body deformation. *Interior* fields (distance-to-bone for muscle/fat classification, deep-contact sensitivity) suffer more from the surface approximation — see §18 for the volumetric extension.
+4. **REPLACE-mode partition-of-unity.** Heat-method weights don't naturally sum to 1 across overlapping attachments. Post-bake normalize or use BBW.
+
+### Open questions
+
+- **Q17.1.** Heat-method falloff vs BBW as default for additive? Bench at §17.2.
+- **Q17.2.** Sparse vs dense per-vertex weight storage? Probably sparse (4–8 slots indexed).
+- **Q17.3.** `BodySurfaceField` as new top-level extension, or in `extensions/shared/`?
+- **Q17.4.** Compatibility migration for kasumi's existing orifice rim Blender weights — strip at re-export, or leave as no-op zero-weights? Not load-bearing for ship.
+- **Q17.5.** Bilateral mask — host_bone LBS weight only, or `host_bone + neighbors`? Direct host_bone first; revisit if results look too narrow.
+
+---
+
+## §18 — Volumetric tet substrate (STRETCH)
+
+> **Status: stretch goal, drafted 2026-05-10 per `docs/Cosmic_Bliss_Update_2026-05-10_body_volumetric_tets.md`. Not load-bearing for the immediate roadmap.** §17 surface-only covers all three current consumers (rim, jiggle, soft-region surface offset) plus the bulger system's existing internal-displacement story (TT §7 storage beads + internal tentacles drive both skin and cavity-wall meshes from one uniform array). §18 opens when soft-region clusters need to deform *interior* tissue, not just shift surface vertices — i.e. when "tentacle pushes into inner thigh visibly parts the tissue, gap closes when withdrawn" becomes the visible-quality target. Until that bar moves, §17's surface offsets + §16's particle clusters + §7's bulgers cover the visible deformation surface.
+
+### What §18 changes
+
+Three amendments to §17, each independent:
+
+1. **Volumetric heat method on tets** for body-interior scalars. Volumetric Laplacian is the FEM cotan-equivalent on tets (Crane et al. 2013 §3.2 covers the tet case):
+
+   ```
+   L_ij = (1/6) * Σ over tets containing edge (i,j) :  cot(dihedral_ij)
+   M_ii = (1/4) * Σ over tets containing vertex i :   tet_volume
+   factor = cholesky(M − t * L)
+   ```
+
+   Cholesky-prefactored once at hero load. Same back-substitution pattern as surface. Marginal extra code over §17 (cotan operator generalizes; assembly loop iterates over tets instead of triangles).
+
+   - **Goes volumetric:** distance-to-bone (used for tet classification + anisotropy gradient); deep-contact sensitivity (Reverie consumer — volumetric solve respects that inside-of-canal sensitivity should reach surrounding tissue through the body interior, not around the external surface).
+   - **Stays on the surface:** decal diffusion (skin-only by definition); vector-θ canal axis (surface phenomenon); per-vertex skinning weights for rim/jiggle/cluster surface offset (paint vertex weights on the body mesh, not on tet interior nodes).
+
+2. **Kinematic tet vertex = overwrite, not constrain.** A tet vertex bound to a bone is kinematic. Each tick, before the constraint solve:
+
+   ```
+   v.position = solver.worldToLocal * b.localToWorld * v.bindPose * v.restPosition
+   v.velocity = (v.position - v.position_prev) / dt
+   v.inv_mass = 0
+   ```
+
+   Per-tet constraints (co-rotational FEM, shape-matching, distance, volume) treat kinematic vertices as fixed boundary conditions. **No spring constraint between kinematic and simulated tet vertices; no joint authoring between bone and tet.** Binding = `argmax(bone_weight_per_vertex)`, a bake-time classification step using the existing ARP weights. Lifted from Obi's softbody pattern; see `docs/pbd_research/findings_obi_softbody_authoring.md §5`.
+
+3. **Per-tet anisotropy from bone-weight gradient.** `fiber_axis = normalize(∇(distance_to_nearest_bone))` per tet, computed at bake time from the volumetric heat solve. Muscle tets get anisotropic stiffness `K_iso * I + K_aniso * outer(fiber_axis, fiber_axis)`; fat tets stay isotropic (`K_aniso = 0`). Tissue type per tet comes from volume primitives carrying a `tissue_type` enum (Muscle / Fat / Gland / Skin / Inert); user places the primitives, sets the dropdown, tunes numeric sliders. **No per-tet authoring.** Where `|∇d| < ε` (midline equidistant from two bones — mid-belly), the tet falls back to isotropic; the resulting thin band of "isotropic muscle" along the body midline is acceptable.
+
+### Where the tet mesh comes from
+
+Bake-time tetrahedralisation of the body interior with the closed body surface mesh as the boundary. Library: libigl's `igl::copyleft::tetgen::tetrahedralize` (pure C++, MPL2, builds into GDExtension cleanly; ftetwild as fallback for non-manifold inputs but heavier). Resolution is a single numeric slider (target tet count or target edge length); user never sees individual tets. Tet vertices on the body boundary coincide with body mesh vertices, so surface-skinned verts inherit tet-solve positions automatically.
+
+Cost: 5k-vert body → ~30–60k interior tets at sensible density. Cholesky factor ~50–200 MB and a few seconds of bake on CPU. **Not in any per-frame path.**
+
+### What §18 does not change
+
+- **Authoring contract** stays at "ARP+toes in Blender; volume primitives + numeric sliders in Godot." Tetrahedralisation, classification, anisotropy derivation, kinematic boundary detection are all bake-time.
+- **Surface skinning path** stays — body mesh still rendered via bone-LBS + surface-attachment offsets per §17. Tet solve drives rest positions of body-boundary vertices that participate in tets; non-boundary surface deformation is still LBS + attachment offset.
+- **Decal diffusion** stays surface. **Vector-θ baking** stays surface. **Bulger uniform array** stays — §18 does not replace the TT §7 path for storage beads or internal tentacles; bulgers and tet deformation compose at the shader.
+
+### Slice plan (if §18 opens)
+
+- **§18.0** — Tet substrate (libigl tetgen, volumetric Laplacian assembly, kinematic-overwrite contract, anisotropy derivation). Inserts before §17.1 if §18 has been promoted before §17 ships; otherwise lands as a later additive infrastructure slice. Adds ~5–10 days of engineering.
+- **§17.3 expansion** — Soft-region clusters use the tet solve for interior constraints. Cluster particles become tet vertices, not standalone PBD particles. Bench co-rotational FEM (Müller 2002) vs shape-matching tet clusters (Obi-style extended to tets) at §18.0.
+
+### Why this stays stretch
+
+Today's visible-deformation budget is covered by:
+
+- **Internal displacement** (eggs, tentacle baby): TT §7 bulger system. Storage beads emit Storage-tier capsule bulgers that drive both the hero-skin shader and the cavity-wall shader from one uniform array. Already shipping.
+- **External displacement** (tentacle touch/rub): TT §7 External-contact bulgers. Already shipping. Mouse-test path is §17.7.
+- **Orifice deformation**: TT §6 rim PBD + skinning. Already shipping; §17.4 migrates authoring to Godot.
+- **Post-contact wobble**: Marionette §15 jiggle bones (shipped 2026-05-02 for breast). §17.5 migrates authoring to Godot and makes glute/belly trivially addable.
+- **Soft-region cluster deformation at the surface**: §16 + §17.3 (geodesic blend).
+
+§18 opens only when the surface-offset path starts looking too uniform-rigid under penetrating contact — i.e. the silhouette under a deeply pushed-in tentacle stops feeling like real flesh. Currently accepted as "surface offset is enough"; §18 is reserved for when that judgment changes.
+
+### Open questions (§18-specific)
+
+- **Q18.1.** Volume primitive `tissue_type` enum initial set — `Muscle`, `Fat`, `Gland`, `Skin`, `Inert` (with `MucousMembrane` as a likely later addition for canal interior)?
+- **Q18.2.** Per-tet constraint formulation — co-rotational linear FEM (Müller 2002) or shape-matching tet clusters (Obi-style extended)? Co-rotational is more physically correct; shape-matching integrates uniformly with the existing PBD solver. Bench at §18.0.
+- **Q18.3.** Where the tet solve runs — `BodySurfaceField` extension's C++ core, or absorbed into TentacleTech's PBD solver? Probably the former; body solve is a sibling of, not part of, tentacle PBD; coupling is via shared body-surface vertex positions.
+- **Q18.4.** Fiber-axis fallback — accept midline isotropic band, or derive secondary axis (bone-pair-bisector)? Visual bench at implementation.
 
 ---
 

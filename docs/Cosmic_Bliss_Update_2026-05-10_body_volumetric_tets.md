@@ -1,13 +1,9 @@
 # Cosmic Bliss — Design Update 2026-05-10 — Body volumetric tet substrate
 
-> **Status: drafted 2026-05-10, awaiting review.** Amends
-> `Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` after the Obi
+> **Status: applied 2026-05-11 to `docs/marionette/Marionette_plan.md` §18 (STRETCH).** Tet substrate is *not load-bearing for the immediate roadmap* — §17 surface-only covers the current visible-deformation budget (rim authoring, jiggle authoring, soft-region surface offset; bulger system unchanged on the TT side). §18 opens only when the surface-offset path starts looking too uniform-rigid under penetrating contact. Brief retained as changelog; full implementation notes preserved here for when §18 promotes from stretch to active. Amends `Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` after the Obi
 > softbody source review (see `docs/pbd_research/findings_obi_softbody_authoring.md`).
 > Three changes to the `BodySurfaceField` plan, all reducing to "use a tet
 > mesh as the geometric substrate, not just the surface mesh."
->
-> **Audience: top-level Claude (canonical record). Sub-Claude reads the
-> 05-07-02 brief plus this amendment as a unit until the two are merged.**
 
 ---
 

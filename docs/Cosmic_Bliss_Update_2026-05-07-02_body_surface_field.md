@@ -1,7 +1,6 @@
 # Cosmic Bliss — Design Update 2026-05-07-02 — Body Surface Field
 
-> **Status: drafted 2026-05-07, awaiting review.** Opens a new
-> cross-cutting system, `BodySurfaceField`, that prefactors the body
+> **Status: applied 2026-05-11 to `docs/marionette/Marionette_plan.md` §17 as the canonical write-up.** Brief retained as changelog. Sub-Claude reads §17 in the plan as the source of truth. Cross-extension banners in TentacleTech §10.4 and Marionette §15 / §16 forward-reference §17. Opens a new cross-cutting system, `BodySurfaceField`, that prefactors the body
 > mesh's cotan-Laplacian once at hero load and exposes geodesic-aware
 > scalar / vector / weight fields as cheap back-substitutions. The
 > system has multiple consumers — appearance decal diffusion and Reverie

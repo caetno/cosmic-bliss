@@ -200,6 +200,8 @@ See PLAN.md P7.10 for tasks.
 
 Per soft region (gluteus, breast, belly, jowls, etc.), 1–2 child bones with translation-only SPD parented to a host bone. Rotational SPD deferred to v2; gate on visible motion-quality shortfall. Authored once per hero in Blender — must exist in the skeleton hierarchy at modeling time, since skin weights are painted to them in Blender. The runtime `JiggleProfile` configures *parameters* of bones the model already exposes; it cannot create new ones. Closes the autonomous-dynamics gap on non-rim soft tissue (TentacleTech bulgers handle deformation during contact; jiggle bones own the post-contact wobble).
 
+**Pending §17.5 migration** (see `docs/marionette/Marionette_plan.md` §17). Jiggle "bones" become Godot-side `SurfaceJiggleAttachment` nodes whose per-vertex skinning weight is auto-baked from a prefactored cotan-Laplacian on the body surface. The virtual particle runs the same translation-only SPD; only the authoring path migrates. Retires the Blender modeling-time requirement entirely — glute and belly jiggle become trivially addable on kasumi (who has only breast bones today) without re-export.
+
 ---
 
 ## Response style for this project
