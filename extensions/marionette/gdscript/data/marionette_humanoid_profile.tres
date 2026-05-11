@@ -1,11 +1,11 @@
 [gd_resource type="SkeletonProfile" format=3 uid="uid://rg3ijt2qcbar"]
 
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanBody.svg" id="1_body"]
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanFace.svg" id="2_face"]
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanLeftHand.svg" id="3_lefthand"]
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanRightHand.svg" id="4_righthand"]
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanLeftFoot.svg" id="5_leftfoot"]
-[ext_resource type="Texture2D" path="res://addons/marionette/textures/BoneMapHumanRightFoot.svg" id="6_rightfoot"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanBody.svg" id="1_body"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanFace.svg" id="2_face"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanLeftHand.svg" id="3_lefthand"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanRightHand.svg" id="4_righthand"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanLeftFoot.svg" id="5_leftfoot"]
+[ext_resource type="Texture2D" path="res://addons/marionette/scripts/textures/BoneMapHumanRightFoot.svg" id="6_rightfoot"]
 
 [resource]
 group_size = 6

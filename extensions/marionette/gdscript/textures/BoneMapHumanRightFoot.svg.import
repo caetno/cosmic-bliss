@@ -10,7 +10,7 @@ metadata={
 
 [deps]
 
-source_file="res://addons/marionette/textures/BoneMapHumanRightFoot.svg"
+source_file="res://addons/marionette/scripts/textures/BoneMapHumanRightFoot.svg"
 dest_files=["res://.godot/imported/BoneMapHumanRightFoot.svg-9dfea2ac93296592fcbcb92e66271ca2.ctex"]
 
 [params]

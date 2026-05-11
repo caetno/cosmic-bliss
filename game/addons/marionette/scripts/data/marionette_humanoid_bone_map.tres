@@ -1,6 +1,6 @@
 [gd_resource type="BoneMap" format=3 uid="uid://ohj1y5wux2ex"]
 
-[ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/data/marionette_humanoid_profile.tres" id="1_profile"]
+[ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/scripts/data/marionette_humanoid_profile.tres" id="1_profile"]
 
 [resource]
 profile = ExtResource("1_profile")

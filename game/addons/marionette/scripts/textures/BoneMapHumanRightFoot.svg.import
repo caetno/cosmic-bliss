@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b8vi7qvus6uth"
-path="res://.godot/imported/BoneMapHumanRightHand.svg-f0c535e6a1edf6dec5775c692d1c53ee.ctex"
+uid="uid://cisxxqko2sct4"
+path="res://.godot/imported/BoneMapHumanRightFoot.svg-3b4dcda0303c32d9a57a87caf5f21de0.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://addons/marionette/textures/BoneMapHumanRightHand.svg"
-dest_files=["res://.godot/imported/BoneMapHumanRightHand.svg-f0c535e6a1edf6dec5775c692d1c53ee.ctex"]
+source_file="res://addons/marionette/scripts/textures/BoneMapHumanRightFoot.svg"
+dest_files=["res://.godot/imported/BoneMapHumanRightFoot.svg-3b4dcda0303c32d9a57a87caf5f21de0.ctex"]
 
 [params]
 

@@ -8,9 +8,9 @@ extends SceneTree
 # Run: cd game && godot --headless --script /abs/path/to/dryrun_kasumi_gizmo.gd
 
 const KASUMI_SCENE_PATH := "res://tests/marionette/kasumi/kasumi.tscn"
-const PROFILE_PATH := "res://addons/marionette/data/marionette_humanoid_profile.tres"
-const BONE_PROFILE_PATH := "res://addons/marionette/data/marionette_humanoid_bone_profile.tres"
-const BONE_MAP_PATH := "res://addons/marionette/data/marionette_humanoid_bone_map.tres"
+const PROFILE_PATH := "res://addons/marionette/scripts/data/marionette_humanoid_profile.tres"
+const BONE_PROFILE_PATH := "res://addons/marionette/scripts/data/marionette_humanoid_bone_profile.tres"
+const BONE_MAP_PATH := "res://addons/marionette/scripts/data/marionette_humanoid_bone_map.tres"
 
 
 func _init() -> void:

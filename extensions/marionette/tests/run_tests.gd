@@ -1,7 +1,7 @@
 extends SceneTree
 
 
-const HUMANOID_PROFILE_PATH := "res://addons/marionette/data/marionette_humanoid_profile.tres"
+const HUMANOID_PROFILE_PATH := "res://addons/marionette/scripts/data/marionette_humanoid_profile.tres"
 
 
 func _init() -> void:
@@ -10,6 +10,7 @@ func _init() -> void:
 
 	for test_callable: Callable in [
 		_test_smoke,
+		_test_marionette_core_bridge,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -147,6 +148,23 @@ func _test_smoke() -> bool:
 	if 1 + 1 != 2:
 		return _fail("test_smoke", "1 + 1 != 2")
 	return _ok("test_smoke")
+
+
+# ---------- C++ bridge (P2.0) ----------
+
+func _test_marionette_core_bridge() -> bool:
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("test_marionette_core_bridge", "MarionetteCore class not registered (GDExtension not loaded?)")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	if core == null:
+		return _fail("test_marionette_core_bridge", "ClassDB.instantiate returned null")
+	var greeting: Variant = core.call("hello")
+	if greeting != "marionette_core ok":
+		core.free()
+		return _fail("test_marionette_core_bridge", "hello() returned %s" % str(greeting))
+	core.call("tick", 0.016)
+	core.free()
+	return _ok("test_marionette_core_bridge")
 
 
 # ---------- SignedAxis ----------
@@ -3016,7 +3034,7 @@ func _test_auto_filler_preserves_existing_entries() -> bool:
 	if skel == null:
 		return _fail("autofill_preserve", "could not load Mixamo.glb")
 	var bm: BoneMap = BoneMap.new()
-	bm.profile = load("res://addons/marionette/data/marionette_humanoid_profile.tres")
+	bm.profile = load("res://addons/marionette/scripts/data/marionette_humanoid_profile.tres")
 	# Pre-set an entry the auto-filler would choose differently.
 	bm.set_skeleton_bone_name(&"Hips", &"_user_pinned_value")
 	var results: Dictionary = BoneMapAutoFiller.auto_fill(skel, bm)

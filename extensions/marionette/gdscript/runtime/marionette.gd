@@ -552,7 +552,7 @@ func auto_fill_bone_map_from_skeleton() -> void:
 		return
 	if bone_map == null:
 		bone_map = BoneMap.new()
-		bone_map.profile = load("res://addons/marionette/data/marionette_humanoid_profile.tres")
+		bone_map.profile = load("res://addons/marionette/scripts/data/marionette_humanoid_profile.tres")
 	if bone_map.profile == null:
 		push_warning("Marionette.auto_fill: bone_map.profile is null — assign MarionetteHumanoidProfile first")
 		return

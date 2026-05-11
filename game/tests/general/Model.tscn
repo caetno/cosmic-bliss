@@ -1,12 +1,12 @@
 [gd_scene format=3 uid="uid://chv2fvro5cfw7"]
 
 [ext_resource type="PackedScene" uid="uid://cpsqdsqmhbg5c" path="res://tests/general/model/lux_v4.glb" id="1_jly0q"]
-[ext_resource type="Script" uid="uid://cnrcao1ytmycf" path="res://addons/marionette/runtime/marionette.gd" id="2_bjm7o"]
-[ext_resource type="Script" uid="uid://dj5nup1616rxk" path="res://addons/marionette/runtime/marionette_bone.gd" id="2_luwnh"]
-[ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/data/marionette_humanoid_profile.tres" id="3_luwnh"]
-[ext_resource type="Script" uid="uid://rl0pyf6bqvy1" path="res://addons/marionette/resources/bone_entry.gd" id="4_okkre"]
-[ext_resource type="Script" uid="uid://dbevicy4chs4i" path="res://addons/marionette/resources/bone_profile.gd" id="5_q7v76"]
-[ext_resource type="Script" uid="uid://ym1py4m325uq" path="res://addons/marionette/resources/bone_collision_profile.gd" id="6_nid30"]
+[ext_resource type="Script" uid="uid://cnrcao1ytmycf" path="res://addons/marionette/scripts/runtime/marionette.gd" id="2_bjm7o"]
+[ext_resource type="Script" uid="uid://dj5nup1616rxk" path="res://addons/marionette/scripts/runtime/marionette_bone.gd" id="2_luwnh"]
+[ext_resource type="SkeletonProfile" uid="uid://rg3ijt2qcbar" path="res://addons/marionette/scripts/data/marionette_humanoid_profile.tres" id="3_luwnh"]
+[ext_resource type="Script" uid="uid://rl0pyf6bqvy1" path="res://addons/marionette/scripts/resources/bone_entry.gd" id="4_okkre"]
+[ext_resource type="Script" uid="uid://dbevicy4chs4i" path="res://addons/marionette/scripts/resources/bone_profile.gd" id="5_q7v76"]
+[ext_resource type="Script" uid="uid://ym1py4m325uq" path="res://addons/marionette/scripts/resources/bone_collision_profile.gd" id="6_nid30"]
 
 [sub_resource type="Resource" id="Resource_1do2y"]
 script = ExtResource("4_okkre")
