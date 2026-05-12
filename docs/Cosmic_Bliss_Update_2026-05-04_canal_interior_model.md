@@ -1,8 +1,7 @@
 # Cosmic Bliss — Design Update 2026-05-04 — Canal interior model
 
-> **Status: drafted 2026-05-04, amended 2026-05-04 (centerline particle
-> chain + skinning-skip + sac/curved-canal authoring), awaiting
-> application.** Replaces the "compound openings — sequence of rim loops
+> **Status: applied 2026-05-11 to `docs/architecture/TentacleTech_Architecture.md` §6.1 / §6.7 / §6.9 / §6.10 + new §6.12 + §7.1 / §7.2 / §8.2 / §10.4 / §10.6 / §13 / §14, `extensions/tentacletech/CLAUDE.md` in-scope + never-rule + indexing-convention additions, `docs/architecture/Reverie_Planning.md` §3 + R6.5, `docs/Description.md` + `docs/Gameplay_Mechanics.md` phenomenology language, `docs/Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md` forward-pointer.** Drafted 2026-05-04, amended 2026-05-04 (centerline particle
+> chain + skinning-skip + sac/curved-canal authoring). Brief retained as changelog. Replaces the "compound openings — sequence of rim loops
 > along tunnel axis" interior model from
 > `docs/Cosmic_Bliss_Update_2026-05-03_orifice_rim_model.md` §6.1 with a
 > 2D `tunnel_state` texture model + a PBD centerline particle chain.

@@ -179,9 +179,14 @@ Per orifice:
 - `wetness_passive_rate_bias`
 - `active_contraction_target`, `active_contraction_rate`
 - `seek_intensity`, `seek_target_tentacle_id`
-- `peristalsis_wave_speed`
-- `peristalsis_amplitude`
-- `peristalsis_wavelength`
+- `set_muscle_activation(s_k, θ_j, value)` — canonical canal interior modulation per `TentacleTech_Architecture.md` §6.12 (opened 2026-05-04). Reverie writes the `muscle[s,θ]` field directly for spatial control; the legacy peristalsis triplet below is sugar that derives a uniform wave on top.
+- `apply_muscle_pattern(pattern_id)` — sugar emitter for named canal-interior patterns.
+- `set_constriction_zone_strength(zone_index, strength)` — per-zone tightness modulation (§6.12.3).
+- `set_muscular_curl_delta(particle_index, delta)` — active canal *bend* (per centerline particle, additive to rest). Lets Reverie author behaviors like "the canal flexes around the tentacle" independent of radial squeeze.
+- `axial_surface_vel_gain`, `muscular_curl_gain` — scalar gains on the derived channels.
+- `peristalsis_wave_speed` — sugar (legacy)
+- `peristalsis_amplitude` — sugar (legacy)
+- `peristalsis_wavelength` — sugar (legacy)
 
 Per body area:
 - `pose_target_offset`, `pose_stiffness_mult`
@@ -495,7 +500,7 @@ Not starting yet; rough outline for later:
 5. **Phase R5 — Vocalization queue (Layer 1).** Basic one-shot lines tied to major events. See §4.3 Layer 1.
 5.5. **Phase R5.5 — Sustained vocal synthesis (Layer 2).** Formant + breath synthesizer driven by `body_rhythm_phase` + breath modulation + `body_strain` + state. Mixed alongside Layer 1 line samples. Gated on TentacleTech Phase 6 audio-thread `AudioStreamPlayback` infrastructure (`TentacleTech_Architecture.md` §9.1). See §4.3 Layer 2.
 6. **Phase R6 — Posture patterns + engagement vector + frequency compliance.** When Marionette's composer (P10) is ready, drive body postures via the pattern library (§5.5), publish the engagement vector (§3.4 / §5.6), and write the active frequency-compliance curve (§3.5 / §5.7). Reverie does not write joint angles; the composer turns the per-tick triple (`engagement_vector`, `pattern_stack`, `frequency_compliance_curve`) into per-bone effort. Read `body_strain` (§3.6) and feed back into mindset drift toward Overwhelmed.
-6.5. **Phase R6.5 — Peristalsis and ritual reactions.** Wire Reverie to write `peristalsis_*` channels based on state (e.g., high `Surrendered` + event pressure → expulsion waves; high `Anxious` → retention waves). Implement reaction profile branches for `PayloadDeposited` / `PayloadExpelled` / `RingTransitStart` / `RingTransitEnd` (distinct vocalizations and facial beats). Test with Scenario 12 and Scenario 13 setups.
+6.5. **Phase R6.5 — Canal interior modulation and ritual reactions.** Wire Reverie to write canal interior modulation per `TentacleTech_Architecture.md` §6.12: `muscle[s,θ]` activation field for spatial peristalsis / constriction patterns, `muscular_curl_delta` per centerline particle for active canal bend, constriction zone strengths for sphincter-like ring tightening. State-driven (e.g., high `Surrendered` + event pressure → expulsion waves; high `Anxious` → retention waves; arousal → coordinated rim + canal rhythm via the `body_rhythm_phase` shared clock). Legacy `peristalsis_*` channel writes keep working through the sugar layer (`CanalMuscleField::set_peristalsis`); new reaction profiles get spatial control directly. Implement reaction profile branches for `PayloadDeposited` / `PayloadExpelled` / `RingTransitStart` / `RingTransitEnd` (distinct vocalizations and facial beats). Test with Scenario 12 and Scenario 13 setups.
 7. **Phase R7 — Mindset dynamics.** Long-term accumulators affecting state gains.
 8. **Phase R8 — Polish and authoring tools.** Reaction profile editor, mindset tuning.
 

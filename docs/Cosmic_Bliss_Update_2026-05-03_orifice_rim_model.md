@@ -1,6 +1,6 @@
 # Cosmic Bliss — Design Update 2026-05-03 — Orifice rim model amendment
 
-> **Status: applied 2026-05-03.** Replaces the driven 8-direction ring-
+> **Status: applied 2026-05-03. Compound-openings sub-bullet superseded 2026-05-11 by `Cosmic_Bliss_Update_2026-05-04_canal_interior_model.md` §6.12 (canal interior is now a `tunnel_state` texture + centerline particle chain, not a sequence of rim loops along the tunnel axis).** Rim-particle-loop model at true orifices is unchanged and still load-bearing — only the "compound openings" axial-sequencing form retires. Replaces the driven 8-direction ring-
 > bone orifice model in `docs/architecture/TentacleTech_Architecture.md`
 > §6.1–§6.4 with a rim-particle-loop model. Architecture doc edited to
 > match; this doc remains as changelog. Lineage: proposed in

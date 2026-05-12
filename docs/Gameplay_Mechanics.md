@@ -29,7 +29,7 @@ No UI meter. Player reads the hero's body.
 Scenario 8 exists physically. A ribbed tentacle pumping near the orifice ring's natural frequency produces resonance and amplified reaction.
 
 Cues the player can read:
-- Visible rim pulsing (PBD rim particle loop driven by §6.3 constraints + per-loop target-area modulation per §6.4).
+- Visible rim pulsing (PBD rim particle loop driven by §6.3 constraints + per-loop target-area modulation per §6.4). Canal interior undulation + canal bend follow from the canal's `muscle[s,θ]` field + centerline chain (§6.12) — peristalsis, haustral squeeze, sphincter rings are pure-data zones on `CanalParameters`, not per-feature rim loops.
 - Hero vocal rhythm entrainment (Reverie vocal output rhythm tied to ring oscillation phase).
 
 Reward sustained resonance (e.g., ring amplitude > threshold for 2+ seconds): `PhenomenonAchieved(RibResonance, magnitude)` event, currency bonus, `Ecstatic` spike, optional vocal unlock for this tentacle type.
@@ -101,6 +101,9 @@ Each achievement has a detection function (GDScript, per-achievement). Examples 
 | `CleanExpulsion` | `PayloadExpelled` with `peak_ring_stretch` < `damage_threshold × 0.8` | Smooth-birthing vocal set |
 | `PainToEcstatic` | `special_conversion` fires in Reverie with net `Ecstatic` gain > threshold | Transcendence shader mode |
 | `ResonanceCascade` | Two simultaneous `PhenomenonAchieved` events within 1s window | High-bonus currency, no further unlock |
+| `PumpingResonance` | Tentacle pumps a canal at `~1 / canal.wall_response_rate` and wall ringing amplitude exceeds 1.5× baseline for ≥ 2s (TentacleTech §6.12.10) | Resonance-pumping AI preset, vocal swell line |
+| `CanalRemodel` | Canal `plastic_offset` reaches `plastic_max_offset × 0.9` on any cell while damage stays below `damage_threshold × 0.5` (TentacleTech §6.12.4) | "Sustained breeding" save flag, surrender-recline pose unlock |
+| `WallAirPocket` | Tentacle rapid-wiggle (>4 Hz) inside a canal produces dynamic_wall_radius lag opening a transient gap (>2cm) for ≥ 0.5s (first-order lag artifact, §6.12) | Air-pocket audio voice unlock |
 
 Achievements unlocked persist in save (see `docs/Save_Persistence.md`).
 

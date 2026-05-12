@@ -628,7 +628,8 @@ Skin around the opening is weight-painted (also in Blender) to the rim anchors w
 - **Single loop** (default): one rim loop, simple orifice.
 - **Outer + inner loop** (anatomical): an outer "lip" loop with low stiffness and a larger rest radius, an inner "opening" loop with higher stiffness and the actual passage radius. Inter-loop coupling springs (per-particle pairs, soft) make them deform somewhat together while preserving differential stiffness.
 - **Decorated rim** (jewelry, prosthetic): inner loop is the anatomical opening; outer loop is jewelry geometry with very high stiffness (rim deforms freely, jewelry barely moves).
-- **Compound openings** (ribbed canal, multiple sphincters along a single tunnel): a sequence of loops along the tunnel axis, each with its own rest radius and contraction modulation. Used for peristalsis (§6.7 through-path tunnels) — each loop is one contractile ring along the tunnel.
+
+Multi-loop per orifice refers exclusively to **stacked loops at a single rim location** (lips + opening, anatomical + decorative). The "compound openings — sequence of loops along tunnel axis" form is retired (superseded 2026-05-04 by §6.12). Canal interior dynamics — peristalsis, haustral contraction, sphincter ring sequencing — are the §6.12 texture model + centerline particle chain, not a sequence of rim loops.
 
 Inter-loop coupling, when present, is a per-particle XPBD soft pull between corresponding particles in adjacent loops. Stiffness is authored per-pair; zero coupling means loops are visually adjacent but mechanically independent.
 
@@ -1029,6 +1030,7 @@ A tentacle may traverse multiple orifices as a chained path ("all-the-way-throug
 - Bulger sampling (§7.2) covers the full chained interior — allocate 6 samples per orifice in the chain, not 6 samples per tentacle.
 - AI targeting uses the entry orifice only; the exit orifice is emergent from physics.
 - Chain linking is detected by proximity: when a penetrating tentacle's tip enters a second orifice's entry plane while still engaged upstream, a downstream `EntryInteraction` is created and linked.
+- **Each linked tunnel has its own `tunnel_state` texture + centerline particle chain (§6.12).** Bulger SDF queries are global — every active canal sees every active bulger regardless of which orifice the bulger's tentacle entered through. A tentacle spanning vagina → cervix → uterus deforms the vaginal, cervical, and uterine wall textures simultaneously through per-cell SDF evaluation, AND bends each canal's centerline chain laterally per the bilateral wall/centerline split.
 
 ### 6.8 Storage chain
 
@@ -1068,19 +1070,22 @@ girth(t, time) = rest_girth(t) × (1 + amp × sin((t − speed × time) × 2π �
 
 Beads in the low-girth phase of the wave experience asymmetric ring pressure producing a net axial force along the tunnel gradient — the same wedge mechanic as orifice-rim compression, applied tunnel-to-bead. Reverie can drive expulsion (amplitude high, speed positive along exit direction) or retention (amplitude low, or speed reversed to pull beads inward).
 
-**Mechanical scope.** Peristalsis is implemented as a time-varying contribution to per-loop `target_enclosed_area` (and, optionally, per-particle rest-position deltas for asymmetric peristaltic shapes) — the same channels bilateral compliance writes. Concretely, for each rim particle at every active tunnel loop along the orifice's tunnel:
+**Mechanical scope.** Peristalsis is implemented as time-varying contributions to the `muscle[s,θ]` field (§6.12) on the canal's `tunnel_state` texture. The traveling wave of `radius_mult` (derived from `muscle`) creates a moving constriction; the wedge math (`drds_outward` per cell) produces axial force on contents in contact with the wall via type-3 collision projection. `axial_surface_vel` (derived from longitudinal `muscle` gradient) adds Coulomb-capped friction drag on contents independent of squeeze. Both compose naturally; both are continuous physical channels (no scripted force paths).
 
 ```
-wave_phase = (arc_length_at_ring × peristalsis_wavelength
-            - peristalsis_wave_speed × t) × 2π
-peristalsis_target_radius =
-    rest_radius * (1.0 - peristalsis_amplitude * sin(wave_phase))
-target_enclosed_area_per_loop[l] = max(target_enclosed_area_per_loop[l], peristalsis_target_area)
+# Per cell at (s_k, θ_j), each tick:
+muscle_kj         = canal.muscle_field.evaluate(s_k, θ_j, t)
+radius_mult_k     = mean over θ of (1 - muscle_kj * canal.contraction_gain)
+axial_vel_k       = (∂muscle/∂s averaged over θ) * canal.surface_vel_gain
+
+target_radius_kj  = max(rest_radius_kj + plastic_offset_kj,
+                        rest_radius_kj * radius_mult_k,
+                        bulger_SDF_target_kj)
 ```
 
-(Or, depending on whether peristalsis is constrictive or dilatory at the trough, blend or `min`/`max` per the authored intent.)
+The `dynamic_wall_radius` integration (§6.12) lags the target with finite response rate; the result feeds both the vertex shader (visual displacement) and type-3 collision (wall position).
 
-**Consequence.** Any particle in the tunnel — bead-chain or penetrating tentacle — that is in collision contact with the deformed wall radius is pushed by the same projection. Bilateral compliance writes asymmetry to nearby tentacle particles; type-3 collision (tunnel wall) handles the rest. **No separate "push tentacle particles" force path is needed.** This makes peristalsis the canonical mechanism for both ingestion (negative `peristalsis_wave_speed`) and expulsion (positive) of penetrating tentacles, alongside its bead-storage role.
+**Consequence.** Beads in the wave's low-radius phase experience asymmetric ring pressure producing net axial force; expulsion (high amplitude, positive wave speed) and ingestion/retention (negative wave speed, or `axial_surface_vel < 0`) are symmetric uses of the same primitive. Any particle in the tunnel — bead-chain or penetrating tentacle — that is in collision contact with the deformed wall is pushed by the same type-3 projection. **No separate "push tentacle particles" force path is needed.**
 
 **Birthing: ring transit.** When a bead reaches the orifice's inner entry plane, it is treated identically to a bulb on retraction (Scenario 2). Ring bones stretch nonlinearly to accommodate `bead.chain_radius`; bilateral compliance (§6.3) applies; grip hysteresis engages if grip was active; pop-release occurs past the ring's widest point. Emits `RingTransitStart` at initial contact and `RingTransitEnd` at completion, and `PayloadExpelled` with the bead reference as the full event payload.
 
@@ -1094,7 +1099,7 @@ The freed tentacle is an ordinary `Tentacle` with a **"Free Float" scenario pres
 
 ### 6.10 Transient pulse primitives
 
-Steady peristalsis (§6.9) covers continuous waves. Transient one-shot pulses cover punctuated reflexes — climax contractions, gag reflex, pain spasm, refusal spasm, knot-engulfment "gulp." Implemented as additive envelopes on top of `peristalsis_amplitude` / `peristalsis_wave_speed`, evaluated per tick.
+Steady peristalsis (§6.9) covers continuous waves. Transient one-shot pulses cover punctuated reflexes — climax contractions, gag reflex, pain spasm, refusal spasm, knot-engulfment "gulp." Implemented as additive traveling-wave contributions to the canal's `muscle[s,θ]` field (§6.12), evaluated per tick.
 
 ```cpp
 struct ContractionPulse {
@@ -1112,19 +1117,24 @@ Vector<ContractionPulse> active_pulses;   // per orifice; cap ~4
 
 **Pulses are atomic.** No `count`, no `interval`. Repeating patterns (orgasm, etc.) are sugar at the *emitter* level: the pattern emits N atomic `ContractionPulse`s with staggered `t_started`. The orifice tick has one job — evaluate active pulses additively.
 
-Per-tick contribution:
+Per-tick contribution (canal-aware, §6.12 muscle-field model):
 
 ```
-effective_amplitude = peristalsis_amplitude
-effective_speed     = peristalsis_wave_speed
+# Pulses add an additive traveling-wave contribution to the canal's muscle[s,θ] field
 for each pulse p in active_pulses (filtered by applies_to):
     age = current_time - p.t_started
     if age >= p.duration:
         retire and continue
     env = p.envelope.sample_baked(age / p.duration)
-    effective_amplitude += p.magnitude * env
-    effective_speed     += p.speed     * env
+
+    # Contribution shape: traveling wave centered on the canal axis
+    for each cell (s_k, θ_j) in canal.tunnel_state:
+        wave_phase = (s_k - p.speed * age) * 2π / p.wavelength
+        contribution = p.magnitude * env * sin(wave_phase)
+        canal.muscle_field[s_k, θ_j] += contribution
 ```
+
+The `muscle[s,θ]` field is then consumed by the §6.12.4 wall integration loop (deriving `radius_mult`, `axial_surface_vel`, friction multiplier). Named patterns (`OrgasmPattern`, `GagReflexPattern`, etc.) keep their sugar-emitter role — they queue atomic `ContractionPulse`s as before; only the per-tick interpretation changed.
 
 **Default envelope.** Built-in `Curve` resource: trapezoidal `0 → 1 → 1 → 0` with 20% attack, 60% sustain, 20% release. Authoring may override per-pulse with custom curves (sharp spike, slow swell, etc.).
 
@@ -1138,14 +1148,14 @@ for each pulse p in active_pulses (filtered by applies_to):
 
 The term "DrawInPulse" used in earlier drafts is **not** a separate type — it is a `ContractionPulse` with negative `speed`. Avoid the term in code; use `ContractionPulse` everywhere.
 
-**Autonomous `appetite` (optional).** Per-orifice `appetite: float` (default 0.0) drives automatic reverse peristalsis when a girth differential is detected at the entry plane:
+**Autonomous `appetite` (optional).** Per-orifice `appetite: float` (default 0.0) drives automatic reverse peristalsis when a girth differential is detected at the entry plane. Implemented as an autonomous contribution to the canal's `muscle[s,θ]` field with negative `speed` (drawing-in wave):
 
 ```
 if orifice.appetite > 0 and girth_at_entry_plane > orifice.rest_radius * 1.05:
-    auto_speed     = -orifice.appetite * appetite_speed_scale
-    auto_amplitude = +orifice.appetite * appetite_amplitude_scale
-    effective_speed     += auto_speed
-    effective_amplitude += auto_amplitude
+    for each cell (s_k, θ_j) in canal.tunnel_state:
+        wave_phase = (s_k + orifice.appetite * appetite_speed_scale * t) * 2π / wavelength
+        canal.muscle_field[s_k, θ_j] += orifice.appetite * appetite_amplitude_scale
+                                       * sin(wave_phase)
 ```
 
 Reverie owns the value of `appetite` (state-driven, can be 0 most of the time); the mechanical response is autonomous below it. Use to express character archetypes ("hungry rim") without scripting per-encounter pulses.
@@ -1187,6 +1197,249 @@ Both reference the same `insertion_curve` shape; only the offset differs.
 **Why on `Marionette`'s clock and not the tentacle's own.** Per `docs/marionette/Marionette_plan.md` P7.10, `body_rhythm_phase` is integrated, not recomputed; a frequency change driven by Reverie produces a smooth tempo change in the body and in any tentacle locked to it. A tentacle with its own clock would phase-snap when arousal shifts. Mandatory.
 
 **Note on shared clock consumers.** The same `Marionette.body_rhythm_phase` integrated by Marionette is now also read by `MarionetteComposer` (`docs/marionette/Marionette_plan.md` P10) for predictive engagement pumping of the body. `RhythmSyncedProbe` and the composer therefore share a single phase variable for body-tentacle rhythm coupling — no replication. Frequency is set via the frequency-compliance pipeline (`docs/architecture/Reverie_Planning.md §3.5`): Reverie writes the per-mindset compliance curve, the composer slew-limits `body_rhythm_frequency` toward `body_rhythm_frequency_proposed`; both consumers see the same value automatically.
+
+### 6.12 Canal interior texture model + centerline particle chain
+
+> **Opened 2026-05-04** per `docs/Cosmic_Bliss_Update_2026-05-04_canal_interior_model.md`. Replaces the "compound openings — sequence of rim loops along tunnel axis" canal interior model from the 2026-05-03 rim amendment. Rim particle loops remain at orifice boundaries (§6.1) only; canal interior is texture-driven + centerline-chain-driven.
+
+The canal interior between orifices is governed by **two coupled simulation states**:
+
+1. A **2D `tunnel_state` texture** per canal — per-cell wall radius, plastic memory, damage, and an authored fourth channel. Sampled by both vertex shader (visual wall displacement) and PBD type-3 collision (wall position + friction). Resolution per-canal (`canal_axial_segments × canal_angular_sectors`), default 32×8, packed as RGBA32F.
+
+2. A **centerline particle chain** per canal — M PBD particles (default 12) along the canal axis, anchored at the entry orifice's Center frame (or a closed terminal) and the exit orifice's Center (or open distal end). XPBD distance + bending + spring-back to CP-bone-rest. Bulger pressure asymmetric to the canal axis splits between wall radius (texture) and centerline lateral shift (chain) by relative compliance. The chain is what makes canals visibly bend under load.
+
+The two states are coupled: the texture's `(s, θ)` parameterization is *intrinsic to the deformed centerline*, not the rest one. Each tick the centerline chain settles first; the wall texture integration follows using the deformed centerline frames.
+
+#### 6.12.1 Centerline particle chain
+
+```cpp
+struct CenterlineParticle {
+    Vector3 position;
+    Vector3 prev_position;
+    float inv_mass;
+    Vector3 rest_position_world;        // refreshed each tick from CP bones
+    float distance_lambda_to_next;      // XPBD lambdas (reset per tick)
+    Vector3 bending_lambda;
+    Vector3 spring_lambda;
+};
+
+struct CanalCenterline {
+    Vector<CenterlineParticle> particles;          // M, typically 8–16
+    Vector<float> rest_arc_lengths;                 // M-1, segment rest lengths
+    Vector<Vector3> rest_positions_in_host_frame;   // baked from CP bones at init
+
+    float distance_compliance;
+    float bending_compliance;
+    float spring_back_compliance;
+    float lateral_compliance;
+
+    Vector<Vector3> plastic_lateral_offset;         // per particle, axis-lateral memory
+    float lateral_plastic_accumulate_rate;
+    float lateral_plastic_recover_rate;
+    float lateral_plastic_max_offset;
+
+    Vector<Vector3> muscular_curl_delta;            // per particle, Reverie-writable
+};
+```
+
+Per-tick centerline update (same Jacobi+SOR pattern as the rim loop, §6.4):
+
+1. **Refresh rest positions** from the CP bones — once per tick before iterate, same discipline as §4.5 ragdoll snapshot.
+2. **XPBD distance** between consecutive particles — preserves canal length, axial-plastic compliance for sustained-stretch memory.
+3. **XPBD bending** at each interior triple — preserves smooth rest curvature.
+4. **XPBD spring-back** to `rest_position_world + plastic_lateral_offset + muscular_curl_delta` — controls how stiff the canal axis is. Per-particle stiffness distribution is the per-canal "bend compliance" knob.
+5. **Optional anchor pin** at canal endpoints (orifice Center frames or sealed terminals).
+
+Cost: M=12 particles × ~100 ops/tick ≈ 1200 ops per active canal. Negligible.
+
+#### 6.12.2 `tunnel_state` texture channels
+
+Per cell at `(s_k, θ_j)`, CPU-integrated per tick:
+
+```cpp
+struct TunnelStateCell {
+    float dynamic_wall_radius;  // current effective wall radius (m)
+    float plastic_offset;       // accumulated radial stretch memory (m)
+    float damage;               // accumulated tissue damage (Pa·s units)
+    // Fourth channel — authored per-canal via `canal.fourth_channel_mode`:
+    //   wall_radial_velocity  (for second-order ringing dynamics), OR
+    //   friction_mult         (per-cell μ multiplier)
+};
+```
+
+#### 6.12.3 Modulation inputs (Reverie-writable)
+
+```cpp
+struct CanalMuscleField {
+    Vector<Vector<float>> muscle;  // [axial][angular], 0..1 per cell
+
+    // Sugar accessors (backward-compat with legacy peristalsis channels)
+    void set_peristalsis(amplitude, wave_speed, wavelength);
+    void set_constriction_zones(Array[CanalConstrictionZone]);
+};
+
+struct CanalConstrictionZone {
+    float arc_length_s;       // position along canal
+    float half_width;         // axial extent
+    float max_contraction;    // 0..1, peak tightness
+    float current_strength;   // 0..1, modulated each tick
+    float friction_bonus;     // extra μ in zone
+    float baked_at_rest;      // 0..1, fraction baked into rest mesh
+};
+```
+
+#### 6.12.4 Per-tick CPU integration
+
+Run once per active canal each outer tick, AFTER the centerline chain has settled (so the deformed centerline frames are current):
+
+```
+# 1. Centerline tick (§6.12.1) — settles bend/length/curl
+canal.centerline.tick(dt)
+
+# 2. Per-cell wall integration
+for each cell (s_k, θ_j) in canal.tunnel_state:
+
+    # 2a. Evaluate muscle activation
+    muscle = canal.muscle_field.evaluate(s_k, θ_j, t)
+    for each zone z in canal.constriction_zones:
+        d = abs(s_k - z.arc_length_s)
+        if d < z.half_width:
+            falloff = smoothstep(z.half_width, 0, d)
+            muscle += z.current_strength * z.max_contraction * falloff
+
+    # 2b. Cell world position (uses DEFORMED centerline)
+    cell_world_pos = canal.centerline.evaluate(s_k)
+                   + canal.outward_at(s_k, θ_j) * dynamic_wall_radius_kj
+
+    # 2c. Bulger SDF contribution (concrete formula, all active bulgers)
+    bulger_target = 0
+    for each active bulger b in scene.bulgers:
+        closest = b.closest_surface_point_to(cell_world_pos)
+        sdf = (cell_world_pos - closest).length() - b.radius
+        if sdf < 0:
+            projected = (b.center - canal.centerline.evaluate(s_k))
+                        .dot(canal.outward_at(s_k, θ_j))
+            bulger_target = max(bulger_target, projected + b.radius)
+
+    # 2d. Centerline curvature → wall asymmetry (visible bend response)
+    curvature_kj = canal.centerline.curvature_at(s_k)
+    bend_axis    = canal.centerline.bend_axis_at(s_k)
+    inside_factor = -dot(canal.outward_at(s_k, θ_j), bend_axis)  # -1..+1
+    curvature_offset = curvature_kj * inside_factor * canal.curvature_response_gain
+
+    # 2e. Target wall radius
+    rest = canal.rest_radius_profile[s_k][θ_j]
+    target = max(
+        rest + plastic_offset[k][j] - rest * muscle * canal.contraction_gain * 0.5,
+        bulger_target,
+        canal.min_wall_radius,
+    )
+    target += curvature_offset
+
+    # 2f. Bilateral wall/centerline split: deep bulger pressure routes part of the
+    # deflection into the centerline as a lateral force on the nearest particle
+    # (via add_external_position_delta inside the §6.12.1 step). Split allocation
+    # is by canal.lateral_compliance vs the implicit wall compliance.
+
+    # 2g. Integrate dynamic_wall_radius with finite response rate (stability clamp)
+    rate = clamp(canal.wall_response_rate, 1.0, (1.0 / dt) - 1e-3)
+    delta = (target - dynamic_wall_radius[k][j]) * rate * dt
+    dynamic_wall_radius[k][j] += delta
+
+    # 2h. Optional second-order wall dynamics (ringing/overshoot)
+    if canal.use_second_order_wall:
+        wall_radial_velocity[k][j] += delta * canal.wall_acceleration_gain
+        wall_radial_velocity[k][j] *= (1 - canal.wall_damping * dt)
+        dynamic_wall_radius[k][j] += wall_radial_velocity[k][j] * dt
+
+    # 2i. Plastic memory accumulation + recovery (radial)
+    stretch = max(0, dynamic_wall_radius[k][j] - rest)
+    plastic_offset[k][j] += max(0, stretch - plastic_offset[k][j])
+                            * canal.plastic_accumulate_rate * dt
+    plastic_offset[k][j] -= plastic_offset[k][j] * canal.plastic_recover_rate * dt
+    plastic_offset[k][j] = clamp(plastic_offset[k][j], 0, canal.plastic_max_offset)
+
+    # 2j. Per-cell damage accumulation (high-damage cells get larger plastic capacity)
+    pressure_estimate = max(0, target - rest)
+    damage[k][j] += pressure_estimate * dt * canal.damage_rate
+    plastic_max_local = canal.plastic_max_offset
+                      * (1.0 + damage[k][j] * canal.damage_plastic_gain)
+    plastic_offset[k][j] = clamp(plastic_offset[k][j], 0, plastic_max_local)
+
+    # 2k. Friction multiplier from muscle + zones + damage
+    friction_mult[k][j] = 1.0 + muscle * canal.muscle_friction_gain
+                        + zone_friction_bonus_at(s_k, θ_j)
+                        - damage[k][j] * canal.damage_friction_loss
+```
+
+Runtime cost: 32×8 = 256 cells × ~40 ops ≈ 10K ops per canal per tick, plus 256 × N_bulgers × ~30 ops ≈ 75K ops with N_bulgers=10 (bulger SDF queries dominate). Centerline tick adds ~1.2K ops. Total per active canal per tick: ~85K ops. Trivial.
+
+#### 6.12.5 Vertex shader sampling (canal interior verts)
+
+Canal interior verts are tagged with `CUSTOM0.r = canal_id + 1` and carry per-vert baked `(s, θ, rest_radius_at_vert, rest_outward_normal)` in `CUSTOM1` + `CUSTOM2`. The AutoBaker computes these at scene init (§10.6 step 10).
+
+```glsl
+int canal_id = int(CUSTOM0.r) - 1;
+if (canal_id >= 0) {
+    float s            = CUSTOM1.r;    // arc length along rest centerline
+    float theta        = CUSTOM1.g;    // angular position around rest centerline
+    float rest_radius  = CUSTOM1.b;    // baked rest distance from spline axis
+    vec3 rest_normal   = CUSTOM2.rgb;  // baked rest outward normal in canal frame
+
+    vec3 deformed_pos = centerline_eval(canal_id, s);
+    mat3 deformed_basis = centerline_basis(canal_id, s);
+    vec3 deformed_outward = deformed_basis * vec3(cos(theta), sin(theta), 0);
+
+    float dynamic_radius = texture(tunnel_state[canal_id],
+                                    vec2(s_norm, theta_norm)).r;
+
+    VERTEX = deformed_pos + deformed_outward * dynamic_radius;
+    NORMAL = deformed_basis * inverse(rest_basis_at_s) * rest_normal;
+}
+```
+
+**No per-vert bone weights are required for canal interior verts.** The (s, θ, rest_radius, rest_normal) bake replaces them entirely. The artist's authoring step is "select all interior verts, click 'assign to canal X'." See §10.4 for the workflow.
+
+#### 6.12.6 Type-3 collision (PBD particle vs. canal wall)
+
+```
+# Project tentacle particle position into canal (s, θ) using DEFORMED centerline
+(s, θ) = canal.deformed_spline_project(particle.position)
+wall_radius = sample_dynamic_wall_radius(s, θ)
+if particle.dist_from_axis(s) > wall_radius - particle.collision_radius:
+    project particle outward to wall_radius - particle.collision_radius
+    record contact normal = canal.deformed_outward_at(s, θ)
+
+# Friction tangent uses surface velocity
+axial_vel = sample_axial_surface_vel(s)
+rel_vel_tangent = particle.velocity_tangent - axial_vel * deformed_spline_tangent
+apply Coulomb friction with μ = base_μ * sample_friction_mult(s, θ)
+```
+
+#### 6.12.7 Surface velocity
+
+Derived from the longitudinal gradient of `muscle[s,θ]` averaged over θ. This is the muscular wall-drag channel: positive = wall surface moves toward exit, drags content out; negative = wall moves toward interior, pulls content in. Independent of `radius_mult`, so a canal can pull without squeezing or squeeze without pulling.
+
+#### 6.12.8 Multi-tentacle asymmetric deformation
+
+Two tentacles in the same cross-section produce two bulger contributions; each cell at `(s, θ_j)` takes its own SDF max; the wall develops a peanut-shaped cross-section. The 2D state (per `(s,θ)` rather than per `s`) is what enables this.
+
+The bilateral wall/centerline split additionally routes some of the asymmetric pressure into the centerline as a lateral force, so the canal *bends* toward the unbalanced side — visible as a curving canal under load, not just radial deformation at the contact point.
+
+#### 6.12.9 Hierarchical activation
+
+A canal with no active `EntryInteraction`, no storage chain content, and no Reverie modulation skips both the centerline tick and the texture integration entirely. The shader continues to read the last-uploaded texture + last-uploaded centerline (which are the rest pose). Reactivation occurs when an `EntryInteraction` engages, a bead enters storage, or Reverie writes a non-zero muscle value. Most canals are inactive most of the time; this saves the bulk of the runtime cost.
+
+#### 6.12.10 Stability and gotchas
+
+- **`wall_response_rate * dt < 1`** for first-order integration stability. Defensively clamped to `min(rate, 1/dt - ε)` per integration loop. See §14 gotchas: a designer cranking `wall_response_rate > 60Hz` with default 60Hz physics step will see oscillation.
+- **Pumping resonance.** A tentacle pumping at `~1 / wall_response_rate` excites wall ringing — discoverable gameplay phenomenon analogous to the §1.2 rib resonance. With `use_second_order_wall = true` it becomes pronounced. Flagged in `docs/Gameplay_Mechanics.md` as a hidden phenomenon.
+- **Centerline bend produces wall asymmetry but not host-bone movement.** The §6.3 reaction-on-host-bone closure operates only at rim particle loops. A canal interior bend transmits axial force to the host body through the CP bone rigging (CP bones are rigidly parented to host bones), but does NOT add an extra `body_apply_impulse` beyond what the centerline's spring-back to CP rest already implies. If gameplay needs canal-interior force feedback distinct from the rim's, add it as a separate pass — currently not in scope.
+- **Centerline curvature math** uses `canal.centerline.curvature_at(s)` — finite-difference on three adjacent particle positions. Returns scalar magnitude + signed bend axis.
+
+#### 6.12.11 Sacs and two-opening cavities
+
+The Canal primitive handles closed-end sacs (uterus, bladder) via `closed_terminal = true` — distal centerline particle hard-pinned at a `<Canal>_TerminalPin` bone instead of anchored to an exit orifice. Two-opening sacs (stomach) use the same Canal primitive with both `entry_orifice_path` (cardia) and `exit_orifice_path` (pylorus) plus an aggressively variable `rest_radius_profile` to capture the J-shape. **No separate `Cavity` primitive** — deferred until gameplay surfaces a demand the Canal doesn't satisfy.
 
 ---
 
@@ -1234,6 +1487,8 @@ VERTEX += displacement;
 
 **Why capsules.** Sphere bulgers produce beads-on-a-string visuals and cannot represent a tentacle *tube* inside a cavity — the deformation gap between samples is always visible. Capsule bulgers span between adjacent PBD particles, so a tentacle inside a tunnel produces a continuous tube-shaped deformation in both the overlying skin and the cavity wall from the same uniform array.
 
+> **Vertex shader path splits at canal_id (§6.12).** The inner loop above runs unchanged for body skin verts (exterior + non-canal). **Canal interior verts** (`CUSTOM0.r ≥ 1`) take a different path: they sample the canal's `tunnel_state` texture + deformed centerline (§6.12.5) instead of looping over bulgers. The texture already incorporates bulger contributions via CPU integration (§6.12.4), so canal interior verts get a single texelFetch per vert — no per-frame loop. Skin and cavity-wall deformation no longer share a single shader path; the body shader branches on `canal_id` once per vert.
+
 ### 7.2 Bulger sources
 
 Each hero's `SkinBulgeDriver` aggregates capsule bulgers each tick from the following sources.
@@ -1255,6 +1510,8 @@ Each hero's `SkinBulgeDriver` aggregates capsule bulgers each tick from the foll
 - Strength = 1.0. Priority tier = `Transient`.
 
 Maximum 64 active bulgers. If aggregated candidates exceed 64, keep by `(priority_tier, magnitude)` descending (§7.6). Eviction fade per §7.5.
+
+> **Bulger array is consumed globally by canal interior integration (§6.12.4).** Each active canal's per-tick CPU loop queries every active bulger via SDF — no canal-ownership filtering. A tentacle inside one canal contributes a bulger that any other canal in geometric reach also sees (e.g., a tentacle in the vagina deforming the uterine wall via SDF query, even though the tentacle's `EntryInteraction` is only on the vaginal orifice). This is the mechanism behind through-path multi-canal deformation (§6.7).
 
 ### 7.3 Spring-damper jiggle
 
@@ -1449,28 +1706,46 @@ struct OrificeModulation {
     float seek_intensity            = 0.0;   // host bone bias toward target
     int   seek_target_tentacle_id  = -1;
 
-    // Peristalsis (drives storage-chain expulsion / retention; see §6.9)
+    // Canal interior modulation (§6.12). Reverie writes the muscle activation
+    // field directly for spatial control; the legacy peristalsis_* fields below
+    // are sugar that derive a uniform wave on top of muscle[s,θ].
+    void set_muscle_activation(int s_k, int theta_j, float value);  // 0..1 per cell
+    void apply_muscle_pattern(StringName pattern_id);               // sugar emitter
+
+    // Surface velocity gain (axial wall-drag, independent of squeeze; §6.12.7).
+    float axial_surface_vel_gain = 1.0;
+
+    // Constriction zones (active modulation per zone strength; §6.12.3).
+    void set_constriction_zone_strength(int zone_index, float strength);
+
+    // Active muscular curl (per centerline particle, additive to rest; §6.12.1).
+    // Lets Reverie author behaviors like "the canal flexes around the tentacle"
+    // independent of radial squeeze. Composes with muscle[s,θ] cleanly.
+    void set_muscular_curl_delta(int particle_index, Vector3 delta);
+    float muscular_curl_gain = 1.0;
+
+    // Legacy peristalsis fields (sugar — when set, synthesize a sinusoidal
+    // contribution to muscle[s,θ] via CanalMuscleField::set_peristalsis).
+    // Existing scenarios that wrote these channels continue to work; new
+    // scenarios get spatial control via set_muscle_activation directly.
     float peristalsis_wave_speed   = 0.0;    // arc-length units/sec; positive = toward exit
     float peristalsis_amplitude    = 0.0;    // 0..1 fraction of rest girth
     float peristalsis_wavelength   = 1.0;    // waves per unit arc-length
 
-    // Transient pulse activation (added 2026-04-27). See §6.10.
-    // Reverie pushes new ContractionPulse entries into the orifice's
-    // active_pulses array through a mutator method. Patterns are emitted as
-    // multi-pulse sequences by the pattern emitter (sugar; not part of the
-    // tick-level data).
+    // Transient pulse activation (added 2026-04-27, revised 2026-05-04). See §6.10.
+    // ContractionPulse contributions are additive to muscle[s,θ] per §6.10 per-tick loop.
     void queue_contraction_pulse(ContractionPulse p);
     void emit_pattern(StringName pattern_id);   // sugar: queues N atomic pulses
 
-    // Autonomous appetite (added 2026-04-27).
-    // 0..1; non-zero enables automatic reverse peristalsis when
-    // girth_at_entry > rest_radius × 1.05.
+    // Autonomous appetite (added 2026-04-27, revised 2026-05-04).
+    // 0..1; non-zero adds an autonomous negative-speed wave contribution to
+    // muscle[s,θ] when girth_at_entry > rest_radius × 1.05 (§6.10).
     float appetite                 = 0.0;
 };
 
-// Peristalsis modulation is per-tunnel, attached to the orifice whose tunnel
-// it controls. Through-path tunnels (§6.7) use the entry orifice's peristalsis
-// state by default; a later authoring hook may override this per-segment.
+// Canal modulation is per-canal. Through-path tunnels (§6.7) each carry their
+// own CanalParameters resource + muscle field; the entry orifice's modulation
+// drives the entry canal, downstream canals carry their own.
 
 struct BodyAreaModulation {
     Vector3 pose_target_offset;
@@ -1913,6 +2188,19 @@ Material boundaries are set at the rim edge loop or just inside it; the boundary
 6. Paint rim and near-rim weights to the rim anchors — also handled by the Blender authoring script (angular-bracket interpolation between nearest anchors, radial falloff outward; innermost rim loop = full anchor weight, no body bone).
 7. Optional: place empty objects as `TunnelMarker`s along internal paths if auto-derived centerlines need correction.
 8. Export GLB with skeleton, the authored orifice bones, tunnel markers, and all material surfaces preserved. ARP export settings: Standard naming, toe breakdown on, "Rename bones for Godot" **off** (matches `docs/marionette/arp_mapping.md`).
+9. **Model canal interiors directly in the body mesh.** Cavities are invaginations (step 2) extended inward through their full anatomical length. Static features — haustra (colon), taeniae (longitudinal ridges), Houston's valves (rectal folds), anal columns, rectal columns — are modeled as mesh geometry, **not** added by procedural displacement. The modeled rest pose is what the runtime starts from; the `tunnel_state` texture + centerline-driven vertex shader (§6.12) deforms it per tick. **Curved canals are fully supported** — bend naturally into the belly, around the pelvic floor, through the diaphragm — whatever anatomy demands. Constraints: tubular topology (each cross-section perpendicular to the centerline is convex and contains the centerline); no fold-back (centerline doesn't double back within less than ~one canal radius); no self-intersection; sufficient CP bone density for the curvature (rule of thumb: one CP per ~5° of bend or per anatomical landmark — a vagina tilting toward the lumbar takes 6, a colon with hepatic + splenic flexures takes 10–14). **Sacs vs canals:** tubular canals (vagina, esophagus, colon, rectum, urethra) use the Canal primitive with two anchor orifices end to end; **closed-end sacs (uterus, bladder)** use the Canal primitive with `closed_terminal = true` — distal centerline particle hard-pinned at a `<Canal>_TerminalPin` bone instead of anchored to an exit orifice; **two-opening sacs (stomach)** use the Canal primitive with both `entry_orifice_path` (cardia) and `exit_orifice_path` (pylorus) plus an aggressively variable `rest_radius_profile` to capture the J-shape. Plastic memory parameters can be tuned per-canal: high `plastic_max_offset` + slow `plastic_recover_rate` for uterine remodeling under sustained pressure; modest values for daily-use canals. **Out of current scope:** small intestine (~6 m of curls — segment at major flexures if ever needed), oral cavity (uses §6.6 jaw special case). The dedicated `Cavity` primitive is deferred until gameplay demands it.
+10. **Mark canal interior verts** by selecting them in Blender and assigning canal_id via a one-click operator that writes `CUSTOM0.r = canal_index + 1`. **No skin weight painting on canal interior verts.** They are not bone-driven — the vertex shader routes them to the simulation pipeline (deformed centerline + `tunnel_state` texture + per-vert baked `(s, θ, rest_radius, normal)` in `CUSTOM1` + `CUSTOM2`). The "assign to canal" Blender operator is a small bpy script (~50 lines) shipped under `tools/blender/`. Authoring tooling todo: a complementary cell-grid overlay visualizes the canal's `axial_segments × angular_sectors` grid on the modeled mesh so features can be aligned with cell boundaries.
+11. **Place canal centerline CP bones** (`<Canal>_CP_*`) along each canal's anatomical axis. Each CP bone is a non-deforming bone parented to a host body bone (typically pelvis/lumbar/abdomen), with optional local offset. The AutoBaker derives the canal spline from these bones at scene init. Per-canal CP count is a free authoring choice (typically 4–14 depending on curvature). **For closed-terminal sacs** also place a `<Canal>_TerminalPin` bone at the closed distal position; AutoBaker reads it as the fixed pin location for the centerline chain's distal particle.
+12. **(Optional) Paint a rim ↔ canal transition blend factor** in `CUSTOM2.a` for verts in the 1–2 cm band where rim influence fades to canal influence. Default zero = pure canal path; default one in rim region = pure rim path. Smooth gradient in the band gives a clean visual transition; the vertex shader lerps between rim displacement (§6.1 path) and canal displacement (§6.12 path).
+13. **AutoBaker runs at scene init**: per canal interior vert, computes `(s, θ, rest_radius_at_vert, rest_outward_normal)` from the rest-pose vert's projection onto the rest centerline; writes to `CUSTOM1` + `CUSTOM2`. One-time at scene load. Cost: ~50 ops per canal interior vert × ~10K canal verts = ~500K ops per canal. Sub-millisecond.
+
+**Skin weighting summary:**
+- **Canal interior verts** (`CUSTOM0.r ≥ 1`) → no bone weights at all. Driven by the canal's centerline chain + texture via the vertex shader. Per-vert baked `(s, θ, rest_radius, normal)` replaces skin weights entirely.
+- **Inner rim loop verts at orifices** → rim anchor bones with §6.1 bracketing-pair angular interpolation, falloff radius `OrificeProfile.physics_rim.anchor_falloff_radius_mm`.
+- **Body skin verts** (everything else) → standard host-body rig + bulger array displacement per §7.1.
+- **Rim/canal transition band** → optional blend factor in `CUSTOM2.a`; shader lerps both paths.
+
+**No JSON sidecar.** All authoring metadata is carried by bone naming convention (`<Prefix>_RimAnchor_*`, `<Canal>_CP_*`, `<Canal>_TerminalPin`, `<Prefix>_Center`), vertex custom attributes (`CUSTOM0.r` canal_id, `CUSTOM1`/`CUSTOM2` baked geometry — written by AutoBaker, not authored manually), the vertex group `canal_interior_<name>` (used by the bpy operator that populates `CUSTOM0.r`; group itself isn't read at runtime), and `OrificeProfile.tres` / `CanalParameters.tres` resource files.
 
 **In Godot — `OrificeAutoBaker`.** Now a verification and struct-population pass, not a geometry-creation pass. Runs at hero import time or on demand:
 
@@ -1973,6 +2261,26 @@ The hero asset is assembled in Blender across three rigging systems that each ow
 5. Validates: no `*_twist` / `*_leaf` bones under Center, Center is non-deforming, rim anchors are contiguous from 0 to N−1.
 
 The script is canonical tooling for hero authoring — it will be pluginified (Blender addon) and committed under `tools/blender/` alongside its ARP/FaceIt integration notes. Until then, treat any ad-hoc ring placement as disposable; re-run the script rather than hand-editing.
+
+**Canal authoring — additional AutoBaker steps (2026-05-04).** Beyond the orifice-rim verification + ring-table population, the AutoBaker also derives canal-interior data:
+
+6. **For each canal, derive the spline from CP bones.** Scan the skeleton for bones matching `<Canal>_CP_*`, sort by index, build a Catmull spline through their resolved world positions. Store on the corresponding `CanalParameters` resource.
+7. **Compute the canal's per-cell rest radius** (`canal_axial_segments × canal_angular_sectors`). For each cell at `(s_k, θ_j)`, cast a ray from the spline at `s_k` outward in the angular direction `θ_j` and record distance to the canal interior mesh wall. Populates the `rest_radius_per_cell` table consumed by §6.12.4 integration.
+8. **Allocate the canal's `tunnel_state` RGBA32F texture** sized `canal_axial_segments × canal_angular_sectors`. Initialize all cells to `(rest_radius, 0, 0, 1.0)`.
+9. **Allocate the canal's centerline particle chain** (§6.12.1). M particles spaced uniformly along the rest spline; rest positions stored in `rest_positions_in_host_frame`. Anchor constraint:
+   - Proximal particle pinned to the entry orifice's Center frame.
+   - Distal particle pinned to either the exit orifice's Center frame (open canals: vagina, colon, esophagus) OR the `<Canal>_TerminalPin` bone position (closed-terminal sacs: uterus, bladder).
+   Default M = 12; configurable per canal via `CanalParameters.centerline_particle_count`.
+10. **Per canal interior vert, bake `(s, θ, rest_radius_at_vert, rest_outward_normal)`.** Iterate vertices with `CUSTOM0.r ≥ 1`, project each onto the corresponding canal's rest centerline:
+    - `s` = arc length of the projection on the spline
+    - `θ` = angular position around the spline tangent at s
+    - `rest_radius_at_vert` = signed distance from the spline axis
+    - `rest_outward_normal` = the vert's authored normal in canal-local frame (decomposed from world-space normal via rest spline basis at s)
+    Write `(s, θ, rest_radius)` into `CUSTOM1.rgb`, `rest_outward_normal` into `CUSTOM2.rgb`, leave `CUSTOM2.a` for optional rim-blend factor.
+
+Step 4 of the original orifice-side AutoBaker (tunnel girth profile via perpendicular ray casts) is now subsumed by step 7 above for procedurally-derived canals; retained for orifice tunnel-projection lookup at the entry plane.
+
+A `CanalParameters` Resource definition lives near `OrificeProfile` in §10 — see the canonical resource schema in `docs/Cosmic_Bliss_Update_2026-05-04_canal_interior_model.md` ("CanalParameters Resource (NEW)") for the field-level spec.
 
 **Export conventions.**
 
@@ -2241,6 +2549,25 @@ Previously parked as a placeholder. Opened explicitly because (a) several Phase 
 29d. X-ray skin shader mask and `xray_reveal_intensity` modulation plumbing (§9.5).
 29e. Acceptance: tube-shaped deformation visible along tentacle length on both skin and cavity surfaces; x-ray toggle reveals internal deformation cleanly.
 
+**Phase 5E — Canal infrastructure** (gated on 5D close-out + canal interior model apply pass; opened 2026-05-04 per `Cosmic_Bliss_Update_2026-05-04_canal_interior_model.md`)
+- `Canal : Node3D` node registration; `CanalParameters` Resource (schema in §10 / canonical doc).
+- `OrificeAutoBaker` (§10.6) canal extensions: spline derivation from `<Canal>_CP_*` bones + optional `<Canal>_TerminalPin`, per-cell rest_radius via raycasts, `tunnel_state` texture allocation, `CanalCenterline` particle chain allocation (M particles spaced along rest spline + endpoint anchor pins), per-vert AutoBaker bake of `(s, θ, rest_radius, rest_outward_normal)` into `CUSTOM1` + `CUSTOM2`.
+- Blender bpy operators (`tools/blender/`): "assign canal id to selected verts" + "visualize cell grid" — authored before sub-Claude opens 5E so the artist workflow is testable.
+- Mostly GDScript (no hot-path C++).
+- Test scene: a single canal with a static rest pose and gizmo overlay showing texture cells + centerline chain + per-vert bake validation.
+
+**Phase 5F — Canal texture dynamics + centerline chain dynamics**
+- Per-tick CPU integration loop per §6.12.4: `dynamic_wall_radius`, `plastic_offset`, `damage`, optional fourth channel; bulger SDF query per cell with the concrete formula; bilateral wall/centerline split; centerline curvature → wall asymmetry.
+- Centerline chain PBD tick (§6.12.1): distance + bending + spring-back + lateral plastic memory. Same Jacobi+SOR pattern as rim loop (§6.4).
+- Texture upload (RGBA32F); vertex shader sampling for canal interior verts (§6.12.5).
+- Hierarchical activation gating (§6.12.9).
+- GDScript with potential C++ promotion if profiling demands (hot path candidate: bulger SDF inner loop at ~75K ops/canal/tick).
+
+**Phase 5G — Muscle activation field + constriction zones + active muscular curl**
+- Reverie modulation API: `set_muscle_activation(s_k, θ_j, value)`, `set_constriction_zone_strength(zone_index, strength)`, `set_muscular_curl_delta(particle_index, delta)`, `apply_muscle_pattern(pattern_id)` sugar emitter.
+- Derivation of `radius_mult`, `axial_surface_vel`, friction multiplier from muscle field; per-particle curl delta into the centerline chain spring-back rest.
+- Backward-compat sugar for legacy `peristalsis_*` channels via `CanalMuscleField::set_peristalsis(amplitude, wave_speed, wavelength)`.
+
 **Phase 8 — Multi-tentacle + curved tunnels + advanced**
 30. Multi-tentacle per orifice (EntryInteraction list)
 31. Type-5 collision (always on inside orifices)
@@ -2250,7 +2577,7 @@ Previously parked as a placeholder. Opened explicitly because (a) several Phase 
 35. Fluid strands on separation
 36. Storage chain (§6.8): bead types, pinned PBD subchain, multi-bead distance constraints, through-path linking.
 37. Oviposition (§6.9): `OvipositorComponent`, deposit queue, tip-threshold deposit trigger, tentacle-root bead spawn.
-38. Birthing (§6.9): peristalsis modulation channels, ring-transit reuse of §6.3, tentacle-root release on expulsion.
+38. Birthing (§6.9): muscle-field modulation per §6.10 + §6.12, ring-transit reuse of §6.3, tentacle-root release on expulsion.
 39. Acceptance: all 10 narrative scenarios from `TentacleTech_Scenarios.md` reproducible, plus Scenario 12 (oviposition cycle) and Scenario 13 (excreted tentacle, free float).
 
 **Phase 9 — Polish**
@@ -2292,6 +2619,9 @@ Previously parked as a placeholder. Opened explicitly because (a) several Phase 
 - **Suspension requires a girth differential, not just compression.** A smooth shaft compressed past the rim transmits no radial reaction force into the chain — the rim is kinematic, contact projection only fires when a particle is geometrically inside the deformed rim. Suspensions must use a tentacle with a knot, bulb, ridge, or other girth differential straddling the rim. Author scenarios accordingly.
 - **No `accept_penetration`-style hard refusal levers exist.** If a scenario seems to need one, raise stretch_stiffness, raise grip strength, lower wetness, or write the appropriate `OrificeModulation` channels. See §1.
 - **Glancing-approach rejection** is now modeled (resolved 2026-05-03 by the rim particle loop amendment in §6.1). The rim is a connected closed loop of N PBD particles; type-2 collision treats it as a real curved surface; glancing tentacles slide off it via the standard soft-physics friction path. The 8-discrete-radial-bone limitation that motivated this gotcha is gone.
+- **Canal wall stability — `wall_response_rate * dt < 1`** (§6.12.4 step 2g). First-order lag integration is conditionally stable; a designer cranking `wall_response_rate > 1/dt` (e.g., > 60 Hz with default 60 Hz physics step) sees oscillation. Defensively clamped per-loop to `min(rate, 1/dt - ε)` but the authored value above the cap still produces "as-fast-as-possible" lag — flag visibly in tooling if the parameter is set higher than stable.
+- **Canal pumping resonance** (§6.12.10). A tentacle pumping at `~1 / wall_response_rate` excites wall ringing. With default first-order dynamics it's a soft swell; with `use_second_order_wall = true` it becomes a pronounced resonant ring. Discoverable gameplay phenomenon analogous to the §1.2 rib resonance — flagged in `docs/Gameplay_Mechanics.md` as a hidden phenomenon, not a bug.
+- **Canal centerline bend does not move host bones.** The §6.3 reaction-on-host-bone closure operates only at rim particle loops. A canal interior bend transmits axial force to the host body through the CP bone rigging (CP bones are rigidly parented to host bones), but does NOT add an extra `body_apply_impulse` beyond what the centerline's spring-back to CP rest already implies. If gameplay needs canal-interior force feedback distinct from the rim's, add it as a separate pass — currently not in scope.
 
 **What not to do:**
 - Don't use `MeshDataTool` in hot paths
