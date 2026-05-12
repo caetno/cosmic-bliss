@@ -1623,11 +1623,24 @@ func _test_collision_exclusion_disabled_bones() -> bool:
 # ---------- MarionetteBone (P3.2) + Marionette.build_ragdoll (P3.7) ----------
 
 func _test_marionette_bone_extends_physical_bone3d() -> bool:
-	var b := MarionetteBone.new()
-	var ok := b is PhysicalBone3D
-	b.free()
-	if not ok:
-		return _fail("marionette_bone_class", "MarionetteBone should extend PhysicalBone3D")
+	# Phase 5 Slice 2: MarionetteBone moved from GDScript class_name to a C++
+	# GDExtension class. Identifier-based MarionetteBone.new() can't resolve
+	# at parse time in `--script` runs (registration is at SCENE init level,
+	# after the parser); go through ClassDB.
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_extends_physical_bone3d", "MarionetteBone not registered")
+	if not ClassDB.is_parent_class("MarionetteBone", "PhysicalBone3D"):
+		return _fail("marionette_bone_extends_physical_bone3d", "MarionetteBone does not extend PhysicalBone3D")
+	var bone: Object = ClassDB.instantiate("MarionetteBone")
+	if bone == null:
+		return _fail("marionette_bone_extends_physical_bone3d", "instantiate returned null")
+	var entry := BoneEntry.new()
+	bone.set("bone_entry", entry)
+	var got: Resource = bone.get("bone_entry")
+	if got != entry:
+		bone.free()
+		return _fail("marionette_bone_extends_physical_bone3d", "bone_entry property round-trip failed")
+	bone.free()
 	return _ok("marionette_bone_extends_physical_bone3d")
 
 
