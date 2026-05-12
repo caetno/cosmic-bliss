@@ -11,6 +11,10 @@ func _init() -> void:
 	for test_callable: Callable in [
 		_test_smoke,
 		_test_marionette_core_bridge,
+		_test_spd_error_quaternion,
+		_test_spd_quaternion_to_axis_angle,
+		_test_spd_compute_torque,
+		_test_spd_compute_gains,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -165,6 +169,170 @@ func _test_marionette_core_bridge() -> bool:
 	core.call("tick", 0.016)
 	core.free()
 	return _ok("test_marionette_core_bridge")
+
+
+# ---------- SPDMath / SPDGainConverter (P5.1, P5.2) ----------
+
+const _SPD_EPS_IDENTITY := 1.0e-6
+const _SPD_EPS_HAND := 1.0e-4
+
+
+static func _quat_near(a: Quaternion, b: Quaternion, eps: float) -> bool:
+	# Allow antipodal equivalence: q and -q represent the same rotation.
+	var d_pos: float = maxf(maxf(absf(a.x - b.x), absf(a.y - b.y)),
+			maxf(absf(a.z - b.z), absf(a.w - b.w)))
+	var d_neg: float = maxf(maxf(absf(a.x + b.x), absf(a.y + b.y)),
+			maxf(absf(a.z + b.z), absf(a.w + b.w)))
+	return minf(d_pos, d_neg) < eps
+
+
+static func _vec_near(a: Vector3, b: Vector3, eps: float) -> bool:
+	return maxf(maxf(absf(a.x - b.x), absf(a.y - b.y)), absf(a.z - b.z)) < eps
+
+
+func _test_spd_error_quaternion() -> bool:
+	if not ClassDB.class_exists("SPDMath"):
+		return _fail("test_spd_error_quaternion", "SPDMath not registered")
+
+	var ident := Quaternion.IDENTITY
+	var q_x_pos := Quaternion(Vector3.RIGHT, PI / 2.0)
+	var q_x_neg := Quaternion(Vector3.RIGHT, -PI / 2.0)
+
+	# identity → identity ⇒ identity
+	var r1: Quaternion = ClassDB.class_call_static("SPDMath", "error_quaternion", ident, ident)
+	if not _quat_near(r1, ident, _SPD_EPS_IDENTITY):
+		return _fail("test_spd_error_quaternion", "identity→identity expected IDENTITY, got %s" % str(r1))
+
+	# +90°X → identity ⇒ −90°X  (rotation that takes current to target)
+	var r2: Quaternion = ClassDB.class_call_static("SPDMath", "error_quaternion", q_x_pos, ident)
+	if not _quat_near(r2, q_x_neg, _SPD_EPS_HAND):
+		return _fail("test_spd_error_quaternion", "+90°X→ident expected −90°X, got %s" % str(r2))
+
+	# identity → +90°X ⇒ +90°X
+	var r3: Quaternion = ClassDB.class_call_static("SPDMath", "error_quaternion", ident, q_x_pos)
+	if not _quat_near(r3, q_x_pos, _SPD_EPS_HAND):
+		return _fail("test_spd_error_quaternion", "ident→+90°X expected +90°X, got %s" % str(r3))
+
+	# Composition: error(a, b) * a == b   (since result is the rotation R with R * current = target)
+	var a := Quaternion(Vector3(0.3, -0.5, 0.2).normalized(), 0.7)
+	var b := Quaternion(Vector3(-0.1, 0.8, 0.4).normalized(), 1.3)
+	var err_ab: Quaternion = ClassDB.class_call_static("SPDMath", "error_quaternion", a, b)
+	var reconstructed: Quaternion = err_ab * a
+	if not _quat_near(reconstructed, b, _SPD_EPS_HAND):
+		return _fail("test_spd_error_quaternion",
+				"err(a,b)*a expected b=%s, got %s" % [str(b), str(reconstructed)])
+
+	# Shortest-arc: w must be >= 0
+	if err_ab.w < 0.0:
+		return _fail("test_spd_error_quaternion", "shortest-arc broken: w=%f < 0" % err_ab.w)
+
+	return _ok("test_spd_error_quaternion")
+
+
+func _test_spd_quaternion_to_axis_angle() -> bool:
+	if not ClassDB.class_exists("SPDMath"):
+		return _fail("test_spd_quaternion_to_axis_angle", "SPDMath not registered")
+
+	# identity → zero
+	var v0: Vector3 = ClassDB.class_call_static("SPDMath", "quaternion_to_axis_angle", Quaternion.IDENTITY)
+	if not _vec_near(v0, Vector3.ZERO, _SPD_EPS_IDENTITY):
+		return _fail("test_spd_quaternion_to_axis_angle", "identity expected ZERO, got %s" % str(v0))
+
+	# +90°X → (π/2, 0, 0)
+	var v1: Vector3 = ClassDB.class_call_static("SPDMath", "quaternion_to_axis_angle",
+			Quaternion(Vector3.RIGHT, PI / 2.0))
+	if not _vec_near(v1, Vector3(PI / 2.0, 0.0, 0.0), _SPD_EPS_HAND):
+		return _fail("test_spd_quaternion_to_axis_angle",
+				"+90°X expected (π/2,0,0), got %s" % str(v1))
+
+	# −90°X → (−π/2, 0, 0)
+	var v2: Vector3 = ClassDB.class_call_static("SPDMath", "quaternion_to_axis_angle",
+			Quaternion(Vector3.RIGHT, -PI / 2.0))
+	if not _vec_near(v2, Vector3(-PI / 2.0, 0.0, 0.0), _SPD_EPS_HAND):
+		return _fail("test_spd_quaternion_to_axis_angle",
+				"−90°X expected (−π/2,0,0), got %s" % str(v2))
+
+	# 30° about (1,1,0).normalized() → axis * angle of same axis × 30°
+	var axis := Vector3(1.0, 1.0, 0.0).normalized()
+	var angle: float = deg_to_rad(30.0)
+	var v3: Vector3 = ClassDB.class_call_static("SPDMath", "quaternion_to_axis_angle",
+			Quaternion(axis, angle))
+	var expected := axis * angle
+	if not _vec_near(v3, expected, _SPD_EPS_HAND):
+		return _fail("test_spd_quaternion_to_axis_angle",
+				"tilted 30° expected %s, got %s" % [str(expected), str(v3)])
+
+	return _ok("test_spd_quaternion_to_axis_angle")
+
+
+func _test_spd_compute_torque() -> bool:
+	if not ClassDB.class_exists("SPDMath"):
+		return _fail("test_spd_compute_torque", "SPDMath not registered")
+
+	# Hand-computed reference: error=(π/2,0,0), omega=0, kp=10, kd=1, dt=1/60
+	# denom = 1 + 1/60 = 61/60
+	# kp_stable = 10 * 60/61 = 600/61 ≈ 9.83606557
+	# kd_stable = (1/6 + 1) * 60/61 = 70/61 ≈ 1.14754098
+	# τ = 9.83606557 * π/2 = 15.45161...
+	var expected_kp_stable := 600.0 / 61.0
+	var expected_tau_x := expected_kp_stable * (PI / 2.0)
+	var tau1: Vector3 = ClassDB.class_call_static("SPDMath", "compute_torque",
+			Vector3(PI / 2.0, 0.0, 0.0), Vector3.ZERO, 10.0, 1.0, 1.0 / 60.0)
+	var expected_tau1 := Vector3(expected_tau_x, 0.0, 0.0)
+	if not _vec_near(tau1, expected_tau1, _SPD_EPS_HAND):
+		return _fail("test_spd_compute_torque",
+				"hand-computed expected %s, got %s (Δ=%.6e)" %
+				[str(expected_tau1), str(tau1), (tau1 - expected_tau1).length()])
+
+	# Zero error + zero omega → zero
+	var tau2: Vector3 = ClassDB.class_call_static("SPDMath", "compute_torque",
+			Vector3.ZERO, Vector3.ZERO, 10.0, 1.0, 1.0 / 60.0)
+	if not _vec_near(tau2, Vector3.ZERO, _SPD_EPS_IDENTITY):
+		return _fail("test_spd_compute_torque", "zero/zero expected ZERO, got %s" % str(tau2))
+
+	# Pure damping: error=0, omega=(1,0,0), kp=10, kd=2, dt=1/60
+	# denom = 1 + 2/60 = 62/60
+	# kd_stable = (10/60 + 2) * 60/62 = (130/60) * (60/62) = 130/62 ≈ 2.0967742
+	# τ_x = -2.0967742
+	var expected_kd_stable := (10.0 / 60.0 + 2.0) / (1.0 + 2.0 / 60.0)
+	var tau3: Vector3 = ClassDB.class_call_static("SPDMath", "compute_torque",
+			Vector3.ZERO, Vector3(1.0, 0.0, 0.0), 10.0, 2.0, 1.0 / 60.0)
+	var expected_tau3 := Vector3(-expected_kd_stable, 0.0, 0.0)
+	if not _vec_near(tau3, expected_tau3, _SPD_EPS_HAND):
+		return _fail("test_spd_compute_torque",
+				"counter-torque expected %s, got %s" % [str(expected_tau3), str(tau3)])
+	if tau3.x >= 0.0:
+		return _fail("test_spd_compute_torque", "counter-torque sign wrong: %s" % str(tau3))
+
+	return _ok("test_spd_compute_torque")
+
+
+func _test_spd_compute_gains() -> bool:
+	if not ClassDB.class_exists("SPDGainConverter"):
+		return _fail("test_spd_compute_gains", "SPDGainConverter not registered")
+
+	# alpha=4, damping=1.0, mass=1.0, dt=1/60 → ω_n=15 ⇒ kp=225, kd=30
+	var g1: Vector2 = ClassDB.class_call_static("SPDGainConverter", "compute_gains",
+			4.0, 1.0, 1.0, 1.0 / 60.0)
+	if absf(g1.x - 225.0) > _SPD_EPS_HAND or absf(g1.y - 30.0) > _SPD_EPS_HAND:
+		return _fail("test_spd_compute_gains",
+				"α=4 ζ=1 m=1 expected (225,30), got %s" % str(g1))
+
+	# alpha=4, damping=0.7, mass=2.0, dt=1/60 → ω_n=15 ⇒ kp=450, kd=42
+	var g2: Vector2 = ClassDB.class_call_static("SPDGainConverter", "compute_gains",
+			4.0, 0.7, 2.0, 1.0 / 60.0)
+	if absf(g2.x - 450.0) > _SPD_EPS_HAND or absf(g2.y - 42.0) > _SPD_EPS_HAND:
+		return _fail("test_spd_compute_gains",
+				"α=4 ζ=0.7 m=2 expected (450,42), got %s" % str(g2))
+
+	# alpha=10, damping=1.0, mass=1.0, dt=1/60 → ω_n=6 ⇒ kp=36, kd=12
+	var g3: Vector2 = ClassDB.class_call_static("SPDGainConverter", "compute_gains",
+			10.0, 1.0, 1.0, 1.0 / 60.0)
+	if absf(g3.x - 36.0) > _SPD_EPS_HAND or absf(g3.y - 12.0) > _SPD_EPS_HAND:
+		return _fail("test_spd_compute_gains",
+				"α=10 ζ=1 m=1 expected (36,12), got %s" % str(g3))
+
+	return _ok("test_spd_compute_gains")
 
 
 # ---------- SignedAxis ----------

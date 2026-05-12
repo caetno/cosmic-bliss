@@ -5,6 +5,8 @@
 #include <godot_cpp/godot.hpp>
 
 #include "marionette_core.h"
+#include "spd_gain_converter.h"
+#include "spd_math.h"
 
 using namespace godot;
 
@@ -14,6 +16,8 @@ void initialize_marionette_module(ModuleInitializationLevel p_level) {
 	}
 
 	GDREGISTER_CLASS(MarionetteCore);
+	GDREGISTER_ABSTRACT_CLASS(SPDMath);
+	GDREGISTER_ABSTRACT_CLASS(SPDGainConverter);
 }
 
 void uninitialize_marionette_module(ModuleInitializationLevel p_level) {
