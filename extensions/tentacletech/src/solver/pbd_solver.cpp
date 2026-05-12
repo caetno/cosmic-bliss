@@ -83,6 +83,11 @@ void PBDSolver::initialize_chain(int p_n, float p_segment_length) {
 	env_contact_normals.clear();
 	env_contact_count.clear();
 	env_contact_friction_applied.clear();
+	// Slice 4S.3 — material buffers default to size 0; the per-tentacle
+	// fallback engages on size mismatch in step 5. Caller populates them
+	// via set_environment_contact_materials each tick a tag is touched.
+	env_contact_static_frictions.clear();
+	env_contact_kinetic_frictions.clear();
 }
 
 int PBDSolver::get_particle_count() const {
@@ -457,12 +462,32 @@ void PBDSolver::iterate(float p_dt) {
 		// reciprocal-impulse space but only the average in position space).
 		// `friction_applied` per-slot accumulates across iters for the
 		// type-1 reciprocal pass in Tentacle::_apply_collision_reciprocals.
-		if (have_contacts && friction_static > 0.0f && nlambda_arr != nullptr &&
+		//
+		// Slice 4S.3 — per-slot composed friction. When the materials
+		// sibling call (`set_environment_contact_materials`) ran this
+		// tick, `env_contact_static_frictions[slot]` and
+		// `env_contact_kinetic_frictions[slot]` hold the composed μ_s /
+		// μ_k for that contact (cginc:33-90 port). When the sibling
+		// hasn't been called this tick, both arrays are size 0 and the
+		// per-tentacle scalars (`friction_static`,
+		// `friction_static × friction_kinetic_ratio`) are used — the
+		// fallback is bit-for-bit equivalent to the pre-4S.3 path.
+		bool per_slot_materials =
+				env_contact_static_frictions.size() == total_slots &&
+				env_contact_kinetic_frictions.size() == total_slots;
+		const float *mu_s_arr = per_slot_materials
+				? env_contact_static_frictions.ptr()
+				: nullptr;
+		const float *mu_k_arr = per_slot_materials
+				? env_contact_kinetic_frictions.ptr()
+				: nullptr;
+		bool has_friction = per_slot_materials || friction_static > 0.0f;
+		if (have_contacts && has_friction && nlambda_arr != nullptr &&
 				tlambda_arr != nullptr && cf_out != nullptr) {
 			const uint8_t *cnt = env_contact_count.ptr();
 			const Vector3 *cn = env_contact_normals.ptr();
-			float mu_s = friction_static;
-			float mu_k = friction_static * friction_kinetic_ratio;
+			float mu_s_fallback = friction_static;
+			float mu_k_fallback = friction_static * friction_kinetic_ratio;
 			for (int i = 0; i < n; i++) {
 				int kn = cnt[i];
 				if (kn == 0) continue;
@@ -476,6 +501,12 @@ void PBDSolver::iterate(float p_dt) {
 					if (lam_n <= 0.0f) continue; // contact not pressing
 					Vector3 cn_k = cn[slot];
 					if (cn_k.length_squared() < 1e-10f) continue;
+					// Per-slot μ when the materials sibling was invoked
+					// this tick; per-tentacle scalars otherwise. The
+					// fallback branch is exactly the pre-4S.3 code path.
+					float mu_s = mu_s_arr != nullptr ? mu_s_arr[slot] : mu_s_fallback;
+					float mu_k = mu_k_arr != nullptr ? mu_k_arr[slot] : mu_k_fallback;
+					if (mu_s <= 0.0f) continue; // slot opted out of friction
 					Vector3 dx_tan = dx - cn_k * dx.dot(cn_k);
 					float tan_mag = dx_tan.length();
 					if (tan_mag < 1e-8f) continue;
@@ -1292,6 +1323,10 @@ void PBDSolver::clear_environment_contacts() {
 	for (size_t i = 0; i < env_contact_rid.size(); i++) {
 		env_contact_rid[i] = 0;
 	}
+	// Slice 4S.3 — material buffers also reset here so a contacts-cleared
+	// state cleanly re-engages the per-tentacle fallback for the next tick.
+	env_contact_static_frictions.clear();
+	env_contact_kinetic_frictions.clear();
 }
 
 void PBDSolver::reset_environment_contact_lambdas() {
@@ -1388,6 +1423,62 @@ float PBDSolver::compute_tension_taper_factor(float p_threshold, float p_mu_s,
 	float scale = 1.0f - over;
 	if (scale < 0.0f) scale = 0.0f;
 	return scale;
+}
+
+Vector2 PBDSolver::compose_friction_materials(
+		float p_a_static, float p_a_dynamic, int p_a_combine,
+		float p_b_static, float p_b_dynamic, int p_b_combine) {
+	// Slice 4S.3 — direct port of Obi
+	// `Resources/Compute/CollisionMaterial.cginc:33-90`, restricted to
+	// the friction subset (static + dynamic; rolling / stickiness
+	// deliberately omitted). `max(a_combine, b_combine)` picks the
+	// formula; the same formula governs both scalars.
+	int mode = p_a_combine > p_b_combine ? p_a_combine : p_b_combine;
+	float mu_s;
+	float mu_k;
+	switch (mode) {
+		case 1: // MIN
+			mu_s = p_a_static < p_b_static ? p_a_static : p_b_static;
+			mu_k = p_a_dynamic < p_b_dynamic ? p_a_dynamic : p_b_dynamic;
+			break;
+		case 2: // MULTIPLY
+			mu_s = p_a_static * p_b_static;
+			mu_k = p_a_dynamic * p_b_dynamic;
+			break;
+		case 3: // MAX
+			mu_s = p_a_static > p_b_static ? p_a_static : p_b_static;
+			mu_k = p_a_dynamic > p_b_dynamic ? p_a_dynamic : p_b_dynamic;
+			break;
+		case 0: // AVERAGE
+		default:
+			mu_s = (p_a_static + p_b_static) * 0.5f;
+			mu_k = (p_a_dynamic + p_b_dynamic) * 0.5f;
+			break;
+	}
+	return Vector2(mu_s, mu_k);
+}
+
+void PBDSolver::set_environment_contact_materials(
+		const PackedFloat32Array &p_static_frictions,
+		const PackedFloat32Array &p_kinetic_frictions) {
+	// Slice 4S.3 — accept per-slot composed friction. Sized
+	// `N × MAX_CONTACTS_PER_PARTICLE`, matching the layout of
+	// `set_environment_contacts_multi`'s point/normal/rid buffers.
+	// Mismatched lengths → fall back to per-tentacle by clearing.
+	int n = (int)particles.size();
+	int slot_total = n * MAX_CONTACTS;
+	if (p_static_frictions.size() != slot_total ||
+			p_kinetic_frictions.size() != slot_total) {
+		clear_environment_contact_materials();
+		return;
+	}
+	env_contact_static_frictions = p_static_frictions;
+	env_contact_kinetic_frictions = p_kinetic_frictions;
+}
+
+void PBDSolver::clear_environment_contact_materials() {
+	env_contact_static_frictions.clear();
+	env_contact_kinetic_frictions.clear();
 }
 
 PackedVector3Array PBDSolver::get_environment_tangent_lambdas_snapshot() const {
@@ -1570,6 +1661,12 @@ void PBDSolver::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_environment_contacts_multi", "points", "normals", "counts", "rids"),
 			&PBDSolver::set_environment_contacts_multi);
+	// Slice 4S.3 — per-collider friction material sibling call.
+	ClassDB::bind_method(D_METHOD("set_environment_contact_materials",
+									 "static_frictions", "kinetic_frictions"),
+			&PBDSolver::set_environment_contact_materials);
+	ClassDB::bind_method(D_METHOD("clear_environment_contact_materials"),
+			&PBDSolver::clear_environment_contact_materials);
 	ClassDB::bind_method(D_METHOD("clear_environment_contacts"), &PBDSolver::clear_environment_contacts);
 	ClassDB::bind_method(D_METHOD("reset_environment_contact_lambdas"),
 			&PBDSolver::reset_environment_contact_lambdas);
@@ -1584,6 +1681,14 @@ void PBDSolver::_bind_methods() {
 			D_METHOD("compute_tension_taper_factor",
 					"threshold", "mu_s", "normal_lambda", "tangent_lambda_mag"),
 			&PBDSolver::compute_tension_taper_factor);
+	// Slice 4S.3 — friction-material combine helper, bound static so the
+	// analytic test can verify the formula directly. Same pattern as
+	// compute_tension_taper_factor above.
+	ClassDB::bind_static_method("PBDSolver",
+			D_METHOD("compose_friction_materials",
+					"a_static", "a_dynamic", "a_combine",
+					"b_static", "b_dynamic", "b_combine"),
+			&PBDSolver::compose_friction_materials);
 	ClassDB::bind_method(D_METHOD("set_collision_radius", "radius"), &PBDSolver::set_collision_radius);
 	ClassDB::bind_method(D_METHOD("get_collision_radius"), &PBDSolver::get_collision_radius);
 	ClassDB::bind_method(D_METHOD("set_friction", "static_coeff", "kinetic_ratio"),

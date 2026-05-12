@@ -563,6 +563,30 @@ private:
 	float contact_persistence_radius_factor = 1.0f;
 	float contact_persistence_jump_threshold_factor = 1.0f;
 
+	// Slice 4S.3 — per-tick body→TentacleCollisionMaterial lookup cache.
+	// Cleared at outer-tick start (in `Tentacle::tick`); populated
+	// lazily as each unique body shows up in `_run_environment_probe`'s
+	// hit set. Kept across substeps within the same outer tick so the
+	// `find_children("*", "TentacleSurfaceTag", true, false)` walk runs
+	// at most once per body per tick. `has_material = false` is the
+	// "no tag on this body" memoised result — still cached so we don't
+	// walk every substep just to learn "still no tag".
+	//
+	// Picks up runtime tag swaps + tag teardown automatically because
+	// the cache resets every outer tick — no invalidation logic required.
+	struct CachedSurfaceMaterial {
+		uint64_t body_object_id = 0;
+		bool has_material = false;
+		float static_friction = 0.0f;
+		float dynamic_friction = 0.0f;
+		int friction_combine = 0; // CombineMode enum
+	};
+	std::vector<CachedSurfaceMaterial> _material_cache_this_tick;
+	// Scratch buffers handed to the solver each tick that ≥1 tag was
+	// touched. Size = particle_count × MAX_CONTACTS_PER_PARTICLE.
+	godot::PackedFloat32Array env_contact_static_frictions_scratch;
+	godot::PackedFloat32Array env_contact_kinetic_frictions_scratch;
+
 	// Slice 4N — fresh-this-tick contact flags. Written by
 	// `_run_environment_probe()` from `contact_count > 0` *before* the solver
 	// iterates, so behaviour drivers consuming
@@ -593,6 +617,25 @@ private:
 	// hull). Drops cache entries whose body isn't found in this tick's
 	// probe results.
 	void _apply_contact_persistence_to_probe_results();
+	// Slice 4S.3 — populate `env_contact_static_frictions_scratch` /
+	// `env_contact_kinetic_frictions_scratch` from the per-slot contact
+	// manifold by walking unique bodies in this tick's contacts and
+	// composing the tentacle-implicit material with each body's tag
+	// (if any) via `PBDSolver::compose_friction_materials`. Returns
+	// true iff at least one slot saw a tagged body, in which case the
+	// scratch buffers are forwarded to
+	// `solver->set_environment_contact_materials`. Returns false
+	// otherwise (caller falls through to the per-tentacle friction
+	// path, preserving pre-4S.3 numerics bit-for-bit).
+	bool _populate_material_slots_from_probe();
+	// Lookup helper — returns a pointer into `_material_cache_this_tick`
+	// for the given body_object_id, populating the entry on cache miss
+	// by walking `body_node->find_children("*", "TentacleSurfaceTag",
+	// true, false)`. WARN_PRINTs if the find returns >1 match (one tag
+	// per body is the 4S.3 constraint). Returns nullptr only if
+	// body_object_id == 0 (no body for the slot).
+	const CachedSurfaceMaterial *_resolve_surface_material_for_body(
+			uint64_t p_body_object_id, godot::Object *p_body_obj);
 	// Slice 5H — refresh per-particle arc-length + body-frame X axis
 	// once per outer tick so the contact paths can sample the feature
 	// silhouette in O(1) without recomputing the chain frame.

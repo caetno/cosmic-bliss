@@ -228,6 +228,29 @@ public:
 			const godot::PackedVector3Array &p_normals,
 			const godot::PackedByteArray &p_counts,
 			const godot::PackedInt64Array &p_rids);
+	// Slice 4S.3 — per-collider friction-material composition sibling
+	// call. Tentacle's environment-probe pass composes
+	// (tentacle_implicit, body_material) for each contact slot and
+	// writes the result as two parallel PackedFloat32Array buffers, each
+	// size `N × MAX_CONTACTS_PER_PARTICLE`. Slot k for particle i lives
+	// at index `i × MAX_CONTACTS_PER_PARTICLE + k`, matching the layout
+	// of `set_environment_contacts_multi`'s `p_points`/`p_normals`/`p_rids`.
+	//
+	// When called this tick, step 5 (friction) reads μ_s and μ_k per
+	// slot. When NOT called this tick, the per-tentacle fallback
+	// (`mu_s = friction_static`, `mu_k = friction_static × kinetic_ratio`)
+	// is preserved bit-for-bit. The decision is gated on
+	// `env_contact_static_frictions.size() == total_slots`. Callers
+	// invoke `clear_environment_contact_materials()` at outer-tick
+	// boundary so a tick with no tagged bodies takes the fallback path.
+	void set_environment_contact_materials(
+			const godot::PackedFloat32Array &p_static_frictions,
+			const godot::PackedFloat32Array &p_kinetic_frictions);
+	// Reset to size 0 so the friction step's size check falls through
+	// to the per-tentacle path. Called by `Tentacle::tick` at outer-tick
+	// start alongside `reset_friction_applied` /
+	// `reset_environment_contact_lambdas`.
+	void clear_environment_contact_materials();
 	void clear_environment_contacts();
 	// Slice 4R — zero env_contact_normal_lambda + env_contact_tangent_lambda
 	// without disturbing RIDs / counts / points. Tentacle::tick calls this
@@ -271,6 +294,24 @@ public:
 	// 0.0 at full saturation.
 	static float compute_tension_taper_factor(float p_threshold, float p_mu_s,
 			float p_normal_lambda, float p_tangent_lambda_mag);
+
+	// Slice 4S.3 — friction-material combine helper. Direct port of Obi
+	// `Resources/Compute/CollisionMaterial.cginc:33-90` restricted to
+	// friction (static + dynamic). Returns Vector2(composed_static,
+	// composed_dynamic). The combine mode picked is `max(a_combine,
+	// b_combine)` so the higher-priority side's rule wins; per-mode
+	// arithmetic:
+	//   0 AVERAGE  (a + b) × 0.5
+	//   1 MIN      min(a, b)
+	//   2 MULTIPLY a × b
+	//   3 MAX      max(a, b)
+	// Applied identically to static and dynamic friction scalars.
+	// Bound via `ClassDB::bind_static_method`; the analytic test
+	// (`test_4s3_material_composition`) calls this directly through the
+	// GDScript binding. Same pattern as `compute_tension_taper_factor`.
+	static godot::Vector2 compose_friction_materials(
+			float p_a_static, float p_a_dynamic, int p_a_combine,
+			float p_b_static, float p_b_dynamic, int p_b_combine);
 
 	// Per-tentacle base collision radius. Each particle's effective collision
 	// radius for slice 4A is `collision_radius * particle.girth_scale`.
@@ -536,6 +577,14 @@ private:
 	// `set_environment_contacts_multi` to match new slots against last
 	// known slot RIDs and warm-start lambdas for stable contacts.
 	std::vector<int64_t> env_contact_rid;
+	// Slice 4S.3 — per-slot composed friction coefficients. Written by
+	// `set_environment_contact_materials`; cleared to size 0 by
+	// `clear_environment_contact_materials` at outer-tick boundary so
+	// the per-tentacle fallback re-engages when no tagged body is
+	// touched. Step 5 (friction) gates on
+	// `size() == n × MAX_CONTACTS_PER_PARTICLE`.
+	godot::PackedFloat32Array env_contact_static_frictions;
+	godot::PackedFloat32Array env_contact_kinetic_frictions;
 	float collision_radius = 0.05f;
 	float friction_static = 0.0f;
 	float friction_kinetic_ratio = 0.8f;

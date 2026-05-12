@@ -31,8 +31,13 @@ If you find older design docs (fragmented main plan, interaction detail, collisi
 - Mechanical sound emission (physics-driven, not character voice)
 - Fluid strand spawning on separation
 - Storage chains, oviposition, birthing (§6.8–6.9)
-- Transient `ContractionPulse` primitive with named pattern emitters (orgasm, gag reflex, pain expulsion, refusal spasm, knot engulf — §6.10), autonomous `appetite`
+- Transient `ContractionPulse` primitive with named pattern emitters (orgasm, gag reflex, pain expulsion, refusal spasm, knot engulf — §6.10), autonomous `appetite` — contributions land additively in the canal `muscle[s,θ]` field per §6.12.4
 - `RhythmSyncedProbe` modifier on `Tentacle` — locks tip drive to `Marionette.body_rhythm_phase` (§6.11; see Marionette P7.10)
+- **Canal interior model (§6.12, opened 2026-05-04):** 2D `tunnel_state` RGBA32F texture per canal (CPU-integrated, GPU-uploaded each tick, indexed by `(arc_length_sample, angular_sector)`) + centerline particle chain (M PBD particles, default 12, anchored at orifice Centers or `<Canal>_TerminalPin`). Per-cell channels: `dynamic_wall_radius`, `plastic_offset`, `damage`, configurable fourth slot (`wall_radial_velocity` for second-order ringing, or `friction_mult`). Hierarchical activation skips integration for inactive canals (no EI, no storage, no muscle modulation).
+- **Constriction zones replace per-feature rim loops along canal axes.** A zone is pure data on `CanalParameters` (`arc_length_s`, `half_width`, `max_contraction`, `current_strength`, `friction_bonus`, `baked_at_rest`). Many zones cost essentially nothing.
+- **Muscle activation field `muscle[s,θ]`** is the canonical Reverie modulation primitive for canal interior; legacy `peristalsis_*` channels are sugar that synthesizes a sinusoidal contribution.
+- **Active muscular curl** (per-centerline-particle `muscular_curl_delta`) is the canonical Reverie modulation primitive for canal *bend*, independent of radial squeeze.
+- **Canal interior verts (`CUSTOM0.r ≥ 1`) carry no skin weights.** Per-vert bake `(s, θ, rest_radius, rest_outward_normal)` in `CUSTOM1` + `CUSTOM2` replaces them; vertex shader routes via the simulation pipeline (deformed centerline + `tunnel_state` texture sample).
 - Reaction-on-host-bone closure (§6.3) — radial + axial-wedge + type-2 friction reciprocal applied to the orifice's `host_bone`; closes the third-law loop on the rim side and is what makes suspension physically realized
 - `TentacleMesh` as a `PrimitiveMesh` subclass + modifier model with `Ring` / `Vertex` / `Mask` kernels (§10.2a / §10.2b)
 
@@ -75,7 +80,7 @@ Authoritative phase plan: `TentacleTech_Architecture.md` §13. Per-slice history
 | 1 — Spline primitives | done |
 | 2 — PBD core | done |
 | 3 — Mesh rendering | done |
-| 4 — Collision | done — through 4S.2 (2026-05-11); 4S.3 open |
+| 4 — Collision | done — through 4S.3 (2026-05-12) |
 | 5 — Orifice | done — 5A–5D + 5H (2026-05-04..05); 5E/5F/5G canal interior next gate |
 | 6 — Stimulus bus | blocked |
 | 7 / 7.5 — Bulgers + capsules + x-ray | blocked |
@@ -115,7 +120,8 @@ You are a sub-Claude scoped to this extension. The repo's top-level Claude (star
 - **Bulgers have spring-damper state** for both position and radius.
 - **Stimulus bus is bidirectional.** Physics writes events + continuous state; Reverie writes modulation.
 - **Soft physics over scripted levers** (§1 design principle, added 2026-04-27). No `accept_penetration` boolean, no `min_approach_angle_cos` gate, no per-pattern event types. If a behavior can't be expressed via stiffness, friction, grip, damage, or a modulation channel, the fix is the physics — not a hard reject. Boolean rejects in particular get used everywhere a designer doesn't want to tune the physics; do not introduce them.
-- **Per-rim-particle quantities use `_per_loop_k[l][k]`** where `l` is loop index and `k` is rim particle index (canonical, established in §6.2 after the 2026-05-03 amendment). The `_per_dir[d]` and `_per_ring[r]` indexing schemes from earlier drafts are retired; do not reintroduce them.
+- **Per-rim-particle quantities use `_per_loop_k[l][k]`** where `l` is loop index and `k` is rim particle index (canonical, established in §6.2 after the 2026-05-03 amendment). The `_per_dir[d]` and `_per_ring[r]` indexing schemes from earlier drafts are retired; do not reintroduce them. **This indexing applies only to orifice rim loops.** Canal interior quantities use `_per_cell_kj[k][j]` indexing on the 2D `tunnel_state` texture (k = axial cell, j = angular sector) and `_per_centerline[m]` for the centerline particle chain (§6.12).
+- **Vertex shader displacement path splits at the canal_id boundary.** Body skin verts (`CUSTOM0.r == 0`) read the bulger uniform array via the §7.1 inner loop. Canal interior verts (`CUSTOM0.r ≥ 1`) read the canal's `tunnel_state` texture + deformed centerline via the §6.12.5 sampling block; no bulger loop. The texture already incorporates bulger contributions via CPU integration — a single texelFetch per canal vert. Do not loop bulgers on canal interior verts.
 - **Axial-wedge math uses the normalized form** `-p × drds_outward / sqrt(1 + drds_outward²)` (= `-p × sin θ`), not `tan(local_taper)` and not the unnormalized `-p × drds_outward` linearization. The normalized form is bounded by `p` at near-vertical flanges; the others blow up at exactly the geometry that matters most. `drds_outward` is gradient w.r.t. distance traveled along `+entry_axis`, derived from intrinsic `dr/ds` by the sign of `dot(t_hat, entry_axis)` (§6.3).
 - **Type-2 friction reciprocals do NOT route per-particle to a ragdoll bone.** They sum into `EI.tangential_friction_per_loop_k[l][k]` (§6.2) and the §6.3 reaction-on-host-bone pass routes them to `host_bone` per rim particle. Type-1 routing rule (§4.3) does not apply to type-2 contacts.
 - **`ContractionPulse` is atomic.** No `count`, no `interval`. Repeating patterns are sugar at the emitter level — patterns queue lists of atomic pulses; the per-tick code never sees `count` or `interval` (§6.10).
@@ -128,6 +134,8 @@ You are a sub-Claude scoped to this extension. The repo's top-level Claude (star
 - Do not use `MeshDataTool` in hot paths.
 - Do not use Godot's `SoftBody3D`.
 - Do not use `MultiMesh` for tentacle instancing (each needs a unique deforming mesh).
+- **Do not paint skin weights on canal interior verts (`CUSTOM0.r ≥ 1`).** The canal_id-tagged path is exclusive — these verts are simulation-driven (deformed centerline + `tunnel_state` texture sample), not bone-driven. The AutoBaker writes `(s, θ, rest_radius, normal)` into `CUSTOM1`/`CUSTOM2` at scene init; that replaces traditional skinning entirely. Painting weights silently breaks the routing.
+- **Do not procedurally generate canal mesh geometry.** Canals are hand-modeled in Blender; static features (haustra, taeniae, valves, columns) are baked into the modeled mesh. The runtime starts from the modeled rest pose and deforms via §6.12 — it never reshapes the topology.
 - Do not try to share data structures with DPG; that code is broken and being phased out.
 - Do not carry over DPG's `Penetrator`/`Penetrable` naming. TentacleTech uses `Tentacle`/`Orifice`/`EntryInteraction`.
 - Do not write GDScript-equivalent features in C++ unless profiling shows a need.

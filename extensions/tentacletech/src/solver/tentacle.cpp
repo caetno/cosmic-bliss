@@ -9,6 +9,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object_id.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
 
 #include "../spline/spline_data_packer.h"
 
@@ -178,6 +179,12 @@ void Tentacle::tick(float p_delta) {
 	// the reset's "post-call all live lambdas == 0" invariant is preserved
 	// verbatim — the re-seed is the explicit override mechanism.
 	solver->reset_environment_contact_lambdas();
+	// Slice 4S.3 — outer-tick boundary: clear the per-tick body→material
+	// lookup cache + clear solver-side material buffers so the
+	// per-tentacle fallback engages by default for this tick. Substeps
+	// re-populate the cache + buffers lazily as tagged bodies appear.
+	_material_cache_this_tick.clear();
+	solver->clear_environment_contact_materials();
 	// Slice 4S.2 — body-local-frame contact persistence: re-inject persisted
 	// (RID, normal_lambda, tangent_lambda) for cache slots whose body is
 	// still alive and hasn't teleported. Runs ONCE per outer tick. Composes
@@ -377,6 +384,23 @@ void Tentacle::_run_environment_probe() {
 			env_contact_normals_scratch, env_contact_count_scratch,
 			env_contact_rids_scratch);
 
+	// Slice 4S.3 — populate per-slot composed friction from this tick's
+	// contact manifold. When at least one body has a `TentacleSurfaceTag`
+	// child, forward the materials buffers to the solver; otherwise leave
+	// them cleared and the friction step takes the per-tentacle fallback
+	// (bit-for-bit equivalent to pre-4S.3 numerics).
+	if (_populate_material_slots_from_probe()) {
+		solver->set_environment_contact_materials(
+				env_contact_static_frictions_scratch,
+				env_contact_kinetic_frictions_scratch);
+	} else {
+		// No tagged bodies in this substep — make sure any per-slot
+		// values from an earlier substep (within the same outer tick)
+		// don't leak through. Safe regardless of whether the previous
+		// substep saw a tag.
+		solver->clear_environment_contact_materials();
+	}
+
 	// Slice 4N — write the fresh-this-tick snapshot now (after the probe,
 	// before solver->tick). Behaviour drivers running their
 	// _physics_process AFTER the tentacle's pick up THIS tick's contacts;
@@ -487,6 +511,128 @@ void Tentacle::_apply_contact_persistence_to_probe_results() {
 			c.hit_rid[matched_pk] = cached.body_rid;
 		}
 	}
+}
+
+// Slice 4S.3 — resolve a body's `TentacleSurfaceTag`, memoising the result
+// in `_material_cache_this_tick` for the remainder of this outer tick.
+// On cache miss, walks `body->find_children("*", "TentacleSurfaceTag",
+// true, false)` and reads the tag's `material` @export. WARN_PRINT fires
+// when find returns >1 match — one tag per body is the 4S.3 constraint;
+// the first match is taken.
+const Tentacle::CachedSurfaceMaterial *Tentacle::_resolve_surface_material_for_body(
+		uint64_t p_body_object_id, Object *p_body_obj) {
+	if (p_body_object_id == 0 || p_body_obj == nullptr) {
+		return nullptr;
+	}
+	for (size_t i = 0; i < _material_cache_this_tick.size(); i++) {
+		if (_material_cache_this_tick[i].body_object_id == p_body_object_id) {
+			return &_material_cache_this_tick[i];
+		}
+	}
+	CachedSurfaceMaterial entry;
+	entry.body_object_id = p_body_object_id;
+	Node *body_node = Object::cast_to<Node>(p_body_obj);
+	if (body_node != nullptr) {
+		TypedArray<Node> matches = body_node->find_children(
+				String("*"), String("TentacleSurfaceTag"), true, false);
+		if (matches.size() > 1) {
+			WARN_PRINT(vformat(
+					"TentacleSurfaceTag: %d matches on body '%s'; "
+					"only one tag per body is supported in 4S.3 — using first.",
+					matches.size(), body_node->get_name()));
+		}
+		if (matches.size() > 0) {
+			Node *tag = Object::cast_to<Node>(matches[0]);
+			if (tag != nullptr) {
+				Variant mat_v = tag->get(StringName("material"));
+				if (mat_v.get_type() == Variant::OBJECT) {
+					Object *mat_obj = (Object *)mat_v;
+					if (mat_obj != nullptr) {
+						Variant s = mat_obj->get(StringName("static_friction"));
+						Variant d = mat_obj->get(StringName("dynamic_friction"));
+						Variant fc = mat_obj->get(StringName("friction_combine"));
+						entry.has_material = true;
+						entry.static_friction = (float)s;
+						entry.dynamic_friction = (float)d;
+						entry.friction_combine = (int)fc;
+					}
+				}
+			}
+		}
+	}
+	_material_cache_this_tick.push_back(entry);
+	return &_material_cache_this_tick.back();
+}
+
+// Slice 4S.3 — fill `env_contact_*_frictions_scratch` from this tick's
+// contact manifold. Walks each particle's per-slot contacts; for each
+// body that has a `TentacleSurfaceTag` child, composes
+// (tentacle_implicit, body_material) via `PBDSolver::compose_friction_materials`
+// and writes the per-slot μ_s / μ_k. Returns true iff at least one slot
+// resolved to a tagged body — when false, the caller leaves
+// `set_environment_contact_materials` uninvoked so the solver's
+// friction step takes the per-tentacle fallback (bit-for-bit equivalent
+// to the pre-4S.3 path).
+//
+// Tentacle implicit material is `(friction_static, friction_static ×
+// kinetic_ratio, AVERAGE = 0)`. `friction_static` is already the
+// post-lubricity value (slice 4B: `set_friction(base × (1 − lub), …)`),
+// so per-slot composition naturally inherits the tentacle's current
+// modulator state.
+bool Tentacle::_populate_material_slots_from_probe() {
+	if (solver.is_null()) return false;
+	int n = solver->get_particle_count();
+	int slot_count = n * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+	if (slot_count <= 0) return false;
+	const auto &contacts = environment_probe.get_contacts();
+	if (contacts.size() == 0) return false;
+
+	float tentacle_mu_s = solver->get_static_friction();
+	float tentacle_mu_k = tentacle_mu_s * solver->get_kinetic_friction_ratio();
+	const int TENTACLE_COMBINE = 0; // AVERAGE — see TentacleCollisionMaterial doc.
+
+	if (env_contact_static_frictions_scratch.size() != slot_count) {
+		env_contact_static_frictions_scratch.resize(slot_count);
+	}
+	if (env_contact_kinetic_frictions_scratch.size() != slot_count) {
+		env_contact_kinetic_frictions_scratch.resize(slot_count);
+	}
+	float *mu_s_dst = env_contact_static_frictions_scratch.ptrw();
+	float *mu_k_dst = env_contact_kinetic_frictions_scratch.ptrw();
+	// Pre-fill with tentacle-implicit values so unused slots and no-tag
+	// bodies all read consistent fallback μ. (The solver-side fallback
+	// branch reads per-tentacle scalars from `friction_static` instead;
+	// per-slot defaults are written here for parity when ANY tag exists,
+	// so the friction step doesn't see a per-slot mu of 0 = "skip" for
+	// no-tag bodies.)
+	for (int s = 0; s < slot_count; s++) {
+		mu_s_dst[s] = tentacle_mu_s;
+		mu_k_dst[s] = tentacle_mu_k;
+	}
+
+	bool any_tag = false;
+	int contact_n = (int)contacts.size();
+	for (int i = 0; i < n && i < contact_n; i++) {
+		const tentacletech::EnvironmentContact &c = contacts[i];
+		if (c.contact_count == 0) continue;
+		int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
+		for (int k = 0; k < c.contact_count; k++) {
+			uint64_t body_oid = c.hit_object_id[k];
+			if (body_oid == 0) continue;
+			Object *body_obj = ObjectDB::get_instance(ObjectID(body_oid));
+			if (body_obj == nullptr) continue;
+			const CachedSurfaceMaterial *mat =
+					_resolve_surface_material_for_body(body_oid, body_obj);
+			if (mat == nullptr || !mat->has_material) continue;
+			Vector2 composed = PBDSolver::compose_friction_materials(
+					tentacle_mu_s, tentacle_mu_k, TENTACLE_COMBINE,
+					mat->static_friction, mat->dynamic_friction, mat->friction_combine);
+			mu_s_dst[base + k] = composed.x;
+			mu_k_dst[base + k] = composed.y;
+			any_tag = true;
+		}
+	}
+	return any_tag;
 }
 
 void Tentacle::_validate_and_reseed_persistence() {
