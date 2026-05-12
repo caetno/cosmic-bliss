@@ -1,9 +1,12 @@
 # Cosmic Bliss — Design Update 2026-05-12-02 — Flesh-deformer integration (`body_field` extension)
 
-> **Status: drafted 2026-05-12, v1 scope greenlit. Apply pass pending —
-> Marionette §18 status flip from STRETCH to ACTIVE, cross-references
-> from §15 / §16 / §17 to `body_field` extension, slice plan landing
-> in §13-equivalent for the new extension's CLAUDE.md.**
+> **Status: applied 2026-05-12 to `docs/marionette/Marionette_plan.md`
+> §18 in commit `94cc0f4`** (STRETCH → ACTIVE, retitle to "Volumetric
+> tet substrate", cross-references from §15 / §16 / §17 to `body_field`
+> extension, three §18 amendments reframed as v2+ slices B7–B10).
+> Brief retained as the v1 design record; sub-Claudes can read this
+> for "what's in v1 and why," Marionette_plan.md §18 for the
+> architecture-level placement.
 >
 > A working GPU XPBD volumetric tet deformer prototype exists at
 > `~/desktop/flesh-deformer/` (full inventory in
