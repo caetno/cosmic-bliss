@@ -444,6 +444,72 @@ New 2D R32F texture `Tentacle::feature_silhouette` (256 axial × 16 angular) of 
 
 **Deferred (5H follow-up):** spine direction signal for anisotropic friction (spines record `spine_tip_normal` only; friction modulation later); explicit twist tracking for body-frame θ; per-particle probe padding; dynamic girth-scale-aware silhouette evolution.
 
+### 5E — Canal interior infrastructure (2026-05-12)
+
+Per `docs/architecture/TentacleTech_Architecture.md` §6.12 + §10.6 steps 6-10. Infrastructure-only slice — no per-tick dynamics, no Reverie modulation wiring, no muscle field integration. Allocates the static substrate so 5F has a clean substrate to drive: `Canal` node, `CanalParameters` / `CanalConstrictionZone` resources, `CanalAutoBaker` (5 bake steps), per-vert (s, θ, rest_radius, rest_outward_normal) write into CUSTOM1/CUSTOM2, `tunnel_state` RGBA32F texture initialization, centerline particle chain rest positions + anchor resolution, `CanalGizmoOverlay` debug visualisation, and a `canal_lib.gdshaderinc` documenting the §6.12.5 vertex-shader routing branch as an include with identity-stub helpers.
+
+**Architecture decisions (load-bearing — flagged before any code):**
+
+- **Sibling `CanalAutoBaker` rather than extending `OrificeAutoBaker`.** The architecture doc §10.4 describes an OrificeAutoBaker but **no such class exists yet** — the `gdscript/orifice/` directory was never created, only the C++ `src/orifice/orifice.cpp` from phases 5A-5H landed. The brief's "extend gdscript/orifice/orifice_auto_baker.gd" path was therefore impossible; the brief also OK'd the sibling path ("your call"). `CanalAutoBaker` stands alone; a future `HeroAutoBaker.bake(hero)` can chain it with the eventual OrificeAutoBaker without restructuring this class.
+- **§6.12.5 shader branch as a `.gdshaderinc` placeholder, not a concrete shader file.** No hero body / skin shader exists in this codebase (only `tentacle.gdshader` for spline-skinned tentacles + eye shaders); Phase 7's bulger system + §10.4 hero shader assembly are both blocked. The user approved the "include file only" path: `extensions/tentacletech/shaders/canal_lib.gdshaderinc` documents the §6.12.5 routing with identity-stub helpers (`centerline_eval`, `centerline_basis`, `rest_basis_at_s`, `sample_dynamic_radius`) so Phase 7's hero shader can `#include` it and 5F's dynamics can swap the helpers without changing call-shape. No concrete shader consumes the include in 5E.
+- **`blender_bliss 0.2.0` tooling is not in the repo + no kasumi GLB carries canal_id verts.** The brief asserted the artist workflow is testable; reality is the tooling hasn't been written. Production-time end-to-end (real GLB → CanalAutoBaker → rendered) is deferred. 5E tests use synthetic ArrayMeshes built in GDScript with CUSTOM0/CUSTOM1/CUSTOM2 attributes (RGBA-Float format) — same code path the AutoBaker would see on a Godot-imported ArrayMesh, just without GLB plumbing.
+
+**Files touched (no commit — top-level Claude reviews + commits):**
+
+```
+extensions/tentacletech/
+├── gdscript/
+│   ├── resources/                                   (NEW dir)
+│   │   ├── canal_constriction_zone.gd               (NEW, 6 fields per §6.12.3)
+│   │   └── canal_parameters.gd                      (NEW, full §10.6/brief schema)
+│   ├── canal/                                       (NEW dir)
+│   │   ├── canal.gd                                 (NEW, Node3D + baked substrate accessors + is_inactive stub + tick stub)
+│   │   └── canal_auto_baker.gd                      (NEW, 5 bake steps + projection helper)
+│   └── debug/
+│       └── canal_gizmo_overlay.gd                   (NEW, CMY+RGB palette: cyan spline / magenta centerline / green cell grid / blue bake-validation lines)
+└── shaders/
+    └── canal_lib.gdshaderinc                        (NEW, §6.12.5 routing branch with identity stubs)
+
+game/tests/tentacletech/
+└── test_5e_canal_infrastructure.gd                  (NEW, 8/8)
+```
+
+**New API surface** — `CanalParameters` Resource (verbatim port of the 2026-05-04 brief schema; ~30 @export fields). `CanalConstrictionZone` Resource (6 fields per §6.12.3). `Canal` Node3D (carries `canal_parameters` + baked substrate; `set_canal_id`/`get_canal_id`, `is_inactive` placeholder always true in 5E, `tick(dt)` no-op stub, accessors for spline / rest_radius_per_cell / tunnel_state_texture / centerline_rest_positions / anchors). `CanalAutoBaker` static class with `bake(canal, mesh_instance, skeleton, canal_id, orifices_root)` entry point + 5 step-helpers exposed for granular testing (`build_spline_from_cp_bones`, `compute_per_cell_rest_radius`, `allocate_tunnel_state_texture`, `allocate_centerline_chain`, `bake_canal_interior_verts`). `CanalGizmoOverlay` Node3D, signature-hashed rebuild to avoid per-frame ImmediateMesh churn on idle scenes.
+
+**Tests:** `test_5e_canal_infrastructure` 8/8.
+
+1. `test_spline_from_cp_bones`: 6 CPs along a quarter-circle (radius 0.5 m); endpoint err 0.000000 m, arc length 0.7845 m vs analytic 0.7854 m (0.1% Catmull approximation error — under the 5% bound).
+2. `test_per_cell_rest_radius_cylinder`: 0.05 m cylindrical tube, 8×4 cells; **worst |err| = 0.000000 m**, 0 NaN.
+3. `test_per_cell_rest_radius_oval`: oval cross-section (axes 0.07 × 0.05 m along normal/binormal); the 4 cardinal sectors at the canal midpoint resolve to **0.0700 / 0.0500 / 0.0700 / 0.0500 m** exactly — combine of the 32-segment mesh tessellation + 4-sector canal grid is well-conditioned at right-angle sample points.
+4. `test_tunnel_state_texture_allocation`: format = RGBAF, dims = (axial × angular_sectors), R-channel worst |err| vs `rest_radius_per_cell` = 0.0000000000, GBA == (0, 0, 1.0) at every cell.
+5. `test_centerline_chain_allocation`: 12 particles, expected arc-length spacing 0.036364 m, worst spacing err 0.000000 m; proximal anchor falls back to spline start (no orifice set), distal anchor falls back to spline end with a graceful `push_warning` (no fatal error).
+6. `test_closed_terminal_canal`: explicit `Uterus_TerminalPin` bone at (0.4, 0.1, 0) — well off the spline axis; distal anchor resolves to (0.4, 0.1, 0), err = 0.000000 m. Confirms the closed-terminal branch wins against fallback paths.
+7. `test_per_vert_bake_roundtrip`: 8×12 = 96 canal interior verts, project onto spline → reconstruct from (s, θ, rest_radius); **worst |err| = 0.00000986 m** (≈ 10 µm), well under the 1e-4 m tolerance. End-to-end validation of step 10's projection + decompose-normal math.
+8. `test_inactive_canal_skips_tick`: `Canal.is_inactive()` returns true in 5E placeholder; `tick(dt)` early-returns cleanly.
+
+Full tentacletech suite: **196/196** (was 188 + 8 new). Build: gdscript-only slice; `.so` size unchanged at 2.05 MB (no C++ rebuilt — `scons: up to date`). Class registration verified via the test preloads (`_CanalParameters`, `_CanalConstrictionZone`, `_Canal`, `_CanalAutoBaker`, `_CanalGizmoOverlay` all resolve through res:// paths after `--editor --quit` cache refresh).
+
+**Spec divergences flagged:**
+
+- **(a) Tube-mesh per-cell raycast strategy is single-ray-per-cell.** Per the prompt's "don't over-engineer" note, slice 5E uses one ray from `(s_k, θ_j)` outward through the canal-interior triangles, sorted by `Geometry3D.segment_intersects_triangle` hit distance. The cylinder + oval tests validate this is accurate enough for tessellation-noise-free input. Multi-ray averaging or ring-fit estimation deferred until a noisy production mesh surfaces a problem.
+- **(b) Per-vert projection uses brute-force coarse scan + golden-section refinement.** 64 t-samples + 12 iterations golden-section gives ≈ 10 µm precision in the bake_roundtrip test (worst 0.00000986 m). Sub-millisecond per vert. Production-grade canals with 10K verts → ~50 ms bake-time pass; not hot-path.
+- **(c) Step 10 writeback uses `clear_surfaces` + `add_surface_from_arrays`.** The destructive rewrite preserves the original surface format flags via `surface_get_format(surface_idx)` so RGBA-Float CUSTOMs round-trip cleanly. For multi-surface meshes the AutoBaker iterates surfaces; each one is rebuilt independently. This trips the Reimport gotcha (`reference_godot_import_reimport.md`) — the bake's `print_rich` end-of-bake message surfaces the reminder.
+- **(d) Centerline chain is allocated as rest positions only — no PBD solver instantiated.** 5F's job to plug in the C++ solver (or a GDScript reuse of the existing PBDSolver). `Canal.has_centerline_chain()` returns false in 5E; gizmo overlay falls back to drawing rest positions. `Canal._centerline_chain` declared as `RefCounted` placeholder so 5F's type can plug in without forward-declaration ceremony.
+- **(e) `evaluate_frame_dict` C++ method is bound under the simpler name `evaluate_frame`.** The CatmullSpline C++ class binds its Dictionary-returning shim as `evaluate_frame`, not `evaluate_frame_dict` (the C++ method name). All GDScript call sites in 5E use `evaluate_frame(t)` — initial scaffolding had the C++ name and crashed silently; fixed pre-merge.
+- **(f) `_resolve_distal_anchor`'s open-canal-no-exit-orifice fallback uses `push_warning`, not `push_error`.** The fallback returns the spline endpoint, which is a graceful (if degenerate) outcome. A real production canal with no exit_orifice_path AND no closed_terminal is a designer config error worth flagging, but not fatal — the canal still functions, just with a no-op distal anchor.
+
+**Out of scope landed:**
+
+- Per-tick centerline solver tick (deferred to 5F).
+- Per-tick texture integration loop (§6.12.4 — deferred to 5F).
+- Reverie modulation API for `constriction_zones[].current_strength` and `muscular_curl_delta` (deferred to 5G).
+- Concrete hero shader file consuming `canal_lib.gdshaderinc` (deferred to Phase 7 hero-skin shader assembly or to 5F if dynamics demand it earlier).
+- `OrificeAutoBaker` (separate sub-slice — not 5E's scope).
+- `blender_bliss` tooling / kasumi GLB end-to-end. Synthetic test meshes are what 5E exercises; production tooling lands separately.
+- §10.4 step 12 rim-blend factor (CUSTOM2.a) — explicitly left untouched by the baker.
+
+**Cross-slice composition:** No solver, no probe, no per-tick code touched. 4S.3 friction material composition unaffected. 4S.2 contact persistence unaffected. Phase 5A–5H rim primitive + orifice machinery untouched. 5E adds storage + bake-time scaffolding only.
+
 ---
 
 ## Phase 6 — Stimulus bus
