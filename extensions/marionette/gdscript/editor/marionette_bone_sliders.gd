@@ -309,15 +309,22 @@ func _apply_pose() -> void:
 		_value_labels[_rot_slider].text = "%.0f°" % rad_to_deg(rot_v)
 	if _abd_slider != null:
 		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(abd_v)
-	# In Ragdoll Test mode the SPD path drives the bone; writing
-	# `set_bone_pose_rotation` here would fight the simulator every frame.
-	# 8a gates the kinematic write; 8c routes the slider to
-	# `Marionette.set_bone_target` instead.
-	if _mode == Mode.SKELETON3D_PREVIEW:
-		var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
-				_bone.bone_entry, flex_v, rot_v, abd_v)
-		_skeleton.set_bone_pose_rotation(_bone_idx, _rest_rotation * anatomical)
-		_request_gizmo_refresh()
+	match _mode:
+		Mode.SKELETON3D_PREVIEW:
+			# Direct kinematic write to the skeleton (P4 path). SPD inactive.
+			var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
+					_bone.bone_entry, flex_v, rot_v, abd_v)
+			_skeleton.set_bone_pose_rotation(_bone_idx, _rest_rotation * anatomical)
+			_request_gizmo_refresh()
+		Mode.RAGDOLL_TEST:
+			# Anatomical target hand-off to SPD. `compose_target_bone_local`
+			# in C++ consumes the exact (flex, rot, abd) Vector3 the slider
+			# stores, including rest-offset subtraction. No transformation
+			# needed — slider state is already canonical anatomy.
+			if is_instance_valid(_marionette):
+				_marionette.set_bone_target(
+						StringName(_bone.bone_name),
+						Vector3(flex_v, rot_v, abd_v))
 
 
 # Routes refresh requests through the active Marionette. Coalescing happens

@@ -35,6 +35,14 @@ var _reset_all_btn: Button
 var _refresh_btn: Button
 var _scroll: ScrollContainer
 var _content: VBoxContainer
+# Global Strength slider (slice 8c). Drives `Marionette.set_global_strength`;
+# the C++ side ramps changes via `MarionetteCore::set_strength_ramp_duration`
+# so increases smooth over time and drops are instantaneous (slice 6).
+# Visible only in Ragdoll Test — in Preview, strength has no effect because
+# SPD is inactive.
+var _strength_row: HBoxContainer
+var _strength_slider: HSlider
+var _strength_value_label: Label
 var _mode: int = Mode.SKELETON3D_PREVIEW
 # Cached pre-entry gravity_scale so Ragdoll-Test exit restores whatever the
 # user had dialed in. We always set zero-g on entry; the value at exit is
@@ -112,6 +120,31 @@ func _build_chrome() -> void:
 	_mode_option.item_selected.connect(_on_mode_changed)
 	_mode_option.disabled = true
 	mode_row.add_child(_mode_option)
+
+	# Global strength row — visible only in Ragdoll Test. Built once, hidden
+	# when in Preview so the layout stays stable.
+	_strength_row = HBoxContainer.new()
+	_strength_row.visible = false
+	add_child(_strength_row)
+	var strength_label := Label.new()
+	strength_label.text = "Strength:"
+	_strength_row.add_child(strength_label)
+	_strength_value_label = Label.new()
+	_strength_value_label.text = "1.00"
+	_strength_value_label.custom_minimum_size = Vector2(38, 0)
+	_strength_value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_strength_row.add_child(_strength_value_label)
+	_strength_slider = HSlider.new()
+	_strength_slider.min_value = 0.0
+	_strength_slider.max_value = 1.0
+	_strength_slider.step = 0.01
+	_strength_slider.value = 1.0
+	_strength_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_strength_slider.custom_minimum_size = Vector2(60, 0)
+	_strength_slider.tooltip_text = (
+			"Global SPD strength multiplier. 0 = limp ragdoll, 1 = actively held pose.")
+	_strength_slider.value_changed.connect(_on_global_strength_changed)
+	_strength_row.add_child(_strength_slider)
 
 	var btn_row := HBoxContainer.new()
 	add_child(btn_row)
@@ -207,6 +240,13 @@ func _set_active_marionette(m: Marionette) -> void:
 	_refresh_btn.disabled = false
 	if _mode_option != null:
 		_mode_option.disabled = false
+	# Sync strength slider with the new Marionette's live strength.
+	if _strength_slider != null:
+		var live: float = m.get_global_strength()
+		_strength_slider.set_value_no_signal(live)
+		if _strength_value_label != null:
+			_strength_value_label.text = "%.2f" % live
+	_update_strength_row_visibility()
 	_populate_for(m)
 
 
@@ -225,7 +265,39 @@ func _on_mode_changed(idx: int) -> void:
 	_exit_mode(old_mode)
 	_mode = new_mode
 	_enter_mode(new_mode)
+	# Widgets must see the new mode before we seed SPD targets — otherwise
+	# the seed call's _apply_pose hits the Preview branch.
 	_propagate_mode_to_widgets()
+	if new_mode == Mode.RAGDOLL_TEST:
+		_seed_bone_targets_from_sliders()
+	_update_strength_row_visibility()
+
+
+func _on_global_strength_changed(v: float) -> void:
+	if _strength_value_label != null:
+		_strength_value_label.text = "%.2f" % v
+	if _active_marionette == null:
+		return
+	_active_marionette.set_global_strength(v)
+
+
+# Visible only in Ragdoll Test. In Preview, SPD is inactive so the slider
+# has no effect; hiding it keeps the dock chrome compact.
+func _update_strength_row_visibility() -> void:
+	if _strength_row != null:
+		_strength_row.visible = _mode == Mode.RAGDOLL_TEST
+
+
+# Slice 8c — on Ragdoll-Test entry, seed every cached anatomical target from
+# the current slider values. Without this, SPD starts with all-zero targets
+# (canonical T-pose) and the character snaps if sliders were sitting at
+# non-zero positions when the user toggled mode. Anatomical zero = rest =
+# T-pose per CLAUDE.md §2; zero-target on an A-pose rest pose would also
+# produce a snap.
+func _seed_bone_targets_from_sliders() -> void:
+	for widget: MarionetteBoneSliders in _bone_widgets.values():
+		if is_instance_valid(widget):
+			widget._apply_pose()
 
 
 func _propagate_mode_to_widgets() -> void:

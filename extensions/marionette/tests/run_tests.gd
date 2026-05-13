@@ -103,6 +103,9 @@ func _init() -> void:
 		_test_muscle_test_dock_engages_hip_tether,
 		_test_muscle_test_dock_releases_hip_tether_on_exit,
 		_test_muscle_test_dock_tether_nudge_handoff,
+		_test_muscle_slider_writes_set_bone_target_in_ragdoll_test,
+		_test_muscle_slider_does_not_write_set_bone_target_in_preview,
+		_test_muscle_test_dock_global_strength_drives_marionette,
 		_test_bone_region_humanoid_total_84,
 		_test_bone_region_left_right_balance,
 		_test_bone_region_per_region_counts,
@@ -2918,6 +2921,102 @@ func _test_muscle_test_dock_releases_hip_tether_on_exit() -> bool:
 	if not handle_cleared:
 		return _fail("dock_releases_hip_tether", "dock retained tether handle after exit")
 	return _ok("muscle_test_dock_releases_hip_tether_on_exit")
+
+
+func _test_muscle_slider_writes_set_bone_target_in_ragdoll_test() -> bool:
+	# Slice 8c — slider in RAGDOLL_TEST mode must hand off (flex, rot, abd)
+	# to Marionette.set_bone_target, which mirrors into _bone_target_mirror.
+	# We verify the cached value matches the slider state.
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	if bone == null:
+		m.free()
+		return _fail("slider_writes_target_in_ragdoll_test", "LeftUpperLeg missing")
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null:
+		widget.free(); m.free()
+		return _fail("slider_writes_target_in_ragdoll_test", "flex slider missing")
+	widget.set_mode(MarionetteBoneSliders.Mode.RAGDOLL_TEST)
+
+	# Pre-clear mirror so we observe a fresh write.
+	m._bone_target_mirror.clear()
+	widget._flex_slider.value = deg_to_rad(45.0)
+	widget._apply_pose()
+
+	var key: StringName = StringName("LeftUpperLeg")
+	if not m._bone_target_mirror.has(key):
+		widget._exit_tree()
+		widget.free(); m.free()
+		return _fail("slider_writes_target_in_ragdoll_test",
+				"no entry for LeftUpperLeg in target mirror")
+	var v: Vector3 = m._bone_target_mirror[key]
+	var expect_flex: float = widget._flex_slider.value  # quantized by step
+	var ok: bool = absf(v.x - expect_flex) < 1.0e-4
+
+	widget._exit_tree()
+	widget.free(); m.free()
+	if not ok:
+		return _fail("slider_writes_target_in_ragdoll_test",
+				"target.x=%f expected %f" % [v.x, expect_flex])
+	return _ok("muscle_slider_writes_set_bone_target_in_ragdoll_test")
+
+
+func _test_muscle_slider_does_not_write_set_bone_target_in_preview() -> bool:
+	# Slice 8c — slider in SKELETON3D_PREVIEW must NOT call set_bone_target.
+	# Mirror remains untouched.
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	if bone == null:
+		m.free()
+		return _fail("slider_no_target_in_preview", "LeftUpperLeg missing")
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null:
+		widget.free(); m.free()
+		return _fail("slider_no_target_in_preview", "flex slider missing")
+	# Default mode is SKELETON3D_PREVIEW.
+	m._bone_target_mirror.clear()
+	widget._flex_slider.value = deg_to_rad(45.0)
+	widget._apply_pose()
+
+	var key: StringName = StringName("LeftUpperLeg")
+	var leaked: bool = m._bone_target_mirror.has(key)
+
+	widget._exit_tree()
+	widget.free(); m.free()
+	if leaked:
+		return _fail("slider_no_target_in_preview",
+				"Preview mode wrote a target — should be skeleton-only")
+	return _ok("muscle_slider_does_not_write_set_bone_target_in_preview")
+
+
+func _test_muscle_test_dock_global_strength_drives_marionette() -> bool:
+	# Slice 8c — moving the dock's Global Strength slider must call
+	# Marionette.set_global_strength. The C++ ramp queues the request and
+	# `get_requested_global_strength` reads it back.
+	var m := _build_synthetic_marionette()
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	# Drive the slider directly — the dock's _on_global_strength_changed is
+	# the signal handler and accepts the float verbatim.
+	dock._on_global_strength_changed(0.4)
+	# `_ensure_core` returns the C++ MarionetteCore; we read the requested
+	# (not effective) strength because the ramp hasn't been stepped.
+	var core: Object = m._ensure_core()
+	var requested: float = core.call(&"get_requested_global_strength")
+	var ok: bool = absf(requested - 0.4) < 1.0e-6
+
+	dock.queue_free()
+	m.free()
+	if not ok:
+		return _fail("dock_global_strength_drives_marionette",
+				"requested=%f, expected 0.4" % requested)
+	return _ok("muscle_test_dock_global_strength_drives_marionette")
 
 
 func _test_muscle_test_dock_tether_nudge_handoff() -> bool:
