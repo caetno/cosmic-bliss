@@ -95,6 +95,13 @@ static func bake(
 	p_canal._set_baked_centerline_rest_positions(chain["positions"])
 	p_canal._set_baked_anchors(proximal, distal)
 
+	# 5F.A — Build the live centerline PBD solver from the freshly-laid
+	# substrate. Eager-in-baker (rather than lazy-in-tick) so the gizmo
+	# overlay can read live positions immediately and the per-tick code
+	# never has to branch on `if _centerline_chain == null: build_now()`.
+	# Idempotent: a re-bake replaces the chain.
+	p_canal._ensure_centerline_chain()
+
 	# Step 10 — per-vert (s, θ, rest_radius, rest_outward_normal) bake.
 	var vert_count := bake_canal_interior_verts(
 			p_mesh_instance, p_canal_id, spline)

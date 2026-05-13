@@ -35,15 +35,25 @@ extends Node3D
 @export var show_centerline_rest: bool = true
 @export var show_cell_grid: bool = true
 @export var show_bake_validation: bool = false
+## 5F.A — live PBD centerline chain. Draws magenta dots at each
+## solver particle, segment-stretch colored bars between adjacent
+## particles (green at rest length, red at 110% stretch), and cyan
+## bending-residual vectors at interior particles. Falls back to
+## rest positions when `canal.has_centerline_chain()` is false.
+@export var show_centerline: bool = true
 @export var spline_sample_count: int = 64
 @export var cell_marker_size: float = 0.005
 @export var centerline_dot_size: float = 0.008
+@export var bending_residual_scale: float = 5.0
 @export_range(1, 100, 1) var bake_validation_sample_every: int = 10
 
 const _COLOR_SPLINE := Color(0.0, 1.0, 1.0)        # cyan
 const _COLOR_CENTERLINE := Color(1.0, 0.0, 1.0)    # magenta
 const _COLOR_CELLS := Color(0.0, 1.0, 0.4)         # green (slight cyan shift; avoids orange-yellow eats)
 const _COLOR_BAKE := Color(0.3, 0.5, 1.0)          # blue
+const _COLOR_BEND_RESIDUAL := Color(0.2, 1.0, 1.0) # cyan-bias (avoids the orange-yellow band)
+const _COLOR_STRETCH_REST := Color(0.0, 1.0, 0.4)  # green at rest length
+const _COLOR_STRETCH_MAX := Color(1.0, 0.2, 0.2)   # red at ≥110% rest length
 
 var _mesh_inst: MeshInstance3D
 var _im: ImmediateMesh
@@ -71,6 +81,16 @@ func _process(_delta: float) -> void:
 		visible = false
 		return
 	visible = true
+	# When a live PBD chain is present and the show_centerline toggle is
+	# on, particles move continuously — the cached signature path would
+	# leave the gizmo frozen. Force a per-frame rebuild for those cases.
+	# Static-only renders still gate on the signature so an idle scene
+	# pays nothing.
+	var live_chain := show_centerline and canal.has_method("has_centerline_chain") \
+			and canal.has_centerline_chain()
+	if live_chain:
+		_rebuild()
+		return
 	var sig := _state_signature()
 	if sig != _last_signature:
 		_last_signature = sig
@@ -122,7 +142,15 @@ func _rebuild() -> void:
 	if show_spline:
 		_draw_polyline(samples, _COLOR_SPLINE)
 
-	if show_centerline_rest:
+	# 5F.A — live PBD chain (preferred when present). Otherwise fall
+	# back to drawing the baked rest positions (5E behavior).
+	var live_drawn := false
+	if show_centerline and canal.has_method("has_centerline_chain") \
+			and canal.has_centerline_chain():
+		_draw_live_centerline()
+		live_drawn = true
+
+	if show_centerline_rest and not live_drawn:
 		var rest_positions: PackedVector3Array = canal.call("get_baked_centerline_rest_positions")
 		for p in rest_positions:
 			_draw_cross(p, centerline_dot_size, _COLOR_CENTERLINE)
@@ -197,6 +225,73 @@ func _draw_cell_grid(p_spline: RefCounted) -> void:
 			_im.surface_set_color(_COLOR_CELLS)
 			_im.surface_add_vertex(p + binormal * cell_marker_size)
 	_im.surface_end()
+
+
+# 5F.A — Live centerline chain visualisation:
+#   * Magenta cross at each live particle position.
+#   * Segment-stretch coloured bars between adjacent particles
+#     (green at rest length, lerping to red at ≥110% rest).
+#   * Cyan bending-residual vector at each interior particle,
+#     pointing from current position toward the ideal midpoint
+#     between neighbours, scaled by `bending_residual_scale` for
+#     visibility (the actual residuals are typically sub-mm at rest).
+func _draw_live_centerline() -> void:
+	var positions: PackedVector3Array = canal.get_centerline_positions_snapshot()
+	var rest_positions: PackedVector3Array = canal.call("get_baked_centerline_rest_positions")
+	var n := positions.size()
+	if n == 0:
+		return
+
+	# Magenta crosses at live particles.
+	for p in positions:
+		_draw_cross(p, centerline_dot_size, _COLOR_CENTERLINE)
+
+	# Segment stretch bars. Rest segment length is reconstructed from
+	# the baked rest positions; with M particles this is M-1 values.
+	# Mismatched array lengths (re-bake mid-frame) fall back to
+	# straight-line magenta.
+	var have_rest := rest_positions.size() == n
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for i in range(n - 1):
+		var seg := positions[i + 1] - positions[i]
+		var len := seg.length()
+		var col := _COLOR_CENTERLINE
+		if have_rest:
+			var rest_seg: float = (rest_positions[i + 1] - rest_positions[i]).length()
+			if rest_seg > 1e-9:
+				# Map stretch ratio [1.0, 1.1] -> [green, red].
+				var ratio: float = clampf((len / rest_seg - 1.0) / 0.1, 0.0, 1.0)
+				col = _COLOR_STRETCH_REST.lerp(_COLOR_STRETCH_MAX, ratio)
+		_im.surface_set_color(col)
+		_im.surface_add_vertex(positions[i])
+		_im.surface_set_color(col)
+		_im.surface_add_vertex(positions[i + 1])
+	_im.surface_end()
+
+	# Bending residuals at interior particles. Direction = (target -
+	# current) where target is the linear-interp midpoint between
+	# neighbours at fraction L_ab/(L_ab+L_bc). Length scaled for
+	# visibility.
+	if n >= 3:
+		_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+		for i in range(1, n - 1):
+			var a := positions[i - 1]
+			var b := positions[i]
+			var c := positions[i + 1]
+			var frac := 0.5
+			if have_rest:
+				var l_ab: float = (rest_positions[i] - rest_positions[i - 1]).length()
+				var l_bc: float = (rest_positions[i + 1] - rest_positions[i]).length()
+				var total := l_ab + l_bc
+				if total > 1e-9:
+					frac = l_ab / total
+			var target := a + (c - a) * frac
+			var residual := (target - b) * bending_residual_scale
+			_im.surface_set_color(_COLOR_BEND_RESIDUAL)
+			_im.surface_add_vertex(b)
+			_im.surface_set_color(_COLOR_BEND_RESIDUAL)
+			_im.surface_add_vertex(b + residual)
+		_im.surface_end()
 
 
 # Sparse vert → projection-onto-spline lines. Validates step 10's

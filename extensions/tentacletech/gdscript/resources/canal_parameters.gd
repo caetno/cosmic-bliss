@@ -189,3 +189,28 @@ extends Resource
 ## centerline chain (§6.12.1). Drives canal flex independent of
 ## radial squeeze.
 @export var muscular_curl_gain: float = 1.0
+
+# ─── 5F.A — Centerline PBD chain tunables ──────────────────────────
+#
+# Forwarded into `CanalCenterlineSolver` at chain instantiation. The
+# C++ solver clamps each value to its safe range, so out-of-range
+# authored values degrade gracefully rather than crashing the tick.
+
+## Number of PBD constraint iterations per tick. Higher = stiffer
+## chain. Clamped to [1, 32] inside the solver.
+@export_range(1, 32) var centerline_iterations: int = 8
+
+## Bending-constraint pull strength (midpoint-pull form). Clamped to
+## [0, 1] inside the solver. 0 → free chain; 1 → fully straightens
+## each iter.
+@export_range(0.0, 1.0) var centerline_bending_stiffness: float = 0.5
+
+## Verlet velocity damping per tick. Clamped to [0, 1] inside the
+## solver. 0 → undamped; 1 → critically over-damped (velocity zero'd
+## each tick).
+@export_range(0.0, 1.0) var centerline_damping: float = 0.05
+
+## Gravity scale. 0.0 → chain doesn't sag under gravity (the
+## anatomically-correct default, since canals are held by surrounding
+## tissue). 1.0 → full -Y g at 9.81 m/s². Useful test knob.
+@export var centerline_gravity_scale: float = 0.0

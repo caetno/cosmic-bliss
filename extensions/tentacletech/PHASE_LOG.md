@@ -560,6 +560,72 @@ Full tentacletech suite: **199/199** passing (was 196 + 3 new; all 26 test scrip
 
 **Cross-slice composition:** Pure scaffolding. No solver, no probe, no per-tick code touched. 5E substrate untouched (test_5e_canal_infrastructure 8/8 unchanged). Phase 5A–5H rim primitive + orifice machinery untouched. C++ `.so` not rebuilt.
 
+### 5F.A — Canal centerline PBD chain solver (2026-05-13)
+
+C++ chain solver + GDScript wiring + 5 tests. Anchored, bending-aware PBD chain integrating per-tick against the rest spline; predict (symplectic Verlet) → N iterations of (anchor pin → distance → midpoint-pull bending → anchor pin) → Verlet velocity carry. No collision, no wall contact, no `tunnel_state`, no `muscular_curl_delta`. Pure chain physics + paired gizmo overlay + tests.
+
+**Why C++** (not GDScript, as the supervisor initially proposed): the slice lives inside TentacleTech's C++ subsystem (PBDSolver, Tentacle, Orifice all C++); splitting a PBD chain into GDScript would fragment a coherent subsystem across two languages, costing cross-boundary plumbing that outweighs the per-tick savings on a light 12-particle chain. The 2026-05-13 root CLAUDE.md C++/GDScript split rewrite formalized this principle ("Pick one side of the boundary per subsystem and stay there"); 5F.A is the first slice to ship under it. `PBDSolver` was NOT reused — it carries tentacle-specific surface (girth, attachment, collision, friction) that's dead weight for a 12-particle anchored chain. Re-implemented the small primitives inline (~120 lines of C++ math).
+
+**Files added:**
+
+```
+extensions/tentacletech/src/canal/
+├── canal_centerline_solver.h                       (NEW, ~100 lines incl. doc)
+└── canal_centerline_solver.cpp                     (NEW, ~250 lines incl. binds)
+game/tests/tentacletech/
+└── test_5fa_centerline_chain.gd                    (NEW, 5/5)
+```
+
+**Files modified:** `extensions/tentacletech/SConstruct` (glob `src/canal/*.cpp`), `src/register_types.cpp` (`GDREGISTER_CLASS(CanalCenterlineSolver)`), `gdscript/canal/canal.gd` (real `tick(dt)` driving the solver behind `is_inactive()` gate + `tick_force(dt)` test bypass + `_ensure_centerline_chain()` + `get_centerline_chain()` + position snapshot accessors), `gdscript/canal/canal_auto_baker.gd` (calls `_ensure_centerline_chain()` after step 9), `gdscript/debug/canal_gizmo_overlay.gd` (`show_centerline` export + live chain draw — magenta crosses, stretch-coloured green→red segments over [1.0, 1.1] × rest, cyan bending residual polylines), `gdscript/resources/canal_parameters.gd` (`centerline_iterations: int = 8`, `centerline_bending_stiffness: float = 0.5`, `centerline_damping: float = 0.05`, `centerline_gravity_scale: float = 0.0`).
+
+**Public C++ surface:**
+
+```
+CanalCenterlineSolver : RefCounted
+  configure(rest_positions_world, inv_mass_per_particle)
+  set_anchors(proximal_world, distal_world)
+  set_iterations(n)             // clamp [1, 32], default 8
+  set_bending_stiffness(k)      // clamp [0, 1], default 0.5
+  set_damping(d)                // clamp [0, 1], default 0.05
+  set_gravity_scale(g)          // default 0.0 (chain doesn't sag by default)
+  set_gravity_vector(g)         // default (0, -9.81, 0)
+  tick(dt)
+  get_positions_snapshot()      // by copy (§15)
+  get_prev_positions_snapshot() // by copy (§15)
+  get_particle_count()
+  set_particle_position(idx, pos)  // test-only kink injection
+```
+
+Algorithm details (~40 lines of constraint math, inline in `tick()`):
+- **Predict** (Verlet): `pos += (pos - prev_pos) × (1 - damping) + gravity × gravity_scale × dt²`; pinned particles (`inv_mass <= 0`) skip predict.
+- **Anchor pin at iter start:** `positions[0] = proximal_anchor`, `positions[M-1] = distal_anchor`.
+- **Distance constraint** per adjacent pair: standard inv-mass-weighted XPBD-stiff projection; pinned particles stay put via `w_a/w_sum = 0` ratio.
+- **Bending constraint** (three-point midpoint-pull, NOT Cosserat): for each interior triple `(a, b, c)`, target middle = `a + (c - a) × (L_ab / (L_ab + L_bc))`; lerp `b` toward target with `bending_stiffness`. Combined with the distance constraint in the same iter loop, gives stable bend resistance without locking rigid.
+- **Anchor re-pin at iter end** (defensive — distance/bending should leave w_a=0 endpoints alone, but safety > theory).
+- **Velocity reconstruction:** `prev_positions = pos_at_start_of_tick` after all iterations. The implicit velocity for next predict is `(new - prev) = total displacement this tick`.
+
+**Tests** (`test_5fa_centerline_chain.gd` — 5/5):
+
+1. `chain_at_rest_holds_zero_drift` — straight-axis 12-particle chain, anchors at endpoints, `gravity_scale=0`, 60 ticks at 1/60. Worst drift = **0.0e+00 m** (floating-point floor; all constraints exactly satisfied at rest).
+2. `pinned_endpoints_track_anchor_motion` — sweep distal anchor by +0.1 m along chain axis (10 steps × 0.01 m + 20-tick hold). Final distal err = **0.0e+00 m**; interior lateral drift = **0.0e+00 m** (linear path under bending+distance combined).
+3. `gravity_droop_then_recover` — horizontal chain, anchors at same Y. `gravity_scale=1.0` × 120 ticks → middle particle droops **13.7 mm**. Flip `gravity_scale=0` × 120 more → middle particle recovers to within **1.49e-8 m** of rest.
+4. `bending_resists_kink` — inject a 5 cm lateral kink at interior particle via `set_particle_position`. Anchors held, gravity off. 60 ticks of integration → residual lateral offset **2.0e-6 m** (ratio **4.0e-5** ≪ 0.5 threshold). Distance + bending combined pulls the kink out cleanly.
+5. `tick_no_op_when_inactive` — `Canal.is_inactive()` returns true (5F.A default); `Canal.tick(dt)` early-returns; 10 ticks, zero motion. Confirms the active gating works; `Canal.tick_force(dt)` is the test bypass for tests 1-4.
+
+Full tentacletech suite: **204/204** passing across 23 assertion-style + 4 rc=0 diagnostic test files (was 199 + 5 new from 5F.A). All 26 test scripts exit rc=0. **`.so` size: 2,146,576 → 2,171,152 bytes (+24,576 / ~24 KB).**
+
+**Spec divergences flagged:**
+
+- **(a) `Canal.is_inactive()` still returns `true` by default in 5F.A.** The solver is built and wired, but `is_inactive()` still gates `Canal.tick(dt)` so production callers wiring it into `_physics_process` don't drive the solver yet — there's no EI / muscle / storage / Reverie signal to flip the gate. Tests use the public `tick_force(dt)` bypass to exercise the path. 5G or whichever slice lands the first activation signal flips the gate body.
+- **(b) Per-tick anchor refresh through `centerline_source` deferred.** Anchors are read each tick from `_proximal_anchor_world` / `_distal_anchor_world` — fields populated by `CanalAutoBaker` at bake time. When a host bone moves at runtime, those fields don't refresh; the chain doesn't move with the bone. Out of scope for 5F.A; 5F.B (or a dedicated slice) wires the per-tick refresh by routing through `Canal.centerline_source` each frame.
+- **(c) Three-point midpoint-pull bending, NOT Cosserat / full rotation-based bending.** Documented in the C++ comment. Sufficient for slice 5F.A; if `muscular_curl_delta` in 5G needs torsion-aware bending, revisit.
+- **(d) `tick_force` test bypass.** A small public shim that exposes the solver-drive path without the `is_inactive()` gate. Tightly scoped (one method on `Canal`), removable when 5G lands a real activation signal that tests can drive instead. Marked with a 5F.A-specific docstring.
+- **(e) Gizmo overlay redraws every frame when a live chain is present.** Idle/static canals retain the 5E signature-cache path. Per-frame ImmediateMesh rebuild for a 12-particle chain is cheap; revisit if a hero has many active canals simultaneously and profile shows hot.
+
+**Deferred (5F.B — `tunnel_state` per-tick integration):** §6.12.4 step 2 wall radius integration (spring `dynamic_wall_radius` toward `rest + plastic + Σ zones`, accumulate `damage`, optional `wall_radial_velocity`). Per-tick anchor refresh via `centerline_source` lands here too. **Deferred (5F.A.1 — primitive-source concrete):** gated on body_field shipping `CanalCenterlinePrimitive`. **Deferred (5G):** `muscle[s,θ]` field + constriction-zone modulation channels; `muscular_curl_delta` per centerline particle (Reverie modulation primitive for canal bend independent of radial squeeze). **Deferred (Phase 7):** bulger SDF per cell; concrete hero shader consuming `canal_lib.gdshaderinc`.
+
+**Cross-slice composition:** No tentacle / orifice / probe / collision code touched. 5E substrate accessors unchanged. 5F.A.0 adapter unchanged (the solver consumes the rest positions the adapter already provides via `CanalAutoBaker`; the adapter's per-tick path is not yet exercised — that's 5F.B). `Canal.tick` was a 5E no-op stub; 5F.A makes it real but the `is_inactive()` gate keeps production behaviour identical (zero callers drive a non-inactive Canal yet).
+
 ---
 
 ## Phase 6 — Stimulus bus

@@ -4,6 +4,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "canal/canal_centerline_solver.h"
 #include "orifice/orifice.h"
 #include "procedural/procedural_kernels.h"
 #include "solver/pbd_solver.h"
@@ -24,6 +25,7 @@ void initialize_tentacletech_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(Tentacle);
 	GDREGISTER_CLASS(ProceduralKernels);
 	GDREGISTER_CLASS(Orifice);
+	GDREGISTER_CLASS(CanalCenterlineSolver);
 }
 
 void uninitialize_tentacletech_module(ModuleInitializationLevel p_level) {
