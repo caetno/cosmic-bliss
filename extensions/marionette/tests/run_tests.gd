@@ -106,6 +106,11 @@ func _init() -> void:
 		_test_muscle_slider_writes_set_bone_target_in_ragdoll_test,
 		_test_muscle_slider_does_not_write_set_bone_target_in_preview,
 		_test_muscle_test_dock_global_strength_drives_marionette,
+		_test_impulse_tool_registers,
+		_test_impulse_tool_compute_impulse_horizontal_drag,
+		_test_impulse_tool_compute_impulse_vertical_drag_world_up,
+		_test_impulse_tool_compute_impulse_capped_at_max,
+		_test_impulse_tool_inactive_by_default,
 		_test_bone_region_humanoid_total_84,
 		_test_bone_region_left_right_balance,
 		_test_bone_region_per_region_counts,
@@ -3017,6 +3022,114 @@ func _test_muscle_test_dock_global_strength_drives_marionette() -> bool:
 		return _fail("dock_global_strength_drives_marionette",
 				"requested=%f, expected 0.4" % requested)
 	return _ok("muscle_test_dock_global_strength_drives_marionette")
+
+
+# ---------- P5.8 / slice 8d — Apply Impulse tool ----------
+
+# Minimal Camera3D for impulse-math tests. Identity transform → basis.x =
+# right (+X world), basis.y = up (+Y world), basis.z = into-screen-back
+# (+Z world). That lets us compute expected impulses analytically.
+static func _make_identity_camera() -> Camera3D:
+	var cam := Camera3D.new()
+	cam.global_transform = Transform3D.IDENTITY
+	return cam
+
+
+func _test_impulse_tool_registers() -> bool:
+	# Tool instantiates without errors, starts inactive, no Marionette bound.
+	var tool := MarionetteImpulseTool.new()
+	var ok: bool = (tool != null
+			and tool.active == false
+			and tool.marionette == null)
+	if not ok:
+		return _fail("impulse_tool_registers",
+				"defaults wrong: active=%s marionette=%s" % [tool.active, tool.marionette])
+	return _ok("impulse_tool_registers")
+
+
+func _test_impulse_tool_compute_impulse_horizontal_drag() -> bool:
+	# Drag +100px on screen-X → +X-world impulse of (100 * IMPULSE_PER_PIXEL).
+	# Screen-Y unchanged so Y component is zero.
+	var tool := MarionetteImpulseTool.new()
+	tool.prepare_for_test(Vector2(0, 0), Vector2(100, 0))
+	var cam := _make_identity_camera()
+	root.add_child(cam)
+	var impulse := tool.compute_impulse(cam)
+	cam.queue_free()
+
+	var expected := Vector3(100.0 * MarionetteImpulseTool.IMPULSE_PER_PIXEL, 0, 0)
+	if not _vec_near(impulse, expected, 1.0e-4):
+		return _fail("impulse_horizontal_drag",
+				"got %s, expected %s" % [impulse, expected])
+	return _ok("impulse_tool_compute_impulse_horizontal_drag")
+
+
+func _test_impulse_tool_compute_impulse_vertical_drag_world_up() -> bool:
+	# Drag -50px on screen-Y (i.e., drag upward on screen) → +Y-world impulse.
+	# Screen-Y is positive-down, so a release at y=-50 vs press at y=0 is
+	# an upward drag, mapping to world-up (+Y) on an identity-basis camera.
+	var tool := MarionetteImpulseTool.new()
+	tool.prepare_for_test(Vector2(0, 0), Vector2(0, -50))
+	var cam := _make_identity_camera()
+	root.add_child(cam)
+	var impulse := tool.compute_impulse(cam)
+	cam.queue_free()
+
+	# delta.y = -50, world contribution is basis.y * (-delta.y) = +Y * 50.
+	var expected := Vector3(0, 50.0 * MarionetteImpulseTool.IMPULSE_PER_PIXEL, 0)
+	if not _vec_near(impulse, expected, 1.0e-4):
+		return _fail("impulse_vertical_drag_world_up",
+				"got %s, expected %s" % [impulse, expected])
+	return _ok("impulse_tool_compute_impulse_vertical_drag_world_up")
+
+
+func _test_impulse_tool_compute_impulse_capped_at_max() -> bool:
+	# Drag far beyond IMPULSE_MAX/IMPULSE_PER_PIXEL pixels. Result magnitude
+	# must clamp to IMPULSE_MAX exactly.
+	var tool := MarionetteImpulseTool.new()
+	tool.prepare_for_test(Vector2(0, 0), Vector2(10000, 0))
+	var cam := _make_identity_camera()
+	root.add_child(cam)
+	var impulse := tool.compute_impulse(cam)
+	cam.queue_free()
+
+	var mag := impulse.length()
+	if absf(mag - MarionetteImpulseTool.IMPULSE_MAX) > 1.0e-3:
+		return _fail("impulse_capped_at_max",
+				"magnitude=%f, expected %f" % [mag, MarionetteImpulseTool.IMPULSE_MAX])
+	# Direction preserved (was pure +X).
+	if absf(impulse.x - MarionetteImpulseTool.IMPULSE_MAX) > 1.0e-3:
+		return _fail("impulse_capped_at_max",
+				"direction lost: %s" % impulse)
+	return _ok("impulse_tool_compute_impulse_capped_at_max")
+
+
+func _test_impulse_tool_inactive_by_default() -> bool:
+	# Wiring sanity — the dock starts in Preview, so the impulse tool the
+	# dock receives must be inactive even after activation toggle is wired.
+	var m := _build_synthetic_marionette()
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+	var tool := MarionetteImpulseTool.new()
+	dock.set_impulse_tool(tool)
+
+	var inactive_in_preview: bool = not tool.active
+
+	# Flip into Ragdoll Test but leave the toolbar checkbutton off — tool
+	# still inactive (active = mode AND button).
+	dock._on_mode_changed(1)
+	var still_off: bool = not tool.active
+
+	dock._on_mode_changed(0)
+	dock.queue_free()
+	m.free()
+	if not inactive_in_preview:
+		return _fail("impulse_inactive_by_default", "active in Preview")
+	if not still_off:
+		return _fail("impulse_inactive_by_default",
+				"active in Ragdoll Test without button toggle")
+	return _ok("impulse_tool_inactive_by_default")
 
 
 func _test_muscle_test_dock_tether_nudge_handoff() -> bool:

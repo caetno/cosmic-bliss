@@ -43,6 +43,11 @@ var _content: VBoxContainer
 var _strength_row: HBoxContainer
 var _strength_slider: HSlider
 var _strength_value_label: Label
+# Apply-Impulse tool (slice 8d). Owned by the plugin; injected via
+# set_impulse_tool. Activation flips with Ragdoll-Test mode + the toolbar
+# checkbutton below.
+var _impulse_tool: MarionetteImpulseTool
+var _impulse_btn: CheckButton
 var _mode: int = Mode.SKELETON3D_PREVIEW
 # Cached pre-entry gravity_scale so Ragdoll-Test exit restores whatever the
 # user had dialed in. We always set zero-g on entry; the value at exit is
@@ -146,6 +151,17 @@ func _build_chrome() -> void:
 	_strength_slider.value_changed.connect(_on_global_strength_changed)
 	_strength_row.add_child(_strength_slider)
 
+	# Apply Impulse toggle — checkbutton so the active state is visible.
+	# When pressed, the plugin's `_forward_3d_gui_input` routes mouse
+	# events to the impulse tool. Lives next to the strength slider so
+	# the Ragdoll-Test affordances cluster together.
+	_impulse_btn = CheckButton.new()
+	_impulse_btn.text = "Apply Impulse"
+	_impulse_btn.tooltip_text = (
+			"Click-drag in the viewport on a MarionetteBone to apply an impulse.")
+	_impulse_btn.toggled.connect(_on_impulse_btn_toggled)
+	_strength_row.add_child(_impulse_btn)
+
 	var btn_row := HBoxContainer.new()
 	add_child(btn_row)
 
@@ -234,6 +250,7 @@ func _set_active_marionette(m: Marionette) -> void:
 		_refresh_btn.disabled = true
 		if _mode_option != null:
 			_mode_option.disabled = true
+		_sync_impulse_tool_state()
 		return
 	_header.text = "Active: %s" % m.name
 	_reset_all_btn.disabled = false
@@ -247,6 +264,7 @@ func _set_active_marionette(m: Marionette) -> void:
 		if _strength_value_label != null:
 			_strength_value_label.text = "%.2f" % live
 	_update_strength_row_visibility()
+	_sync_impulse_tool_state()
 	_populate_for(m)
 
 
@@ -270,7 +288,14 @@ func _on_mode_changed(idx: int) -> void:
 	_propagate_mode_to_widgets()
 	if new_mode == Mode.RAGDOLL_TEST:
 		_seed_bone_targets_from_sliders()
+	else:
+		# Exiting Ragdoll Test — drop the impulse toggle so re-entry starts
+		# clean (otherwise a stale-pressed checkbutton would silently re-arm
+		# the tool the moment we re-enter).
+		if _impulse_btn != null:
+			_impulse_btn.set_pressed_no_signal(false)
 	_update_strength_row_visibility()
+	_sync_impulse_tool_state()
 
 
 func _on_global_strength_changed(v: float) -> void:
@@ -416,6 +441,35 @@ static func _find_root_bone(m: Marionette) -> PhysicalBone3D:
 # Public accessor for tests (slice 8b verifies presence/absence by mode).
 func get_hip_tether() -> MarionetteHipTether:
 	return _hip_tether
+
+
+# Injected by plugin.gd at addon load (slice 8d). Dock owns activation
+# semantics — plugin owns lifetime + viewport-input routing.
+func set_impulse_tool(tool: MarionetteImpulseTool) -> void:
+	_impulse_tool = tool
+	_sync_impulse_tool_state()
+
+
+func get_impulse_tool() -> MarionetteImpulseTool:
+	return _impulse_tool
+
+
+func _on_impulse_btn_toggled(_pressed: bool) -> void:
+	_sync_impulse_tool_state()
+
+
+# Single source of truth for the tool's `active` flag: dock mode is
+# Ragdoll Test AND the toolbar checkbutton is on. Anything else → inactive.
+func _sync_impulse_tool_state() -> void:
+	if _impulse_tool == null:
+		return
+	var should_be_active: bool = (
+			_mode == Mode.RAGDOLL_TEST
+			and _impulse_btn != null
+			and _impulse_btn.button_pressed
+			and _active_marionette != null)
+	_impulse_tool.active = should_be_active
+	_impulse_tool.marionette = _active_marionette if should_be_active else null
 
 
 func _populate_for(m: Marionette) -> void:
