@@ -100,6 +100,9 @@ func _init() -> void:
 		_test_muscle_slider_kinematic_write_gated_in_ragdoll_test,
 		_test_muscle_test_dock_enter_ragdoll_test_zeros_gravity,
 		_test_muscle_test_dock_exit_restores_gravity_and_rest,
+		_test_muscle_test_dock_engages_hip_tether,
+		_test_muscle_test_dock_releases_hip_tether_on_exit,
+		_test_muscle_test_dock_tether_nudge_handoff,
 		_test_bone_region_humanoid_total_84,
 		_test_bone_region_left_right_balance,
 		_test_bone_region_per_region_counts,
@@ -2828,6 +2831,121 @@ func _test_muscle_test_dock_exit_restores_gravity_and_rest() -> bool:
 	if not ok_mode:
 		return _fail("dock_exit_restores", "mode did not flip back to Preview")
 	return _ok("muscle_test_dock_exit_restores_gravity_and_rest")
+
+
+# ---------- P5.8 / slice 8b — hip tether ----------
+
+# Helper — locate the dock's hip tether's joint + anchor in the scene.
+static func _tether_joint(m: Marionette) -> Generic6DOFJoint3D:
+	return m.get_node_or_null(NodePath(String(MarionetteHipTether.JOINT_NAME))) as Generic6DOFJoint3D
+
+
+static func _tether_anchor(m: Marionette) -> StaticBody3D:
+	return m.get_node_or_null(NodePath(String(MarionetteHipTether.ANCHOR_NAME))) as StaticBody3D
+
+
+func _test_muscle_test_dock_engages_hip_tether() -> bool:
+	# Entering Ragdoll Test must spawn `_RagdollTestTether` + `_RagdollTestAnchor`
+	# under the Marionette node, with node_a/node_b correctly wired between
+	# the anchor and the root MarionetteBone.
+	var m := _build_synthetic_marionette()
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	dock._on_mode_changed(1)  # → Ragdoll Test
+
+	var joint := _tether_joint(m)
+	var anchor := _tether_anchor(m)
+	var tether := dock.get_hip_tether()
+
+	if joint == null:
+		dock._on_mode_changed(0)
+		dock.queue_free(); m.free()
+		return _fail("dock_engages_hip_tether", "Generic6DOFJoint3D not under Marionette")
+	if anchor == null:
+		dock._on_mode_changed(0)
+		dock.queue_free(); m.free()
+		return _fail("dock_engages_hip_tether", "StaticBody3D anchor not under Marionette")
+	if tether == null or not tether.is_engaged():
+		dock._on_mode_changed(0)
+		dock.queue_free(); m.free()
+		return _fail("dock_engages_hip_tether", "dock did not retain tether instance")
+
+	# node_a should resolve to the anchor; node_b to a MarionetteBone (the root).
+	var resolved_a: Node = joint.get_node_or_null(joint.node_a)
+	var resolved_b: Node = joint.get_node_or_null(joint.node_b)
+	var a_ok: bool = resolved_a == anchor
+	var b_ok: bool = resolved_b is MarionetteBone and (resolved_b as MarionetteBone).is_root
+
+	dock._on_mode_changed(0)
+	dock.queue_free()
+	m.free()
+	if not a_ok:
+		return _fail("dock_engages_hip_tether",
+				"joint.node_a resolved to %s, expected anchor" % resolved_a)
+	if not b_ok:
+		return _fail("dock_engages_hip_tether",
+				"joint.node_b resolved to %s, expected root MarionetteBone" % resolved_b)
+	return _ok("muscle_test_dock_engages_hip_tether")
+
+
+func _test_muscle_test_dock_releases_hip_tether_on_exit() -> bool:
+	# Exiting Ragdoll Test must free the joint + anchor and clear the
+	# dock's tether handle.
+	var m := _build_synthetic_marionette()
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	dock._on_mode_changed(1)
+	if _tether_joint(m) == null:
+		dock._on_mode_changed(0)
+		dock.queue_free(); m.free()
+		return _fail("dock_releases_hip_tether", "tether didn't engage on entry")
+
+	dock._on_mode_changed(0)
+
+	# Wait one frame for queue_free to land — but we have no SceneTree pump
+	# in headless _init context. queue_free defers to next loop, so use
+	# is_instance_valid + get_node_or_null. Free-pending nodes still resolve
+	# by NodePath until the next idle frame, so we instead verify the tether
+	# handle was cleared.
+	var handle_cleared: bool = dock.get_hip_tether() == null
+
+	dock.queue_free()
+	m.free()
+	if not handle_cleared:
+		return _fail("dock_releases_hip_tether", "dock retained tether handle after exit")
+	return _ok("muscle_test_dock_releases_hip_tether_on_exit")
+
+
+func _test_muscle_test_dock_tether_nudge_handoff() -> bool:
+	# Tether engage should snapshot + zero hip_upward_nudge; release should
+	# restore the pre-entry value. Math-direct verification.
+	var m := _build_synthetic_marionette()
+	m.set_hip_upward_nudge(80.0)
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	dock._on_mode_changed(1)
+	var nudge_on_entry: float = m.get_hip_upward_nudge()
+	if absf(nudge_on_entry) > 1.0e-6:
+		dock._on_mode_changed(0)
+		dock.queue_free(); m.free()
+		return _fail("dock_tether_nudge_handoff",
+				"nudge not zeroed on engage: %f" % nudge_on_entry)
+
+	dock._on_mode_changed(0)
+	var nudge_after_exit: float = m.get_hip_upward_nudge()
+
+	dock.queue_free()
+	m.free()
+	if absf(nudge_after_exit - 80.0) > 1.0e-6:
+		return _fail("dock_tether_nudge_handoff",
+				"nudge not restored: got %f, expected 80.0" % nudge_after_exit)
+	return _ok("muscle_test_dock_tether_nudge_handoff")
 
 
 # ---------- MarionetteBoneRegion (P4.3 dock grouping) ----------

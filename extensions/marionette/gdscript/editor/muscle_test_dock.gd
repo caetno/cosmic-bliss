@@ -41,10 +41,16 @@ var _mode: int = Mode.SKELETON3D_PREVIEW
 # whatever Ragdoll Test left it at, but the user's intent for Preview was
 # the pre-entry number.
 var _saved_gravity_scale: float = 1.0
+# Cached pre-entry hip_upward_nudge — tether takes over anti-sag while
+# engaged, so we set 0 on engage and restore on release.
+var _saved_hip_nudge: float = 0.0
 # Whether *we* built the ragdoll on entry. Determines whether exit calls
 # `clear_ragdoll`. If the user had already built the ragdoll, we leave it
 # in place (only restore mode/gravity, not the simulator hierarchy).
 var _built_ragdoll_on_entry: bool = false
+# Hip tether instance (slice 8b). Constructed on Ragdoll-Test entry, freed
+# on exit. null in Preview.
+var _hip_tether: MarionetteHipTether
 # Bone widgets currently mounted, keyed by bone_name.
 var _bone_widgets: Dictionary[StringName, MarionetteBoneSliders] = {}
 # Cached BoneEntry per mounted widget — read every macro frame so we don't
@@ -251,6 +257,11 @@ func _enter_mode(mode: int) -> void:
 				_populate_for(_active_marionette)
 			_saved_gravity_scale = _active_marionette.get_gravity_scale()
 			_active_marionette.set_gravity_scale(0.0)
+			# Tether: locate the root MarionetteBone via the C++ core, anchor
+			# at its current world position. Build → tether → strength entry
+			# sequence — `get_root_bone` only returns non-null after bones
+			# have registered with the core (post build_ragdoll).
+			_engage_hip_tether()
 		Mode.SKELETON3D_PREVIEW:
 			pass
 
@@ -264,6 +275,10 @@ func _exit_mode(mode: int) -> void:
 		return
 	match mode:
 		Mode.RAGDOLL_TEST:
+			# Release the tether before clearing the ragdoll — the joint
+			# holds a reference to the root MarionetteBone that clear_ragdoll
+			# is about to free.
+			_release_hip_tether()
 			# Restore gravity first — clear_ragdoll frees the registered bones,
 			# but set_gravity_scale only touches what's still alive.
 			_active_marionette.set_gravity_scale(_saved_gravity_scale)
@@ -283,6 +298,52 @@ func _exit_mode(mode: int) -> void:
 						widget.reset_to_rest()
 		Mode.SKELETON3D_PREVIEW:
 			pass
+
+
+# Tether construction (slice 8b). Walks the MarionetteCore to find the root
+# MarionetteBone, anchors a Generic6DOFJoint3D between it and a sibling
+# StaticBody3D. While engaged, snapshots and zeroes hip_upward_nudge so the
+# tether is the only anti-sag mechanism — otherwise nudge + tether spring
+# fight at high strength.
+func _engage_hip_tether() -> void:
+	if _active_marionette == null:
+		return
+	var hip: PhysicalBone3D = _find_root_bone(_active_marionette)
+	if hip == null:
+		push_warning("MuscleTestDock: no root MarionetteBone found; hip tether skipped")
+		return
+	_saved_hip_nudge = _active_marionette.get_hip_upward_nudge()
+	_active_marionette.set_hip_upward_nudge(0.0)
+	_hip_tether = MarionetteHipTether.new()
+	_hip_tether.engage(_active_marionette, hip)
+
+
+func _release_hip_tether() -> void:
+	if _hip_tether != null:
+		_hip_tether.release()
+		_hip_tether = null
+	if _active_marionette != null:
+		_active_marionette.set_hip_upward_nudge(_saved_hip_nudge)
+
+
+# Locates the root MarionetteBone via the C++ core. Returns null when the
+# GDExtension isn't loaded (defense against future tooling running the dock
+# without the .so).
+static func _find_root_bone(m: Marionette) -> PhysicalBone3D:
+	if m == null:
+		return null
+	var core: Object = m._ensure_core()
+	if core == null:
+		return null
+	var root: Object = core.call(&"get_root_bone")
+	if root is PhysicalBone3D:
+		return root
+	return null
+
+
+# Public accessor for tests (slice 8b verifies presence/absence by mode).
+func get_hip_tether() -> MarionetteHipTether:
+	return _hip_tether
 
 
 func _populate_for(m: Marionette) -> void:
