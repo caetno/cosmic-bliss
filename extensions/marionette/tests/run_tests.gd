@@ -97,6 +97,9 @@ func _init() -> void:
 		_test_muscle_slider_applies_pose,
 		_test_muscle_slider_restores_rest_on_exit_tree,
 		_test_muscle_slider_reset_button,
+		_test_muscle_slider_kinematic_write_gated_in_ragdoll_test,
+		_test_muscle_test_dock_enter_ragdoll_test_zeros_gravity,
+		_test_muscle_test_dock_exit_restores_gravity_and_rest,
 		_test_bone_region_humanoid_total_84,
 		_test_bone_region_left_right_balance,
 		_test_bone_region_per_region_counts,
@@ -2710,6 +2713,121 @@ func _test_muscle_slider_reset_button() -> bool:
 		return _fail("muscle_slider_reset",
 				"pose after reset=%s, rest=%s" % [after, rest])
 	return _ok("muscle_slider_reset_button")
+
+
+# ---------- P5.8 / slice 8a — mode toggle + rest-pose guard ----------
+
+# When the slider is in Ragdoll Test mode, dragging it must not call
+# `Skeleton3D.set_bone_pose_rotation` — SPD owns the bone pose. We assert
+# the skeleton's pose stays at rest even after a slider value change +
+# `_apply_pose()` call.
+func _test_muscle_slider_kinematic_write_gated_in_ragdoll_test() -> bool:
+	var m := _build_synthetic_marionette()
+	var sim := _find_simulator(m)
+	var bone := _find_bone(sim, "LeftUpperLeg")
+	if bone == null:
+		m.free()
+		return _fail("muscle_slider_gated_in_ragdoll_test", "LeftUpperLeg missing")
+	var skel: Skeleton3D = m.resolve_skeleton()
+	var bone_idx := skel.find_bone("LeftUpperLeg")
+	var rest := skel.get_bone_pose_rotation(bone_idx)
+
+	var widget := MarionetteBoneSliders.new(bone)
+	widget._ready()
+	if widget._flex_slider == null:
+		widget.free()
+		m.free()
+		return _fail("muscle_slider_gated_in_ragdoll_test", "flex slider missing")
+	widget.set_mode(MarionetteBoneSliders.Mode.RAGDOLL_TEST)
+
+	# Move the slider + force _apply_pose. The skeleton's pose should not
+	# move because the kinematic write is gated.
+	widget._flex_slider.value = deg_to_rad(30.0)
+	widget._apply_pose()
+	var after := skel.get_bone_pose_rotation(bone_idx)
+	var unchanged := _quat_close(after, rest)
+
+	widget._exit_tree()
+	widget.free()
+	m.free()
+	if not unchanged:
+		return _fail("muscle_slider_gated_in_ragdoll_test",
+				"skeleton pose moved despite RAGDOLL_TEST mode: pose=%s rest=%s" %
+				[after, rest])
+	return _ok("muscle_slider_kinematic_write_gated_in_ragdoll_test")
+
+
+# Dock entry into Ragdoll Test must (1) build the ragdoll if not built and
+# (2) write gravity_scale=0 on the Marionette. We instantiate the dock
+# directly and drive `_enter_mode` without going through the EditorInterface
+# selection path.
+func _test_muscle_test_dock_enter_ragdoll_test_zeros_gravity() -> bool:
+	var m := _build_synthetic_marionette()
+	var dock := MarionetteMuscleTestDock.new()
+	# Add to a transient parent so the dock's tree machinery is happy.
+	# Skip _enter_tree's EditorInterface path by leaving the dock outside
+	# `Engine.is_editor_hint() == true` (headless), which it already is.
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	# Pre-condition: gravity_scale at 1.0.
+	if absf(m.get_gravity_scale() - 1.0) > 1.0e-6:
+		dock.queue_free(); m.free()
+		return _fail("dock_enter_ragdoll_zeros_gravity",
+				"pre-entry gravity_scale=%f, expected 1.0" % m.get_gravity_scale())
+
+	# Drive a mode change: simulate user picking item index 1 (Ragdoll Test).
+	dock._on_mode_changed(1)
+
+	var ok_g := absf(m.get_gravity_scale()) < 1.0e-6
+	var ok_mode := dock.get_mode() == MarionetteMuscleTestDock.Mode.RAGDOLL_TEST
+	# The previously-built ragdoll persists; dock does not rebuild.
+	var sim := _find_simulator(m)
+	var ok_sim := sim != null
+
+	dock._on_mode_changed(0)  # exit cleanly before tearing down
+	dock.queue_free()
+	m.free()
+	if not ok_g:
+		return _fail("dock_enter_ragdoll_zeros_gravity",
+				"gravity not zeroed: %f" % m.get_gravity_scale() if is_instance_valid(m) else "m freed")
+	if not ok_mode:
+		return _fail("dock_enter_ragdoll_zeros_gravity", "mode not RAGDOLL_TEST")
+	if not ok_sim:
+		return _fail("dock_enter_ragdoll_zeros_gravity", "simulator missing under skeleton")
+	return _ok("muscle_test_dock_enter_ragdoll_test_zeros_gravity")
+
+
+# Exit from Ragdoll Test must restore the saved gravity_scale and leave
+# the skeleton at rest. We verify (a) gravity round-trip + (b) the dock's
+# mode bit flips back to Preview.
+func _test_muscle_test_dock_exit_restores_gravity_and_rest() -> bool:
+	var m := _build_synthetic_marionette()
+	# Set a non-default pre-entry gravity so we can detect proper restore.
+	m.set_gravity_scale(0.7)
+	var dock := MarionetteMuscleTestDock.new()
+	root.add_child(dock)
+	dock._set_active_marionette(m)
+
+	dock._on_mode_changed(1)  # enter Ragdoll Test
+	if absf(m.get_gravity_scale()) > 1.0e-6:
+		dock.queue_free(); m.free()
+		return _fail("dock_exit_restores", "entry didn't zero gravity")
+
+	dock._on_mode_changed(0)  # exit back to Preview
+
+	var ok_g := absf(m.get_gravity_scale() - 0.7) < 1.0e-6
+	var ok_mode := dock.get_mode() == MarionetteMuscleTestDock.Mode.SKELETON3D_PREVIEW
+
+	var gravity_after := m.get_gravity_scale()
+	dock.queue_free()
+	m.free()
+	if not ok_g:
+		return _fail("dock_exit_restores",
+				"gravity not restored: got %f, expected 0.7" % gravity_after)
+	if not ok_mode:
+		return _fail("dock_exit_restores", "mode did not flip back to Preview")
+	return _ok("muscle_test_dock_exit_restores_gravity_and_rest")
 
 
 # ---------- MarionetteBoneRegion (P4.3 dock grouping) ----------

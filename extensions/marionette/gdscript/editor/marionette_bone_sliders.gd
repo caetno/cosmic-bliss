@@ -54,6 +54,13 @@ const _AXIS_NEG_LABEL: Array[String] = ["Extension", "Lateral Rot", "Adduction"]
 const _AXIS_POS_LABEL: Array[String] = ["Flexion", "Medial Rot", "Abduction"]
 
 
+# Authoring vs runtime-driven modes for the dock's slider widgets. Preview
+# = kinematic write to Skeleton3D (P4). RagdollTest = anatomical write
+# through `Marionette.set_bone_target`, consumed by SPD in
+# `MarionetteBone::_integrate_forces`. Default is Preview so the inspector
+# path (single-bone widget, no enclosing dock) keeps its P4 behavior.
+enum Mode { SKELETON3D_PREVIEW, RAGDOLL_TEST }
+
 var _bone: MarionetteBone
 var _skeleton: Skeleton3D
 # Cached ancestor Marionette so _apply_pose can poke it to redraw its gizmos
@@ -63,6 +70,7 @@ var _skeleton: Skeleton3D
 # pose. Direct call is one method invocation per drag step, no allocations.
 var _marionette: Marionette
 var _bone_idx: int = -1
+var _mode: int = Mode.SKELETON3D_PREVIEW
 # Canonical rest rotation, read from Skeleton3D.bone_rest at mount time.
 # Independent of any prior pose modifications saved to the scene.
 var _rest_rotation: Quaternion = Quaternion.IDENTITY
@@ -227,6 +235,16 @@ func _on_slider_changed(_v: float) -> void:
 	_apply_pose()
 
 
+## Switch between Skeleton3D Preview (P4 kinematic-write) and Ragdoll Test
+## (anatomical-target hand-off to SPD). The dock drives this; the inspector
+## path leaves it at the default Preview. Sliding while in Ragdoll Test no
+## longer writes `set_bone_pose_rotation` — physics owns the bone pose.
+func set_mode(mode: int) -> void:
+	if mode == _mode:
+		return
+	_mode = mode
+
+
 # Public reset entry point. Used by the dock's "Reset All to Rest" and by
 # unit tests; replaces the old per-bone Reset button. Returns every active
 # slider to its rest-anatomical offset and restores the canonical bone rest.
@@ -291,10 +309,15 @@ func _apply_pose() -> void:
 		_value_labels[_rot_slider].text = "%.0f°" % rad_to_deg(rot_v)
 	if _abd_slider != null:
 		_value_labels[_abd_slider].text = "%.0f°" % rad_to_deg(abd_v)
-	var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
-			_bone.bone_entry, flex_v, rot_v, abd_v)
-	_skeleton.set_bone_pose_rotation(_bone_idx, _rest_rotation * anatomical)
-	_request_gizmo_refresh()
+	# In Ragdoll Test mode the SPD path drives the bone; writing
+	# `set_bone_pose_rotation` here would fight the simulator every frame.
+	# 8a gates the kinematic write; 8c routes the slider to
+	# `Marionette.set_bone_target` instead.
+	if _mode == Mode.SKELETON3D_PREVIEW:
+		var anatomical: Quaternion = AnatomicalPose.bone_local_rotation(
+				_bone.bone_entry, flex_v, rot_v, abd_v)
+		_skeleton.set_bone_pose_rotation(_bone_idx, _rest_rotation * anatomical)
+		_request_gizmo_refresh()
 
 
 # Routes refresh requests through the active Marionette. Coalescing happens

@@ -20,13 +20,31 @@ extends VBoxContainer
 
 const _DOCK_TITLE: String = "Muscle Test"
 
+# Dock mode (P5.8 / slice 8a). Preview = P4 kinematic-write authoring. Ragdoll
+# Test = physics active, sliders drive SPD via `Marionette.set_bone_target`
+# (slice 8c wires the slider rewire; 8a only gates the kinematic write and
+# flips physics state). Mode lives on the dock — runtime stays mode-agnostic
+# so the public Marionette API doesn't pick up an authoring concern.
+enum Mode { SKELETON3D_PREVIEW, RAGDOLL_TEST }
+
 var _selection: EditorSelection
 var _active_marionette: Marionette
 var _header: Label
+var _mode_option: OptionButton
 var _reset_all_btn: Button
 var _refresh_btn: Button
 var _scroll: ScrollContainer
 var _content: VBoxContainer
+var _mode: int = Mode.SKELETON3D_PREVIEW
+# Cached pre-entry gravity_scale so Ragdoll-Test exit restores whatever the
+# user had dialed in. We always set zero-g on entry; the value at exit is
+# whatever Ragdoll Test left it at, but the user's intent for Preview was
+# the pre-entry number.
+var _saved_gravity_scale: float = 1.0
+# Whether *we* built the ragdoll on entry. Determines whether exit calls
+# `clear_ragdoll`. If the user had already built the ragdoll, we leave it
+# in place (only restore mode/gravity, not the simulator hierarchy).
+var _built_ragdoll_on_entry: bool = false
 # Bone widgets currently mounted, keyed by bone_name.
 var _bone_widgets: Dictionary[StringName, MarionetteBoneSliders] = {}
 # Cached BoneEntry per mounted widget — read every macro frame so we don't
@@ -69,6 +87,25 @@ func _build_chrome() -> void:
 	_header = Label.new()
 	_header.text = "(no Marionette selected)"
 	add_child(_header)
+
+	# Mode toggle: Skeleton3D Preview (P4 kinematic authoring) vs Ragdoll Test
+	# (physics + SPD-driven targets). Lives in the dock header so it's
+	# discoverable while a Marionette is selected.
+	var mode_row := HBoxContainer.new()
+	add_child(mode_row)
+	var mode_label := Label.new()
+	mode_label.text = "Mode:"
+	mode_row.add_child(mode_label)
+	_mode_option = OptionButton.new()
+	_mode_option.add_item("Skeleton3D Preview", Mode.SKELETON3D_PREVIEW)
+	_mode_option.add_item("Ragdoll Test", Mode.RAGDOLL_TEST)
+	_mode_option.selected = 0
+	_mode_option.tooltip_text = (
+			"Skeleton3D Preview: sliders write the skeleton pose directly.\n"
+			+ "Ragdoll Test: physics active, sliders drive SPD targets.")
+	_mode_option.item_selected.connect(_on_mode_changed)
+	_mode_option.disabled = true
+	mode_row.add_child(_mode_option)
 
 	var btn_row := HBoxContainer.new()
 	add_child(btn_row)
@@ -143,17 +180,109 @@ static func _resolve_marionette(n: Node) -> Marionette:
 func _set_active_marionette(m: Marionette) -> void:
 	if _active_marionette == m:
 		return
+	# Always exit Ragdoll Test before switching Marionettes — otherwise the
+	# previous character is left with physics on and a dangling tether (8b).
+	if _mode == Mode.RAGDOLL_TEST and _active_marionette != null:
+		_exit_mode(Mode.RAGDOLL_TEST)
+		_mode = Mode.SKELETON3D_PREVIEW
+		if _mode_option != null:
+			_mode_option.select(0)
 	_clear_content()
 	_active_marionette = m
 	if m == null:
 		_header.text = "(no Marionette selected)"
 		_reset_all_btn.disabled = true
 		_refresh_btn.disabled = true
+		if _mode_option != null:
+			_mode_option.disabled = true
 		return
 	_header.text = "Active: %s" % m.name
 	_reset_all_btn.disabled = false
 	_refresh_btn.disabled = false
+	if _mode_option != null:
+		_mode_option.disabled = false
 	_populate_for(m)
+
+
+# Public for slice 8c tests + future callers. Tracks current dock mode.
+func get_mode() -> int:
+	return _mode
+
+
+func _on_mode_changed(idx: int) -> void:
+	var new_mode: int = _mode_option.get_item_id(idx)
+	if new_mode == _mode:
+		return
+	var old_mode: int = _mode
+	# Exit old before entering new — gravity restore and clear_ragdoll need
+	# to run before we tear into build_ragdoll for the new mode.
+	_exit_mode(old_mode)
+	_mode = new_mode
+	_enter_mode(new_mode)
+	_propagate_mode_to_widgets()
+
+
+func _propagate_mode_to_widgets() -> void:
+	for widget: MarionetteBoneSliders in _bone_widgets.values():
+		if is_instance_valid(widget):
+			widget.set_mode(_mode)
+
+
+# Entering Ragdoll Test: build ragdoll if needed, snapshot gravity, zero-g,
+# then propagate the mode bit to per-bone widgets (suppresses the kinematic
+# write — slice 8c adds the SPD-target rewire). Tether/strength slider/seed
+# come in 8b/8c.
+#
+# Entering Preview: no-op (the prior exit already restored the skeleton).
+func _enter_mode(mode: int) -> void:
+	if _active_marionette == null:
+		return
+	match mode:
+		Mode.RAGDOLL_TEST:
+			_built_ragdoll_on_entry = false
+			# Re-use the simulator if the user already built the ragdoll; otherwise
+			# build now. Validator (slice 7) runs as part of build_ragdoll.
+			if _find_simulator(_active_marionette) == null:
+				_active_marionette.build_ragdoll()
+				_built_ragdoll_on_entry = true
+				# Build wipes existing widget bindings — repopulate so 8c can
+				# seed SPD targets and tests see live widgets.
+				_clear_content()
+				_populate_for(_active_marionette)
+			_saved_gravity_scale = _active_marionette.get_gravity_scale()
+			_active_marionette.set_gravity_scale(0.0)
+		Mode.SKELETON3D_PREVIEW:
+			pass
+
+
+# Exiting Ragdoll Test (P5.9 fold-in): clear the ragdoll if we built it on
+# entry, restore the user's gravity_scale, and reset every widget back to
+# rest pose. Rest-pose guard contract: leaving Ragdoll Test never leaves
+# the skeleton in physics-driven state.
+func _exit_mode(mode: int) -> void:
+	if _active_marionette == null:
+		return
+	match mode:
+		Mode.RAGDOLL_TEST:
+			# Restore gravity first — clear_ragdoll frees the registered bones,
+			# but set_gravity_scale only touches what's still alive.
+			_active_marionette.set_gravity_scale(_saved_gravity_scale)
+			if _built_ragdoll_on_entry:
+				_active_marionette.clear_ragdoll()
+				_built_ragdoll_on_entry = false
+				# Tear down widgets too — the bones they pointed at are gone.
+				_clear_content()
+				_populate_for(_active_marionette)
+			else:
+				# Ragdoll stays built. Reset all slider widgets back to rest;
+				# they restore Skeleton3D pose via the kinematic path (now
+				# re-enabled because mode flipped back to Preview before this
+				# call propagates).
+				for widget: MarionetteBoneSliders in _bone_widgets.values():
+					if is_instance_valid(widget):
+						widget.reset_to_rest()
+		Mode.SKELETON3D_PREVIEW:
+			pass
 
 
 func _populate_for(m: Marionette) -> void:
