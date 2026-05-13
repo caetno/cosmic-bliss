@@ -15,7 +15,10 @@
       "Bash(git -C * rev-parse:*)",
       "Bash(git -C * ls-files:*)",
       "Bash(git -C * blame:*)",
-      "Bash(bash $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh)"
+      "Bash(bash $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh)",
+      "Edit(.claude/inbox/*)",
+      "Write(.claude/inbox/*)",
+      "Read(.claude/inbox/*)"
     ]
   },
   "hooks": {
