@@ -279,6 +279,17 @@ func build_ragdoll() -> void:
 	if exclusions == null:
 		exclusions = CollisionExclusionProfile.parent_child_defaults(skel)
 
+	# Slice 7 (P5.7) — hierarchical validator. If any Powered bone has a
+	# Kinematic ancestor, the joint physics is nonsensical (Kinematic =
+	# frozen, but the Powered child needs the joint to react). Promote the
+	# offending ancestors to Unpowered in an in-memory states dict; the
+	# saved profile is unchanged. Warnings list both bones by name.
+	var parents_map: Dictionary[StringName, StringName] = BoneStateValidator.parents_from_skeleton(skel, _resolve_profile_name)
+	var validator_warnings: Array[String] = []
+	var corrected_states: Dictionary[StringName, int] = BoneStateValidator.validate(states, parents_map, validator_warnings)
+	for w: String in validator_warnings:
+		push_warning("Marionette.build_ragdoll: %s" % w)
+
 	var sim := PhysicalBoneSimulator3D.new()
 	sim.name = String(_SIMULATOR_NAME)
 	skel.add_child(sim)
@@ -310,7 +321,10 @@ func build_ragdoll() -> void:
 		if entry == null:
 			continue
 
-		var state: int = states.get_state(profile_name)
+		# Slice 7 — read the validator-corrected state (Kinematic ancestors
+		# of Powered bones promoted to Unpowered). Falls back to
+		# states.get_state for bones not present in the corrected dict.
+		var state: int = corrected_states.get(profile_name, states.get_state(profile_name))
 		# FIXED archetype trumps profile state — these bones are anatomically
 		# rigid and never simulated regardless of what the profile says.
 		if entry.archetype == BoneArchetype.Type.FIXED:

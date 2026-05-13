@@ -28,6 +28,9 @@ func _init() -> void:
 		_test_marionette_strength_ramp_smooths_increase,
 		_test_marionette_strength_drop_is_instantaneous,
 		_test_marionette_per_bone_strength_ramp_smooths_increase,
+		_test_validator_promotes_kinematic_ancestor_of_powered_to_unpowered,
+		_test_validator_leaves_unpowered_ancestor_alone,
+		_test_validator_leaves_pure_kinematic_chain_alone,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -761,6 +764,103 @@ func _test_marionette_per_bone_strength_ramp_smooths_increase() -> bool:
 				% core.call(&"get_bone_strength", &"LimpBone", 1.0))
 	core.free()
 	return _ok("marionette_per_bone_strength_ramp_smooths_increase")
+
+
+# ---------- BoneStateValidator (P5 slice 7) ----------
+# Synthetic 3-bone chain (root → child → grandchild). No skeleton needed:
+# the validator operates on a `parents` Dictionary keyed by profile bone
+# name so unit tests can probe it directly.
+
+static func _validator_states(initial: Dictionary[StringName, int]) -> BoneStateProfile:
+	var sp := BoneStateProfile.new()
+	for k: StringName in initial.keys():
+		sp.states[k] = initial[k]
+	return sp
+
+
+func _test_validator_promotes_kinematic_ancestor_of_powered_to_unpowered() -> bool:
+	# root Kinematic, child Kinematic, grandchild Powered.
+	# Expected: both ancestors promoted to Unpowered; grandchild stays Powered.
+	var states: BoneStateProfile = _validator_states({
+		&"Root": BoneStateProfile.State.KINEMATIC,
+		&"Child": BoneStateProfile.State.KINEMATIC,
+		&"Grand": BoneStateProfile.State.POWERED,
+	})
+	var parents: Dictionary[StringName, StringName] = {
+		&"Child": &"Root",
+		&"Grand": &"Child",
+	}
+	var warnings: Array[String] = []
+	var corrected: Dictionary[StringName, int] = BoneStateValidator.validate(states, parents, warnings)
+	if corrected[&"Root"] != BoneStateProfile.State.UNPOWERED:
+		return _fail("validator_promotes_kinematic_ancestor_of_powered_to_unpowered",
+				"Root expected UNPOWERED, got %d" % corrected[&"Root"])
+	if corrected[&"Child"] != BoneStateProfile.State.UNPOWERED:
+		return _fail("validator_promotes_kinematic_ancestor_of_powered_to_unpowered",
+				"Child expected UNPOWERED, got %d" % corrected[&"Child"])
+	if corrected[&"Grand"] != BoneStateProfile.State.POWERED:
+		return _fail("validator_promotes_kinematic_ancestor_of_powered_to_unpowered",
+				"Grand expected POWERED (unchanged), got %d" % corrected[&"Grand"])
+	if warnings.size() != 2:
+		return _fail("validator_promotes_kinematic_ancestor_of_powered_to_unpowered",
+				"expected 2 warnings (root + child), got %d" % warnings.size())
+	# Original profile must not be mutated — this is the "in-memory only"
+	# guarantee from the slice spec.
+	if states.states[&"Root"] != BoneStateProfile.State.KINEMATIC:
+		return _fail("validator_promotes_kinematic_ancestor_of_powered_to_unpowered",
+				"validator mutated saved profile — Root is now %d on the resource" %
+				states.states[&"Root"])
+	return _ok("validator_promotes_kinematic_ancestor_of_powered_to_unpowered")
+
+
+func _test_validator_leaves_unpowered_ancestor_alone() -> bool:
+	# An Unpowered ancestor of a Powered bone is fine — that's the "limp arm
+	# with active hand" case. Validator should not touch it.
+	var states: BoneStateProfile = _validator_states({
+		&"Root": BoneStateProfile.State.UNPOWERED,
+		&"Child": BoneStateProfile.State.UNPOWERED,
+		&"Grand": BoneStateProfile.State.POWERED,
+	})
+	var parents: Dictionary[StringName, StringName] = {
+		&"Child": &"Root",
+		&"Grand": &"Child",
+	}
+	var warnings: Array[String] = []
+	var corrected: Dictionary[StringName, int] = BoneStateValidator.validate(states, parents, warnings)
+	if corrected[&"Root"] != BoneStateProfile.State.UNPOWERED:
+		return _fail("validator_leaves_unpowered_ancestor_alone",
+				"Root changed: %d" % corrected[&"Root"])
+	if corrected[&"Child"] != BoneStateProfile.State.UNPOWERED:
+		return _fail("validator_leaves_unpowered_ancestor_alone",
+				"Child changed: %d" % corrected[&"Child"])
+	if warnings.size() != 0:
+		return _fail("validator_leaves_unpowered_ancestor_alone",
+				"unexpected warnings: %s" % str(warnings))
+	return _ok("validator_leaves_unpowered_ancestor_alone")
+
+
+func _test_validator_leaves_pure_kinematic_chain_alone() -> bool:
+	# No Powered descendant anywhere — Kinematic is fine (jaw chain, etc.).
+	# Validator should not promote anything.
+	var states: BoneStateProfile = _validator_states({
+		&"Root": BoneStateProfile.State.KINEMATIC,
+		&"Child": BoneStateProfile.State.KINEMATIC,
+		&"Grand": BoneStateProfile.State.KINEMATIC,
+	})
+	var parents: Dictionary[StringName, StringName] = {
+		&"Child": &"Root",
+		&"Grand": &"Child",
+	}
+	var warnings: Array[String] = []
+	var corrected: Dictionary[StringName, int] = BoneStateValidator.validate(states, parents, warnings)
+	for k: StringName in [&"Root", &"Child", &"Grand"]:
+		if corrected[k] != BoneStateProfile.State.KINEMATIC:
+			return _fail("validator_leaves_pure_kinematic_chain_alone",
+					"%s changed to %d" % [k, corrected[k]])
+	if warnings.size() != 0:
+		return _fail("validator_leaves_pure_kinematic_chain_alone",
+				"unexpected warnings: %s" % str(warnings))
+	return _ok("validator_leaves_pure_kinematic_chain_alone")
 
 
 func _test_marionette_bone_spd_zero_at_zero_strength() -> bool:
