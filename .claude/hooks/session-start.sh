@@ -19,11 +19,32 @@ cd "$REPO_ROOT" || exit 0
 
 EXTENSIONS=(tentacletech marionette tenticles body_field)
 EXT=""
-for e in "${EXTENSIONS[@]}"; do
-    case "$CWD" in
-        */extensions/"$e"|*/extensions/"$e"/*) EXT="$e"; break ;;
-    esac
-done
+
+# Detection priority:
+#   1. $CLAUDE_SUPERVISOR env var (explicit override, survives session resume)
+#   2. $PWD at hook invocation
+#   3. /proc/<claude_pid>/cwd via walking up from this script's parent
+#      (resilient when Claude Code resumes a session at a stale cwd)
+if [ -n "${CLAUDE_SUPERVISOR:-}" ]; then
+    for e in "${EXTENSIONS[@]}"; do
+        [ "$CLAUDE_SUPERVISOR" = "$e" ] && EXT="$e" && break
+    done
+fi
+if [ -z "$EXT" ]; then
+    for e in "${EXTENSIONS[@]}"; do
+        case "$CWD" in
+            */extensions/"$e"|*/extensions/"$e"/*) EXT="$e"; break ;;
+        esac
+    done
+fi
+if [ -z "$EXT" ] && [ -r "/proc/$PPID/cwd" ]; then
+    parent_cwd="$(readlink "/proc/$PPID/cwd" 2>/dev/null || true)"
+    for e in "${EXTENSIONS[@]}"; do
+        case "$parent_cwd" in
+            */extensions/"$e"|*/extensions/"$e"/*) EXT="$e"; break ;;
+        esac
+    done
+fi
 
 # --- Helper: trim leading/trailing blank lines, print only if non-empty ---
 print_section() {
