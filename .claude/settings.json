@@ -18,7 +18,25 @@
       "Bash(bash $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh)",
       "Edit(.claude/inbox/*)",
       "Write(.claude/inbox/*)",
-      "Read(.claude/inbox/*)"
+      "Read(.claude/inbox/*)",
+      "Edit(extensions/tentacletech/**)",
+      "Write(extensions/tentacletech/**)",
+      "Edit(extensions/marionette/**)",
+      "Write(extensions/marionette/**)",
+      "Edit(extensions/tenticles/**)",
+      "Write(extensions/tenticles/**)",
+      "Edit(extensions/body_field/**)",
+      "Write(extensions/body_field/**)",
+      "Edit(game/tests/tentacletech/**)",
+      "Write(game/tests/tentacletech/**)",
+      "Edit(game/tests/marionette/**)",
+      "Write(game/tests/marionette/**)",
+      "Edit(game/tests/tenticles/**)",
+      "Write(game/tests/tenticles/**)",
+      "Edit(game/tests/body_field/**)",
+      "Write(game/tests/body_field/**)",
+      "Edit(docs/Cosmic_Bliss_Update_*.md)",
+      "Write(docs/Cosmic_Bliss_Update_*.md)"
     ]
   },
   "hooks": {
