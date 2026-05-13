@@ -25,6 +25,9 @@ func _init() -> void:
 		_test_marionette_gravity_scale_propagates_to_bones,
 		_test_marionette_hip_nudge_only_on_root,
 		_test_marionette_global_strength_factor_smooth,
+		_test_marionette_strength_ramp_smooths_increase,
+		_test_marionette_strength_drop_is_instantaneous,
+		_test_marionette_per_bone_strength_ramp_smooths_increase,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -641,6 +644,123 @@ func _test_marionette_global_strength_factor_smooth() -> bool:
 				"at global=0: factor expected 0")
 	core.free()
 	return _ok("marionette_global_strength_factor_smooth")
+
+
+func _test_marionette_strength_ramp_smooths_increase() -> bool:
+	# Global strength 0 → 1 ramps over `strength_ramp_duration`. Calling
+	# `step_strength_ramps(dt)` in a loop walks `effective` toward
+	# `requested` monotonically, never overshooting. Drop from 1 → 0 is
+	# instantaneous (covered separately).
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_strength_ramp_smooths_increase",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_strength_ramp_duration", 0.5)
+	# Start at 0 (drop from default 1 is instant).
+	core.call(&"set_global_strength", 0.0)
+	if absf(core.call(&"get_global_strength")) > 1.0e-6:
+		core.free()
+		return _fail("marionette_strength_ramp_smooths_increase",
+				"effective should snap to 0 on drop")
+	# Now request 1.0 — ramp begins. effective stays at 0 until step.
+	core.call(&"set_global_strength", 1.0)
+	if absf(core.call(&"get_global_strength")) > 1.0e-6:
+		core.free()
+		return _fail("marionette_strength_ramp_smooths_increase",
+				"effective should still be 0 immediately after request — got %f"
+				% core.call(&"get_global_strength"))
+	if absf(core.call(&"get_requested_global_strength") - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("marionette_strength_ramp_smooths_increase",
+				"requested should be 1.0")
+	# Step in 0.1s increments. After 5 × 0.1 = 0.5 s the ramp should
+	# saturate at 1.0; values should grow monotonically and stay in [0,1].
+	var prev: float = 0.0
+	for i in range(5):
+		core.call(&"step_strength_ramps", 0.1)
+		var v: float = core.call(&"get_global_strength")
+		if v < prev - 1.0e-6:
+			core.free()
+			return _fail("marionette_strength_ramp_smooths_increase",
+					"effective dropped: %f after %f" % [v, prev])
+		if v > 1.0 + 1.0e-6:
+			core.free()
+			return _fail("marionette_strength_ramp_smooths_increase",
+					"effective overshot 1.0: %f" % v)
+		prev = v
+	# At t=0.5s the ramp should be saturated.
+	if absf(core.call(&"get_global_strength") - 1.0) > 1.0e-4:
+		core.free()
+		return _fail("marionette_strength_ramp_smooths_increase",
+				"ramp didn't saturate at 1.0 after duration; got %f"
+				% core.call(&"get_global_strength"))
+	core.free()
+	return _ok("marionette_strength_ramp_smooths_increase")
+
+
+func _test_marionette_strength_drop_is_instantaneous() -> bool:
+	# Drops snap to the requested value within one set call — no waiting.
+	# Critical for post-orgasm / surrender / shock paths in CLAUDE.md §12.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_strength_drop_is_instantaneous",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_strength_ramp_duration", 0.5)
+	# Ramp up to 1.0 first.
+	core.call(&"set_global_strength", 0.0)
+	core.call(&"set_global_strength", 1.0)
+	for i in range(10):
+		core.call(&"step_strength_ramps", 0.1)
+	# Now drop to 0.
+	core.call(&"set_global_strength", 0.0)
+	if absf(core.call(&"get_global_strength")) > 1.0e-6:
+		core.free()
+		return _fail("marionette_strength_drop_is_instantaneous",
+				"effective=%f, expected 0 immediately after drop"
+				% core.call(&"get_global_strength"))
+	core.free()
+	return _ok("marionette_strength_drop_is_instantaneous")
+
+
+func _test_marionette_per_bone_strength_ramp_smooths_increase() -> bool:
+	# Same ramp model applies to per-bone overrides. Each entry tracks its
+	# own (requested, effective) pair; ramp step advances them in parallel.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_per_bone_strength_ramp_smooths_increase",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_strength_ramp_duration", 0.5)
+	# Start LimpBone at 0 (first set seeds effective = 0).
+	core.call(&"set_bone_strength", &"LimpBone", 0.0)
+	if absf(core.call(&"get_bone_strength", &"LimpBone", 1.0)) > 1.0e-6:
+		core.free()
+		return _fail("marionette_per_bone_strength_ramp_smooths_increase",
+				"first-set seeding produced %f, expected 0"
+				% core.call(&"get_bone_strength", &"LimpBone", 1.0))
+	# Re-engage: request 1.0.
+	core.call(&"set_bone_strength", &"LimpBone", 1.0)
+	if absf(core.call(&"get_bone_strength", &"LimpBone", 1.0)) > 1.0e-6:
+		core.free()
+		return _fail("marionette_per_bone_strength_ramp_smooths_increase",
+				"effective should still be 0 right after re-engage; got %f"
+				% core.call(&"get_bone_strength", &"LimpBone", 1.0))
+	# Step a few times — effective should climb monotonically and saturate.
+	for i in range(6):
+		core.call(&"step_strength_ramps", 0.1)
+	if absf(core.call(&"get_bone_strength", &"LimpBone", 1.0) - 1.0) > 1.0e-4:
+		core.free()
+		return _fail("marionette_per_bone_strength_ramp_smooths_increase",
+				"effective didn't saturate at 1.0; got %f"
+				% core.call(&"get_bone_strength", &"LimpBone", 1.0))
+	# Drop is instant.
+	core.call(&"set_bone_strength", &"LimpBone", 0.2)
+	if absf(core.call(&"get_bone_strength", &"LimpBone", 1.0) - 0.2) > 1.0e-6:
+		core.free()
+		return _fail("marionette_per_bone_strength_ramp_smooths_increase",
+				"drop should snap; got %f, expected 0.2"
+				% core.call(&"get_bone_strength", &"LimpBone", 1.0))
+	core.free()
+	return _ok("marionette_per_bone_strength_ramp_smooths_increase")
 
 
 func _test_marionette_bone_spd_zero_at_zero_strength() -> bool:

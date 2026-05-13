@@ -28,6 +28,12 @@ public:
 	String hello() const;
 	void tick(double p_delta);
 
+	// Slice 6 — drives `step_strength_ramps` once per physics tick. Lives on
+	// the core (not the GDScript wrapper) so the ramp keeps pace with the
+	// physics step even if no MarionetteBone is currently registered.
+	void _ready() override;
+	void _physics_process(double p_delta) override;
+
 	// Anatomical target cache. Components are (flex, along-bone-twist,
 	// abduction) in canonical positive-flex / positive-medial / positive-
 	// abduction convention; side flip happens at solver time. Absent bones
@@ -51,6 +57,26 @@ public:
 	void clear_bone_strength(const StringName &p_bone_name);
 	float get_bone_strength(const StringName &p_bone_name, float p_default) const;
 	bool has_bone_strength_override(const StringName &p_bone_name) const;
+
+	// Slice 6 (P5.6) — strength ramp on transitions. Going LIMP is
+	// instantaneous (post-orgasm / surrender / shock); RE-ENGAGEMENT ramps
+	// to avoid a snap-to-pose pop. The ramp runs in `step_strength_ramps`,
+	// driven by `_physics_process` on the GDScript wrapper side and also
+	// invokable directly for unit tests.
+	void set_strength_ramp_duration(float p_seconds);
+	float get_strength_ramp_duration() const;
+
+	// Returns the REQUESTED (un-ramped) target — useful for inspectors that
+	// want to show "user dialed in X, effective is currently Y". Caller-side
+	// default semantics match `get_bone_strength`: no override → p_default.
+	float get_requested_bone_strength(const StringName &p_bone_name, float p_default) const;
+	float get_requested_global_strength() const;
+
+	// Steps `effective` toward `requested` for the global slot and every
+	// override. Increase: rate = 1 / ramp_duration (clamped at requested).
+	// Decrease: instantaneous (snap-to-requested). `ramp_duration <= 0`
+	// snaps both ways (no smoothing). Idempotent at equilibrium.
+	void step_strength_ramps(float p_delta);
 
 	// Slice 5 (P5.5). `gravity_scale` propagates to every registered
 	// MarionetteBone (RigidBody3D property); 0.0 = zero-g, 1.0 = world
@@ -91,8 +117,16 @@ protected:
 
 private:
 	HashMap<StringName, Vector3> bone_targets;
+	// `bone_strength_overrides` is the REQUESTED value (slice 4r semantics).
+	// `bone_strength_effective` mirrors what the SPD path actually sees,
+	// catching up to requested via `step_strength_ramps` (slice 6). When a
+	// new override is set during a ramp-up its starting effective value
+	// seeds from the caller-supplied default; subsequent set_ calls keep
+	// the existing effective value so a slider drag doesn't snap.
 	HashMap<StringName, float> bone_strength_overrides;
-	float global_strength = 1.0f;
+	HashMap<StringName, float> bone_strength_effective;
+	float global_strength = 1.0f;          // REQUESTED.
+	float effective_global_strength = 1.0f; // What the SPD path reads.
 
 	HashSet<MarionetteBone *> registered_bones;
 	MarionetteBone *root_bone = nullptr;
@@ -100,6 +134,7 @@ private:
 	float gravity_scale = 1.0f;
 	float hip_upward_nudge = 0.0f; // Newtons, world +Y.
 	float hip_nudge_strength_threshold = 0.5f;
+	float strength_ramp_duration = 0.5f; // Seconds for 0 → 1 increase.
 };
 
 } // namespace godot
