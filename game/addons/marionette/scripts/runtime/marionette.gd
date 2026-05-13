@@ -180,6 +180,19 @@ var _dynamic_bone_names: Array[StringName] = []
 # Pending flag for the deferred gizmo refresh — see request_gizmo_refresh().
 var _gizmo_refresh_pending: bool = false
 
+# C++ MarionetteCore instance. Lazy-instantiated by _ensure_core() the first
+# time the wrapper needs to forward state; stays null in editor sessions
+# that never push targets. Lives as a hidden child Node so its lifetime
+# tracks the Marionette node.
+const _CORE_NAME: StringName = &"_MarionetteCore"
+const _CORE_CLASS: StringName = &"MarionetteCore"
+var _core: Object = null
+
+# GDScript-side mirror of the anatomical target cache. Tooling (inspector,
+# diagnostic overlays, slice 3b's debug panel) reads from here without
+# round-tripping through the C++ bound getter. Keys are profile bone names.
+var _bone_target_mirror: Dictionary[StringName, Vector3] = {}
+
 
 # Schedules a single gizmo refresh for end-of-frame, regardless of how many
 # callers requested one. The refresh is a no-op visibility flicker on this
@@ -743,6 +756,44 @@ func _find_simulator() -> PhysicalBoneSimulator3D:
 		if child is PhysicalBoneSimulator3D:
 			return child
 	return null
+
+
+# --- Anatomical target cache (Phase 5 slice 3a) ---
+# Composer / sliders / overlays push per-bone anatomical targets here once
+# per change. Slice 3b's `MarionetteBone._integrate_forces` reads from the
+# C++ cache directly (no per-tick GDScript dispatch). Components are
+# (flex, along-bone-twist, abduction) in canonical positive-flex / positive-
+# medial / positive-abduction convention; side flip happens at solver time.
+
+## Caches an anatomical target for `bone_name`. Forwards to the C++
+## MarionetteCore and updates the GDScript-side mirror for tooling.
+func set_bone_target(bone_name: StringName, anatomical: Vector3) -> void:
+	_bone_target_mirror[bone_name] = anatomical
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_bone_target", bone_name, anatomical)
+
+
+# Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns
+# null (with a one-shot warning) when the GDExtension hasn't loaded the
+# class — keeps tooling that calls set_bone_target() safe in pre-build
+# editor sessions.
+static var _core_warning_emitted: bool = false
+func _ensure_core() -> Object:
+	if _core != null:
+		return _core
+	if not ClassDB.class_exists(_CORE_CLASS):
+		if not _core_warning_emitted:
+			_core_warning_emitted = true
+			push_warning("Marionette: MarionetteCore not registered (GDExtension not loaded); target cache disabled")
+		return null
+	_core = ClassDB.instantiate(_CORE_CLASS)
+	if _core is Node:
+		var node: Node = _core
+		node.name = String(_CORE_NAME)
+		add_child(node)
+	return _core
 
 
 # --- internals ---
