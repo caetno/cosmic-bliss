@@ -25,12 +25,17 @@ Monorepo containing a Godot 4.6 game (Cosmic Bliss) and its supporting GDExtensi
 
 ## C++/GDScript split philosophy
 
-**Default to GDScript.** Move code to C++ only when:
-- It runs at physics-tick rate (60+ Hz) with nontrivial per-tick cost, or
-- It involves math-heavy inner loops (PBD iterations, collision projection, spline evaluation), or
-- It directly interacts with `RenderingDevice` or other low-level APIs
+There is no global default. Pick the language that fits the layer:
 
-Everything else — AI, behavior, scenarios, control plumbing, stimulus consumption, reactions, editor tooling, mesh generation, configuration resources — stays in GDScript. The compile-edit cycle is a real cost; keep the C++ surface small.
+**C++** for the subsystem's solver / hot path / low-level core. Reach for C++ when any of these hold:
+- Runs at physics-tick rate (60+ Hz) with nontrivial per-tick cost
+- Math-heavy inner loops — PBD iterations, collision projection, SPD, spline evaluation, constraint solves, SDF queries
+- Directly drives `RenderingDevice` or other low-level APIs
+- **Lives inside a subsystem whose solver / math core is already C++.** Splitting a single subsystem across languages costs cross-boundary plumbing (GDScript→C++ marshalling, parallel data structures, two debug surfaces) that easily outweighs the per-tick cost savings of GDScript. If TentacleTech's PBD solver is C++, a new PBD chain inside TentacleTech is also C++ even when the per-tick load is light. Pick one side of the boundary per subsystem and stay there.
+
+**GDScript** for everything that wraps, configures, or reacts to the core: AI, behavior, scenarios, control plumbing, stimulus consumption, reactions, editor tooling, mesh generation, configuration resources, authoring-time solvers, gizmos. These are not hot, they iterate often, and the compile-edit cycle of C++ would dominate.
+
+The compile-edit cycle is a real cost — don't push GDScript-shaped work into C++. But don't fragment a coherent subsystem across two languages to dodge that cost either; the seam is worse than the rebuild.
 
 ## Cross-extension rules
 
