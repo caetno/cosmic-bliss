@@ -36,6 +36,26 @@ float MarionetteCore::get_global_strength() const {
 	return global_strength;
 }
 
+void MarionetteCore::set_bone_strength(const StringName &p_bone_name, float p_value) {
+	bone_strength_overrides[p_bone_name] = p_value;
+}
+
+void MarionetteCore::clear_bone_strength(const StringName &p_bone_name) {
+	bone_strength_overrides.erase(p_bone_name);
+}
+
+float MarionetteCore::get_bone_strength(const StringName &p_bone_name, float p_default) const {
+	const HashMap<StringName, float>::ConstIterator it = bone_strength_overrides.find(p_bone_name);
+	if (it == bone_strength_overrides.end()) {
+		return p_default;
+	}
+	return it->value;
+}
+
+bool MarionetteCore::has_bone_strength_override(const StringName &p_bone_name) const {
+	return bone_strength_overrides.find(p_bone_name) != bone_strength_overrides.end();
+}
+
 void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("hello"), &MarionetteCore::hello);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &MarionetteCore::tick);
@@ -50,6 +70,15 @@ void MarionetteCore::_bind_methods() {
 			&MarionetteCore::get_global_strength);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "global_strength"),
 			"set_global_strength", "get_global_strength");
+
+	ClassDB::bind_method(D_METHOD("set_bone_strength", "bone_name", "value"),
+			&MarionetteCore::set_bone_strength);
+	ClassDB::bind_method(D_METHOD("clear_bone_strength", "bone_name"),
+			&MarionetteCore::clear_bone_strength);
+	ClassDB::bind_method(D_METHOD("get_bone_strength", "bone_name", "default_value"),
+			&MarionetteCore::get_bone_strength);
+	ClassDB::bind_method(D_METHOD("has_bone_strength_override", "bone_name"),
+			&MarionetteCore::has_bone_strength_override);
 }
 
 } // namespace godot

@@ -90,6 +90,9 @@ public:
 	// Slice 3b test seam — bypasses _integrate_forces / state requirements
 	// so unit tests can probe the SPD math path directly. Returns the world-
 	// space torque the integrator WOULD apply for the given inputs.
+	// Uses this bone's cached `strength` as the per-bone gain; for slice 4r
+	// override tests, see `compute_spd_torque_for_test_ex` which lets the
+	// caller inject an effective bone strength independently.
 	Vector3 compute_spd_torque_for_test(
 			const Quaternion &p_current_rel_parent,
 			const Vector3 &p_anatomical_target,
@@ -97,6 +100,20 @@ public:
 			const Basis &p_parent_world_basis,
 			float p_mass,
 			float p_dt,
+			float p_global_strength) const;
+
+	// Slice 4r test seam — same path with an explicit `bone_strength` input.
+	// This is what `_integrate_forces` calls under the hood, passing the
+	// MarionetteCore-resolved effective strength (override > entry default).
+	// Tests cover the override-take-precedence and limp-at-zero contracts.
+	Vector3 compute_spd_torque_for_test_ex(
+			const Quaternion &p_current_rel_parent,
+			const Vector3 &p_anatomical_target,
+			const Vector3 &p_omega_world,
+			const Basis &p_parent_world_basis,
+			float p_mass,
+			float p_dt,
+			float p_bone_strength,
 			float p_global_strength) const;
 
 	void _integrate_forces(PhysicsDirectBodyState3D *p_state) override;

@@ -19,6 +19,9 @@ func _init() -> void:
 		_test_marionette_bone_spd_nonzero_on_error,
 		_test_marionette_bone_spd_sign_flip,
 		_test_marionette_bone_state_flips_custom_integrator,
+		_test_marionette_bone_strength_override_takes_precedence_over_entry,
+		_test_marionette_bone_strength_clear_falls_back_to_entry,
+		_test_marionette_bone_spd_zero_at_zero_strength,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -459,6 +462,102 @@ func _test_marionette_bone_state_flips_custom_integrator() -> bool:
 				"UNPOWERED expected custom_integrator=false")
 	bone.free()
 	return _ok("marionette_bone_state_flips_custom_integrator")
+
+
+# ---------- Strength API (P5 slice 4r) ----------
+# `MarionetteCore` owns the per-bone strength override map; the bone's cached
+# `strength` is the entry default. `_integrate_forces` resolves the effective
+# gain via core->get_bone_strength(name, default) once per tick.
+
+func _test_marionette_bone_strength_override_takes_precedence_over_entry() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_strength_override_takes_precedence_over_entry",
+				"MarionetteBone not registered")
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_bone_strength_override_takes_precedence_over_entry",
+				"MarionetteCore not registered")
+	# Same SPD setup as _make_spd_bone, but driven through the _ex seam so we
+	# can inject an effective bone strength (what _integrate_forces does after
+	# consulting the core's override map). Cached strength=1.0; override=0.25
+	# → torque should scale by 0.25 vs the default-path baseline.
+	var bone := _make_spd_bone()
+	var target := Vector3(deg_to_rad(45.0), 0.0, 0.0)
+	var tau_default: Vector3 = bone.compute_spd_torque_for_test(
+			Quaternion.IDENTITY, target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 1.0)
+	# Now exercise the core path. Set an override of 0.25 and read it back
+	# the way the integrator does: core.get_bone_strength(name, default).
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_bone_strength", &"TestBone", 0.25)
+	var resolved: float = core.call(&"get_bone_strength", &"TestBone", 1.0)
+	if absf(resolved - 0.25) > 1.0e-6:
+		core.free()
+		bone.free()
+		return _fail("marionette_bone_strength_override_takes_precedence_over_entry",
+				"override read back as %f, expected 0.25" % resolved)
+	var tau_override: Vector3 = bone.compute_spd_torque_for_test_ex(
+			Quaternion.IDENTITY, target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, resolved, 1.0)
+	core.free()
+	bone.free()
+	# SPD's Tan/Liu/Turk implicit integration adds a `1 + kd*dt` denominator,
+	# so torque is not strictly linear in scale — but it IS strictly monotonic
+	# and the override (0.25) must produce noticeably less torque than the
+	# entry default (1.0). The contract is "override scales down", not "scales
+	# by exactly the multiplier".
+	if tau_default.length() < _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_strength_override_takes_precedence_over_entry",
+				"baseline torque too small to compare against")
+	if tau_override.x <= 0.0 or tau_override.x >= tau_default.x:
+		return _fail("marionette_bone_strength_override_takes_precedence_over_entry",
+				"override torque %f should be in (0, default=%f)" %
+				[tau_override.x, tau_default.x])
+	return _ok("marionette_bone_strength_override_takes_precedence_over_entry")
+
+
+func _test_marionette_bone_strength_clear_falls_back_to_entry() -> bool:
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_bone_strength_clear_falls_back_to_entry",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_bone_strength", &"TestBone", 0.4)
+	if not core.call(&"has_bone_strength_override", &"TestBone"):
+		core.free()
+		return _fail("marionette_bone_strength_clear_falls_back_to_entry",
+				"override didn't register")
+	core.call(&"clear_bone_strength", &"TestBone")
+	if core.call(&"has_bone_strength_override", &"TestBone"):
+		core.free()
+		return _fail("marionette_bone_strength_clear_falls_back_to_entry",
+				"override still present after clear")
+	# Falls back to the caller-supplied default (the SPD path passes the
+	# bone's cached `strength`). 0.75 here stands in for the cached entry value.
+	var resolved: float = core.call(&"get_bone_strength", &"TestBone", 0.75)
+	core.free()
+	if absf(resolved - 0.75) > 1.0e-6:
+		return _fail("marionette_bone_strength_clear_falls_back_to_entry",
+				"post-clear resolved=%f, expected 0.75 (caller default)" % resolved)
+	return _ok("marionette_bone_strength_clear_falls_back_to_entry")
+
+
+func _test_marionette_bone_spd_zero_at_zero_strength() -> bool:
+	# CLAUDE.md §12 contract: strength=0 → zero torque even with a non-zero
+	# target. Functionally equivalent to UNPOWERED but driven by the strength
+	# dial instead of the state enum.
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_spd_zero_at_zero_strength",
+				"MarionetteBone not registered")
+	var bone := _make_spd_bone()
+	# Big error, but bone strength zero → kp = kd = 0 → torque zero.
+	var target := Vector3(deg_to_rad(45.0), 0.0, 0.0)
+	var torque: Vector3 = bone.compute_spd_torque_for_test_ex(
+			Quaternion.IDENTITY, target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 0.0, 1.0)
+	bone.free()
+	if torque.length() > _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_spd_zero_at_zero_strength",
+				"torque=%s expected ~ZERO at strength=0" % str(torque))
+	return _ok("marionette_bone_spd_zero_at_zero_strength")
 
 
 # ---------- SignedAxis ----------

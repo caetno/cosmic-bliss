@@ -124,6 +124,26 @@ Vector3 MarionetteBone::compute_spd_torque_for_test(
 		float p_mass,
 		float p_dt,
 		float p_global_strength) const {
+	// Legacy seam — preserves slice 3b call sites. Uses cached `strength`
+	// as the per-bone gain.
+	return compute_spd_torque_for_test_ex(
+			p_current_rel_parent, p_anatomical_target, p_omega_world,
+			p_parent_world_basis, p_mass, p_dt, strength, p_global_strength);
+}
+
+// Slice 4r — explicit per-bone strength so callers (and unit tests for the
+// override path) can drive the gain independently from the bone's cached
+// entry default. `_integrate_forces` passes the MarionetteCore-resolved
+// effective strength here.
+Vector3 MarionetteBone::compute_spd_torque_for_test_ex(
+		const Quaternion &p_current_rel_parent,
+		const Vector3 &p_anatomical_target,
+		const Vector3 &p_omega_world,
+		const Basis &p_parent_world_basis,
+		float p_mass,
+		float p_dt,
+		float p_bone_strength,
+		float p_global_strength) const {
 	const Quaternion target = compose_target_bone_local(p_anatomical_target);
 	const Quaternion err_q = SPDMath::error_quaternion(p_current_rel_parent, target);
 	const Vector3 err_axis_angle = SPDMath::quaternion_to_axis_angle(err_q);
@@ -134,7 +154,7 @@ Vector3 MarionetteBone::compute_spd_torque_for_test(
 	const Vector3 omega_parent_local = p_parent_world_basis.transposed().xform(p_omega_world);
 
 	const Vector2 gains = SPDGainConverter::compute_gains(alpha, damping_ratio, p_mass, p_dt);
-	const float scale = strength * p_global_strength;
+	const float scale = p_bone_strength * p_global_strength;
 	const float kp = gains.x * scale;
 	const float kd = gains.y * scale;
 
@@ -197,16 +217,23 @@ void MarionetteBone::_integrate_forces(PhysicsDirectBodyState3D *p_state) {
 	}
 
 	const float global_strength = (core_ptr != nullptr) ? core_ptr->get_global_strength() : 1.0f;
+	// Slice 4r — consult MarionetteCore for a per-bone override; fall back to
+	// the bone's own cached `strength` (which comes from the BoneEntry-derived
+	// default set at build_ragdoll). `BoneEntry` doesn't carry a strength
+	// field directly — the cached value on this bone IS the entry default.
+	const float effective_bone_strength =
+			(core_ptr != nullptr) ? core_ptr->get_bone_strength(anatomical_name, strength) : strength;
 	const float dt = p_state->get_step();
 	const float mass = get_mass();
 
-	const Vector3 torque_world = compute_spd_torque_for_test(
+	const Vector3 torque_world = compute_spd_torque_for_test_ex(
 			current_rel_parent,
 			anatomical_target,
 			p_state->get_angular_velocity(),
 			parent_world_basis,
 			mass,
 			dt,
+			effective_bone_strength,
 			global_strength);
 
 	p_state->apply_torque(torque_world);
@@ -275,6 +302,10 @@ void MarionetteBone::_bind_methods() {
 								"current_rel_parent", "anatomical_target", "omega_world",
 								"parent_world_basis", "mass", "dt", "global_strength"),
 			&MarionetteBone::compute_spd_torque_for_test);
+	ClassDB::bind_method(D_METHOD("compute_spd_torque_for_test_ex",
+								"current_rel_parent", "anatomical_target", "omega_world",
+								"parent_world_basis", "mass", "dt", "bone_strength", "global_strength"),
+			&MarionetteBone::compute_spd_torque_for_test_ex);
 
 	BIND_ENUM_CONSTANT(STATE_KINEMATIC);
 	BIND_ENUM_CONSTANT(STATE_POWERED);

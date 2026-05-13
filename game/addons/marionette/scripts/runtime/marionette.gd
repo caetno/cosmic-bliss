@@ -775,6 +775,50 @@ func set_bone_target(bone_name: StringName, anatomical: Vector3) -> void:
 	core.call(&"set_bone_target", bone_name, anatomical)
 
 
+# --- Strength API (Phase 5 slice 4r / P5.4) ---
+# Per-bone override + global multiplier. Both forward to the C++ MarionetteCore;
+# `MarionetteBone::_integrate_forces` consults the core once per tick.
+# `BoneEntry` does not carry a `strength` field — the per-bone default lives on
+# `MarionetteBone.strength` (set to 1.0 at build_ragdoll). `set_bone_strength`
+# pushes an override; `clear_bone_strength` reverts to that default.
+
+## Sets a per-bone strength override. Takes precedence over the entry default
+## until cleared. `value` is the continuous limp(0)↔active-pose(1) dial.
+func set_bone_strength(bone_name: StringName, value: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_bone_strength", bone_name, value)
+
+
+## Removes a per-bone override, reverting to the entry default cached on the
+## MarionetteBone (set at build_ragdoll time).
+func clear_bone_strength(bone_name: StringName) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"clear_bone_strength", bone_name)
+
+
+## Global strength multiplier (applied uniformly on top of per-bone gains).
+## See CLAUDE.md §12 — strength is the continuous limp↔held dial; 0 produces
+## zero torque and the bone falls under gravity.
+func set_global_strength(value: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_global_strength", value)
+
+
+## Returns the live global strength. Falls back to 1.0 when the C++ core
+## isn't loaded (editor without GDExtension).
+func get_global_strength() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 1.0
+	return core.call(&"get_global_strength")
+
+
 # Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns
 # null (with a one-shot warning) when the GDExtension hasn't loaded the
 # class — keeps tooling that calls set_bone_target() safe in pre-build
