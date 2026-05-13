@@ -57,8 +57,15 @@ static func bake(
 	p_canal.set_canal_id(p_canal_id)
 	var params: CanalParameters = p_canal.canal_parameters
 
-	# Step 6 — Catmull spline from CP bones.
-	var spline := build_spline_from_cp_bones(p_skeleton, String(params.spline_cp_bone_prefix))
+	# Resolve centerline source (5F.A.0 adapter). Default to the 5E
+	# bone-scan path when none is explicitly set; this keeps existing
+	# scenes (with no centerline_source authored) bake-identical.
+	var source: CanalCenterlineSource = p_canal.centerline_source
+	if source == null:
+		source = CPBoneCenterlineSource.new()
+
+	# Step 6 — Catmull spline via the source.
+	var spline := source.build_spline(p_skeleton, p_canal)
 	if spline == null:
 		push_error("CanalAutoBaker.bake: failed to derive spline for canal '%s'" % params.canal_name)
 		return false
@@ -76,8 +83,17 @@ static func bake(
 	# Step 9 — centerline chain rest positions + anchors.
 	var chain := allocate_centerline_chain(
 			spline, params, p_skeleton, p_orifices_root)
+	var proximal: Vector3 = chain["proximal"]
+	var distal: Vector3 = chain["distal"]
+	# Closed-terminal distal anchor: re-route through the source so a
+	# future CanalCenterlinePrimitiveSource can supply a Canal-local
+	# `terminal_pin_offset` instead of looking up a TerminalPin bone.
+	# `allocate_centerline_chain`'s own resolution remains the back-
+	# compat path for callers that pass no source (5E direct-call tests).
+	if params.closed_terminal:
+		distal = source.resolve_closed_terminal_anchor(params, p_skeleton, distal)
 	p_canal._set_baked_centerline_rest_positions(chain["positions"])
-	p_canal._set_baked_anchors(chain["proximal"], chain["distal"])
+	p_canal._set_baked_anchors(proximal, distal)
 
 	# Step 10 — per-vert (s, θ, rest_radius, rest_outward_normal) bake.
 	var vert_count := bake_canal_interior_verts(

@@ -510,6 +510,56 @@ Full tentacletech suite: **196/196** (was 188 + 8 new). Build: gdscript-only sli
 
 **Cross-slice composition:** No solver, no probe, no per-tick code touched. 4S.3 friction material composition unaffected. 4S.2 contact persistence unaffected. Phase 5A–5H rim primitive + orifice machinery untouched. 5E adds storage + bake-time scaffolding only.
 
+### 5F.A.0 — Centerline source adapter (2026-05-13)
+
+Pure-GDScript refactor in preparation for `Cosmic_Bliss_Update_2026-05-13_gizmo_primitive_authoring.md`. Hoists the 5E centerline-rest-position pipeline behind a small abstract resource so the upcoming 5F.A solver (per-tick centerline PBD) can land without waiting on `body_field`'s `CanalCenterlinePrimitive`, and so the bone-source path can be swapped for a primitive-source path post-amendment without touching the solver or per-tick refresh.
+
+**Files added:**
+
+```
+extensions/tentacletech/gdscript/canal/
+├── centerline_source.gd                              (NEW, abstract Resource)
+└── cp_bone_centerline_source.gd                     (NEW, concrete 5E path)
+game/tests/tentacletech/
+└── test_5fa0_centerline_source_adapter.gd           (NEW, 3/3)
+```
+
+**Files modified:** `gdscript/canal/canal.gd` (new `@export var centerline_source: CanalCenterlineSource`), `gdscript/canal/canal_auto_baker.gd` (step 6 delegates to `source.build_spline()`; step 9 closed-terminal anchor delegates to `source.resolve_closed_terminal_anchor()` after `allocate_centerline_chain` runs — the chain's own resolver remains the back-compat path for direct callers).
+
+**Adapter contract.** `CanalCenterlineSource` (abstract Resource) exposes two virtuals:
+
+- `build_spline(skeleton, canal) -> RefCounted` — rest-pose Catmull spline through the source's control points.
+- `resolve_closed_terminal_anchor(canal_params, skeleton, fallback) -> Vector3` — only called when `canal_parameters.closed_terminal == true`.
+
+The two virtuals capture the two truly source-coupled concerns post-amendment: CP geometry (where the spline gets its points from) and closed-terminal pin (currently a `TerminalPin` bone, future: a `Vector3` offset on `Canal`). Entry/exit orifice NodePath lookup remains in `CanalAutoBaker` because it's canal-state plumbing, not authoring-source-coupled.
+
+`CPBoneCenterlineSource` is the concrete 5E path — `build_spline()` delegates to `CanalAutoBaker.build_spline_from_cp_bones(skeleton, prefix)` (kept public); `resolve_closed_terminal_anchor()` does the same `terminal_pin_bone` lookup the legacy `_resolve_distal_anchor` did, with the same `terminal_position_in_host_frame` fallback. Bake-equivalence (default vs explicit-source) is regression-tested.
+
+**Why-key design choices flagged:**
+
+- **(a) Two virtuals, not four.** Earlier drafts considered routing all anchor resolution through the source. Open-canal entry/exit anchors look up orifice nodes by NodePath — that's canal scene-structure, not authoring source. Pulling it onto the source would force every future source (primitive, scripted, test fixtures) to re-implement the NodePath chase. Two virtuals keeps the abstraction tight; sources stay focused on the data they actually own.
+- **(b) `CanalAutoBaker.build_spline_from_cp_bones` stays public.** Tests in `test_5e_canal_infrastructure.gd` call it directly. The adapter wraps it rather than relocating it, so the 5E suite survives without edits — pure additive refactor.
+- **(c) `allocate_centerline_chain` API untouched.** Threading the source through it would force a signature change on the 5E direct call sites. Instead, `bake()` invokes `allocate_centerline_chain` for the chain positions + back-compat anchors, then overwrites the distal anchor through the source when `closed_terminal == true`. Same data flow, no API churn.
+- **(d) Default source is `null` on `Canal`, `CanalAutoBaker.bake()` substitutes `CPBoneCenterlineSource.new()` at bake time.** Two motivations: existing scene `.tscn` files (none yet — Phase 5 has no test scenes) bake unchanged; and the inspector default doesn't carry a forward-pointing dependency on a class that may be renamed when the primitive-source variant lands. Authors can still set the source explicitly when they want it visible in the inspector.
+
+**Tests** — `test_5fa0_centerline_source_adapter` 3/3:
+
+1. `test_cp_bone_source_build_spline_matches_static` — sampled spline positions at 32 t-points match the legacy `build_spline_from_cp_bones` call within 0.0 m (exact, no numerical drift). Arc length matches to 0.0 m. Sanity check that the delegate doesn't introduce reframing.
+2. `test_cp_bone_source_closed_terminal_resolves_pin` — `CPBoneCenterlineSource.resolve_closed_terminal_anchor()` with a TerminalPin bone at `(0.4, 0.1, 0.0)` and a deliberately wrong fallback `(999, 999, 999)` returns `(0.4, 0.1, 0.0)` exactly. Regression of 5E test 6 routed through the adapter API.
+3. `test_bake_with_explicit_source_matches_default` — full `CanalAutoBaker.bake()` on a 5-CP straight-axis canal with `centerline_source = null` (default fallback) vs `centerline_source = CPBoneCenterlineSource.new()` (explicit). Centerline rest positions identical to 0.0 m (worst); proximal + distal anchors identical to 0.0 m; per-cell rest_radius identical to 0.0 m across all 32 cells. End-to-end equivalence.
+
+Full tentacletech suite: **199/199** passing (was 196 + 3 new; all 26 test scripts exit rc=0). `.so` unchanged — gdscript-only slice; `scons: up to date`.
+
+**Spec divergences flagged:**
+
+- **(a) Adapter scope is narrower than the brief might suggest.** The 2026-05-13 amendment retires `<Canal>_CP_*` Blender bones in favor of `CanalCenterlinePrimitive` (each CP transform = `host_bone_world × ctrl_local_offset`). 5F.A.0 only abstracts the source — it does **not** add the primitive-source concrete (that lives in body_field per the amendment's ordering). The bone-source path remains the only concrete implementation today. `CanalCenterlinePrimitiveSource` lands later, after body_field ships `PrimitiveAuthoring` + `CanalCenterlinePrimitive`.
+- **(b) Per-tick refresh hook is not yet wired.** `Canal.tick(dt)` is still the 5E no-op stub; the amendment's "Per-tick centerline rest refresh reads from the sampled CP world positions" is unblocked by the adapter (the solver will route through `centerline_source` on each tick) but not yet exercised — that's 5F.A's job once the solver lands.
+- **(c) `allocate_centerline_chain`'s own closed-terminal resolver still exists** for back-compat with 5E direct callers (tests). The `bake()` flow overwrites its distal output via the source, so the user-facing path is consistent; the chain helper's internal resolver remains a back-compat sub-path. When 5F.A wires the solver, the legacy resolver becomes unreachable from production code and can be deleted in a follow-up cleanup slice.
+
+**Deferred (5F.A — centerline solver):** PBD particle chain (predict / bending / anchors / `muscular_curl_delta` stub); paired centerline gizmo layer; per-tick rest refresh through the adapter. **Deferred (5F.A.1 — primitive-source concrete):** lands after body_field ships `CanalCenterlinePrimitive`; involves an inter-extension shared resource import or a duck-typed read of `host_bones[]` + `ctrl_local_offsets[]`. **Deferred (cleanup):** delete `allocate_centerline_chain`'s own closed-terminal resolver path once no production caller remains.
+
+**Cross-slice composition:** Pure scaffolding. No solver, no probe, no per-tick code touched. 5E substrate untouched (test_5e_canal_infrastructure 8/8 unchanged). Phase 5A–5H rim primitive + orifice machinery untouched. C++ `.so` not rebuilt.
+
 ---
 
 ## Phase 6 — Stimulus bus

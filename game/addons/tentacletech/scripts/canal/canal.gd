@@ -20,6 +20,17 @@ extends Node3D
 ## reads it every tick.
 @export var canal_parameters: CanalParameters
 
+## Source of rest-pose centerline geometry. `null` means
+## `CanalAutoBaker` substitutes a default `CPBoneCenterlineSource` at
+## bake time (5E back-compat). Set explicitly to a
+## `CPBoneCenterlineSource` to make the dependency visible in the
+## inspector, or — when `body_field` ships its primitive resource
+## family per the 2026-05-13 gizmo-primitive amendment — to a
+## `CanalCenterlinePrimitiveSource`. The solver and per-tick rest
+## refresh path consume only the abstract base; they cannot tell
+## which concrete source is plugged in.
+@export var centerline_source: CanalCenterlineSource
+
 # ─── Baked substrate (filled by CanalAutoBaker) ────────────────────
 
 ## Catmull spline through the resolved CP bone world positions, in
