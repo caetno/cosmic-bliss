@@ -3,11 +3,14 @@
 
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
+#include <godot_cpp/templates/hash_set.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
 namespace godot {
+
+class MarionetteBone;
 
 // Phase 2.0 scaffold: proves the GDScript -> C++ bridge.
 // Phase 5 Slice 3a: per-bone anatomical target cache. `Marionette.gd`
@@ -49,6 +52,40 @@ public:
 	float get_bone_strength(const StringName &p_bone_name, float p_default) const;
 	bool has_bone_strength_override(const StringName &p_bone_name) const;
 
+	// Slice 5 (P5.5). `gravity_scale` propagates to every registered
+	// MarionetteBone (RigidBody3D property); 0.0 = zero-g, 1.0 = world
+	// gravity. `hip_upward_nudge` is a constant central force in world +Y
+	// applied at the hip while `global_strength` is above
+	// `hip_nudge_strength_threshold` (smooth-faded below). Both default to
+	// 1.0 / 0.0 / 0.5 so existing builds behave the same.
+	void set_gravity_scale(float p_value);
+	float get_gravity_scale() const;
+	void set_hip_upward_nudge(float p_value);
+	float get_hip_upward_nudge() const;
+	void set_hip_nudge_strength_threshold(float p_value);
+	float get_hip_nudge_strength_threshold() const;
+
+	// Smooth fade of `global_strength` against `hip_nudge_strength_threshold`.
+	// Returns 1.0 when global_strength >= threshold, linear ramp down to 0.0
+	// at global_strength = 0. Pure scalar — no per-tick state. Used by the
+	// root bone's _integrate_forces to attenuate the upward nudge at low
+	// global strength so a limp character isn't lifted by the hip force.
+	float get_global_strength_factor() const;
+
+	// Bone registry (slice 5). MarionetteBone registers itself when its
+	// `set_core` is called and unregisters on destruction. Used by
+	// `set_gravity_scale` to push the value out to RigidBody3D.
+	void register_bone(MarionetteBone *p_bone);
+	void unregister_bone(MarionetteBone *p_bone);
+
+	// Slice 5 — `is_root` cached on the bone, but the core also needs the
+	// pointer for diagnostics / future hip-anchored tether work. Setting null
+	// clears the cache (e.g., teardown). `get_root_bone` returns Object* so
+	// the binding system can expose it to GDScript.
+	void set_root_bone(MarionetteBone *p_bone);
+	MarionetteBone *get_root_bone_ptr() const;
+	Object *get_root_bone() const;
+
 protected:
 	static void _bind_methods();
 
@@ -56,6 +93,13 @@ private:
 	HashMap<StringName, Vector3> bone_targets;
 	HashMap<StringName, float> bone_strength_overrides;
 	float global_strength = 1.0f;
+
+	HashSet<MarionetteBone *> registered_bones;
+	MarionetteBone *root_bone = nullptr;
+
+	float gravity_scale = 1.0f;
+	float hip_upward_nudge = 0.0f; // Newtons, world +Y.
+	float hip_nudge_strength_threshold = 0.5f;
 };
 
 } // namespace godot

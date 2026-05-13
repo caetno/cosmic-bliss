@@ -333,6 +333,17 @@ func build_ragdoll() -> void:
 		if state != BoneStateProfile.State.KINEMATIC:
 			dynamic_bone_names.append(skel_bone_name)
 
+	# Slice 5 (P5.5) — identify the ragdoll root (the hip) and flag it so
+	# `MarionetteBone::_integrate_forces` applies `hip_upward_nudge` only
+	# there. The root is the built bone whose skeleton parent is NOT also
+	# a built MarionetteBone (i.e., the topmost simulated bone). For a
+	# humanoid this is the Hips bone. Multiple disconnected ragdoll islands
+	# would each get their own root, which is the desired behavior.
+	for skel_idx: int in bones_by_skel_index.keys():
+		var parent_idx: int = skel.get_bone_parent(skel_idx)
+		if parent_idx < 0 or not bones_by_skel_index.has(parent_idx):
+			bones_by_skel_index[skel_idx].is_root = true
+
 	# Pass 3: soft-region jiggle bones. Iterate the BoneCollisionProfile's
 	# non-cascade list and spawn a JiggleBone for any entry whose hull is
 	# present and whose skeleton bone exists. CLAUDE.md §15. Each jiggle
@@ -817,6 +828,62 @@ func get_global_strength() -> float:
 	if core == null:
 		return 1.0
 	return core.call(&"get_global_strength")
+
+
+# --- Gravity + hip nudge (Phase 5 slice 5 / P5.5) ---
+# `gravity_scale` propagates to every registered MarionetteBone via the
+# C++ core (one property write per bone). `hip_upward_nudge` is a constant
+# central force applied to the root bone (the hip) while global_strength
+# is above the configured threshold — a quick lever against pelvis sag
+# at high strength, not a rigorous foot-IK.
+
+## Sets `gravity_scale` (0..N) on every built MarionetteBone. 0 = zero-g,
+## 1 = world gravity. Settable at any time; the C++ side fans the value
+## out across the registered bone set.
+func set_gravity_scale(value: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_gravity_scale", value)
+
+
+func get_gravity_scale() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 1.0
+	return core.call(&"get_gravity_scale")
+
+
+## Sets the upward central force (Newtons, world +Y) applied to the root
+## bone during `_integrate_forces` while global_strength is above the
+## threshold. Attenuated linearly below the threshold so a limp character
+## isn't lifted off the ground.
+func set_hip_upward_nudge(value: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_hip_upward_nudge", value)
+
+
+func get_hip_upward_nudge() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0.0
+	return core.call(&"get_hip_upward_nudge")
+
+
+func set_hip_nudge_strength_threshold(value: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_hip_nudge_strength_threshold", value)
+
+
+func get_hip_nudge_strength_threshold() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0.5
+	return core.call(&"get_hip_nudge_strength_threshold")
 
 
 # Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns

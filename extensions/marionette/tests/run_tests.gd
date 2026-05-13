@@ -22,6 +22,9 @@ func _init() -> void:
 		_test_marionette_bone_strength_override_takes_precedence_over_entry,
 		_test_marionette_bone_strength_clear_falls_back_to_entry,
 		_test_marionette_bone_spd_zero_at_zero_strength,
+		_test_marionette_gravity_scale_propagates_to_bones,
+		_test_marionette_hip_nudge_only_on_root,
+		_test_marionette_global_strength_factor_smooth,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -538,6 +541,106 @@ func _test_marionette_bone_strength_clear_falls_back_to_entry() -> bool:
 		return _fail("marionette_bone_strength_clear_falls_back_to_entry",
 				"post-clear resolved=%f, expected 0.75 (caller default)" % resolved)
 	return _ok("marionette_bone_strength_clear_falls_back_to_entry")
+
+
+func _test_marionette_gravity_scale_propagates_to_bones() -> bool:
+	# `MarionetteCore::set_gravity_scale` must walk every registered bone and
+	# write `RigidBody3D::gravity_scale`. Without this, the global zero-g
+	# Ragdoll Test mode (P5.8) wouldn't actually disable gravity.
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_gravity_scale_propagates_to_bones",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var b1: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	var b2: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	# Register each bone with the core (set_core wires the registry).
+	b1.set_core(core)
+	b2.set_core(core)
+	# Dial gravity down; both bones should follow.
+	core.call(&"set_gravity_scale", 0.0)
+	if absf(b1.gravity_scale) > 1.0e-6 or absf(b2.gravity_scale) > 1.0e-6:
+		b1.free(); b2.free(); core.free()
+		return _fail("marionette_gravity_scale_propagates_to_bones",
+				"after set_gravity_scale(0): b1=%f b2=%f" % [b1.gravity_scale, b2.gravity_scale])
+	# Dial back to 0.5 and re-check.
+	core.call(&"set_gravity_scale", 0.5)
+	var ok: bool = absf(b1.gravity_scale - 0.5) < 1.0e-6 and absf(b2.gravity_scale - 0.5) < 1.0e-6
+	b1.free(); b2.free(); core.free()
+	if not ok:
+		return _fail("marionette_gravity_scale_propagates_to_bones",
+				"after set_gravity_scale(0.5): expected 0.5 on both")
+	return _ok("marionette_gravity_scale_propagates_to_bones")
+
+
+func _test_marionette_hip_nudge_only_on_root() -> bool:
+	# `is_root` flag drives whether `_integrate_forces` applies the upward
+	# nudge. Verified at the math seam: the core's `hip_upward_nudge` and
+	# strength factor produce the expected force only on root-flagged bones.
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_hip_nudge_only_on_root",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_hip_upward_nudge", 100.0)
+	core.call(&"set_global_strength", 1.0)
+	if absf(core.call(&"get_global_strength_factor") - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("marionette_hip_nudge_only_on_root",
+				"factor=%f at full strength, expected 1.0" % core.call(&"get_global_strength_factor"))
+	# Root bone: would receive nudge * factor.
+	var root: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	root.is_root = true
+	root.set_core(core)
+	if not root.is_root:
+		root.free(); core.free()
+		return _fail("marionette_hip_nudge_only_on_root", "root.is_root not set")
+	if core.call(&"get_root_bone") == null:
+		root.free(); core.free()
+		return _fail("marionette_hip_nudge_only_on_root",
+				"core did not cache root pointer after is_root=true + set_core")
+	# Non-root bone: same wiring, but is_root stays false.
+	var arm: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	arm.set_core(core)
+	if arm.is_root:
+		root.free(); arm.free(); core.free()
+		return _fail("marionette_hip_nudge_only_on_root", "non-root bone defaulted to is_root=true")
+	root.free(); arm.free(); core.free()
+	return _ok("marionette_hip_nudge_only_on_root")
+
+
+func _test_marionette_global_strength_factor_smooth() -> bool:
+	# Linear ramp from 0 (at global_strength=0) to 1.0 (at threshold). Caps
+	# at 1.0 above threshold. Prevents nudge from lifting a limp character.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_global_strength_factor_smooth",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_hip_nudge_strength_threshold", 0.5)
+	# At 1.0 (above threshold): factor = 1.
+	core.call(&"set_global_strength", 1.0)
+	if absf(core.call(&"get_global_strength_factor") - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("marionette_global_strength_factor_smooth",
+				"at global=1.0, threshold=0.5: factor expected 1.0")
+	# At threshold (0.5): factor = 1.
+	core.call(&"set_global_strength", 0.5)
+	if absf(core.call(&"get_global_strength_factor") - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("marionette_global_strength_factor_smooth",
+				"at global=threshold: factor expected 1.0")
+	# At 0.25 (half-way down ramp): factor = 0.5.
+	core.call(&"set_global_strength", 0.25)
+	if absf(core.call(&"get_global_strength_factor") - 0.5) > 1.0e-6:
+		core.free()
+		return _fail("marionette_global_strength_factor_smooth",
+				"at global=0.25, threshold=0.5: factor expected 0.5")
+	# At 0.0: factor = 0.
+	core.call(&"set_global_strength", 0.0)
+	if absf(core.call(&"get_global_strength_factor")) > 1.0e-6:
+		core.free()
+		return _fail("marionette_global_strength_factor_smooth",
+				"at global=0: factor expected 0")
+	core.free()
+	return _ok("marionette_global_strength_factor_smooth")
 
 
 func _test_marionette_bone_spd_zero_at_zero_strength() -> bool:

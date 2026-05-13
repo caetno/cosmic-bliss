@@ -13,6 +13,16 @@
 
 namespace godot {
 
+// Slice 5 — unregister from the core's bone set on destruction so a freed
+// bone doesn't leave a dangling pointer in `registered_bones`. Scene teardown
+// frees children in arbitrary order; the core sometimes outlives its bones.
+MarionetteBone::~MarionetteBone() {
+	MarionetteCore *core_ptr = Object::cast_to<MarionetteCore>(core);
+	if (core_ptr != nullptr) {
+		core_ptr->unregister_bone(this);
+	}
+}
+
 void MarionetteBone::set_bone_entry(const Ref<Resource> &p_entry) {
 	bone_entry = p_entry;
 }
@@ -49,8 +59,39 @@ Vector3 MarionetteBone::get_rest_anatomical_offset() const { return rest_anatomi
 void MarionetteBone::set_anatomical_basis(const Basis &p_v) { anatomical_basis = p_v; }
 Basis MarionetteBone::get_anatomical_basis() const { return anatomical_basis; }
 
-void MarionetteBone::set_core(Object *p_core) { core = p_core; }
+void MarionetteBone::set_core(Object *p_core) {
+	// Slice 5 — register / unregister with the core's bone set so
+	// `MarionetteCore::set_gravity_scale` can propagate to every bone.
+	// Unregister from the prior core first (handles re-wiring on rebuild).
+	MarionetteCore *prev_core = Object::cast_to<MarionetteCore>(core);
+	if (prev_core != nullptr) {
+		prev_core->unregister_bone(this);
+	}
+	core = p_core;
+	MarionetteCore *new_core = Object::cast_to<MarionetteCore>(core);
+	if (new_core != nullptr) {
+		new_core->register_bone(this);
+		if (is_root) {
+			new_core->set_root_bone(this);
+		}
+	}
+}
 Object *MarionetteBone::get_core() const { return core; }
+
+void MarionetteBone::set_is_root(bool p_v) {
+	is_root = p_v;
+	// If the core is already wired up, register/un-register on the root
+	// pointer side too. The bone set is unchanged.
+	MarionetteCore *core_ptr = Object::cast_to<MarionetteCore>(core);
+	if (core_ptr != nullptr) {
+		if (is_root) {
+			core_ptr->set_root_bone(this);
+		} else if (core_ptr->get_root_bone_ptr() == this) {
+			core_ptr->set_root_bone(nullptr);
+		}
+	}
+}
+bool MarionetteBone::get_is_root() const { return is_root; }
 
 void MarionetteBone::set_anatomical_name(const StringName &p_name) { anatomical_name = p_name; }
 StringName MarionetteBone::get_anatomical_name() const { return anatomical_name; }
@@ -237,6 +278,22 @@ void MarionetteBone::_integrate_forces(PhysicsDirectBodyState3D *p_state) {
 			global_strength);
 
 	p_state->apply_torque(torque_world);
+
+	// Slice 5 (P5.5) — hip upward nudge. Constant central force in world +Y,
+	// attenuated by global_strength so a limp character isn't lifted by the
+	// hip's drive force. Only fires on the bone flagged as the ragdoll root
+	// (the hip — set by build_ragdoll). World-Y is fine here: gravity is also
+	// world-Y, and this is a quick lever (not a rigorous foot-IK) to keep
+	// the pelvis from sagging while the per-frame physics solver settles.
+	if (is_root && core_ptr != nullptr) {
+		const float nudge = core_ptr->get_hip_upward_nudge();
+		if (nudge != 0.0f) {
+			const float factor = core_ptr->get_global_strength_factor();
+			if (factor > 0.0f) {
+				p_state->apply_central_force(Vector3(0.0f, nudge * factor, 0.0f));
+			}
+		}
+	}
 }
 
 void MarionetteBone::_bind_methods() {
@@ -292,6 +349,11 @@ void MarionetteBone::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_core", "core"), &MarionetteBone::set_core);
 	ClassDB::bind_method(D_METHOD("get_core"), &MarionetteBone::get_core);
+
+	ClassDB::bind_method(D_METHOD("set_is_root", "v"), &MarionetteBone::set_is_root);
+	ClassDB::bind_method(D_METHOD("get_is_root"), &MarionetteBone::get_is_root);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "is_root"),
+			"set_is_root", "get_is_root");
 
 	ClassDB::bind_method(D_METHOD("set_anatomical_name", "name"), &MarionetteBone::set_anatomical_name);
 	ClassDB::bind_method(D_METHOD("get_anatomical_name"), &MarionetteBone::get_anatomical_name);

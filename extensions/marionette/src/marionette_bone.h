@@ -40,7 +40,7 @@ public:
 	};
 
 	MarionetteBone() = default;
-	~MarionetteBone() = default;
+	~MarionetteBone();
 
 	void set_bone_entry(const Ref<Resource> &p_entry);
 	Ref<Resource> get_bone_entry() const;
@@ -80,6 +80,13 @@ public:
 	// Ref-counted Object.
 	void set_core(Object *p_core);
 	Object *get_core() const;
+
+	// Slice 5 (P5.5) — marks this bone as the ragdoll root (hip). The build
+	// path identifies the root (no MarionetteBone parent in the simulator
+	// hierarchy) and flips this flag; `_integrate_forces` consults it to
+	// decide whether to apply `MarionetteCore::hip_upward_nudge`.
+	void set_is_root(bool p_v);
+	bool get_is_root() const;
 
 	// Cached anatomical name (same as BoneProfile entry key). Differs from
 	// the inherited `bone_name` StringName proxy in that it's pre-resolved
@@ -139,6 +146,11 @@ private:
 	// Cached pointers used per-tick.
 	Object *core = nullptr; // MarionetteCore (sibling Node, not Ref-counted).
 	StringName anatomical_name;
+
+	// Slice 5 — set by build_ragdoll on the hip (the bone with no
+	// MarionetteBone parent in the simulator hierarchy). `_integrate_forces`
+	// applies `MarionetteCore::hip_upward_nudge` only on this bone.
+	bool is_root = false;
 
 	// Composes an anatomical (flex, twist, abd) Vector3 into a target
 	// rotation expressed in the bone's local frame, matching
