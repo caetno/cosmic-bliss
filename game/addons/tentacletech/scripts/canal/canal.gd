@@ -31,6 +31,20 @@ extends Node3D
 ## which concrete source is plugged in.
 @export var centerline_source: CanalCenterlineSource
 
+## Optional override for the skeleton driving this canal's CP bones +
+## TerminalPin lookup. Empty path → `_resolve_skeleton()` walks
+## ancestors looking for the first `Skeleton3D`. Used by the per-tick
+## anchor refresh (5F.B.A) so a moving host bone propagates into the
+## centerline chain without re-running the bake. Cached lazily.
+@export var skeleton_path: NodePath
+
+## Optional override for the parent node whose children are the
+## scene's `Orifice` nodes. Empty path → `get_parent()`. Resolved by
+## `get_orifices_root()` so the per-tick refresh in
+## `CPBoneCenterlineSource.refresh_anchors` can find the entry/exit
+## orifice nodes by their authored `NodePath`s on `CanalParameters`.
+@export var orifices_root_path: NodePath
+
 # ─── Baked substrate (filled by CanalAutoBaker) ────────────────────
 
 ## Catmull spline through the resolved CP bone world positions, in
@@ -125,6 +139,7 @@ func tick(p_delta: float) -> void:
 		return
 	if _centerline_chain == null:
 		return
+	_refresh_anchors_through_source()
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
 
@@ -138,8 +153,58 @@ func tick(p_delta: float) -> void:
 func tick_force(p_delta: float) -> void:
 	if _centerline_chain == null:
 		return
+	_refresh_anchors_through_source()
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
+
+
+# ─── Per-tick anchor refresh (5F.B.A) ──────────────────────────────
+
+## Re-resolve `_proximal_anchor_world` / `_distal_anchor_world` from
+## the `centerline_source`. Called each tick before driving the
+## solver so moving host bones / orifice frames propagate into the
+## chain. Fallbacks: the existing bake-time anchor values, so a
+## degenerate config (no source override, no resolvable orifice) is a
+## no-op rather than a snap to origin.
+func _refresh_anchors_through_source() -> void:
+	if centerline_source == null:
+		return
+	var skel := _resolve_skeleton()
+	var anchors: Dictionary = centerline_source.refresh_anchors(
+			skel, self, _proximal_anchor_world, _distal_anchor_world)
+	_proximal_anchor_world = anchors.get("proximal", _proximal_anchor_world)
+	_distal_anchor_world = anchors.get("distal", _distal_anchor_world)
+
+
+# ─── Scene-graph resolvers (used by per-tick refresh) ──────────────
+
+## Resolves the skeleton driving this canal. `skeleton_path` override
+## wins; otherwise walks ancestors looking for the first `Skeleton3D`.
+## Returns `null` if neither resolves — callers should fall back to a
+## no-op when this is the case.
+func _resolve_skeleton() -> Skeleton3D:
+	if not skeleton_path.is_empty():
+		var n := get_node_or_null(skeleton_path)
+		if n is Skeleton3D:
+			return n
+	var cur: Node = get_parent()
+	while cur != null:
+		if cur is Skeleton3D:
+			return cur
+		cur = cur.get_parent()
+	return null
+
+
+## Returns the node whose children are this canal's referenced
+## orifices. `orifices_root_path` override wins; otherwise returns
+## `get_parent()` (hero-root convention). Consumed by
+## `CPBoneCenterlineSource.refresh_anchors`.
+func get_orifices_root() -> Node:
+	if not orifices_root_path.is_empty():
+		var n := get_node_or_null(orifices_root_path)
+		if n != null:
+			return n
+	return get_parent()
 
 
 # ─── Bake-time accessors (used by CanalAutoBaker + gizmo) ──────────

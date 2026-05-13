@@ -369,11 +369,13 @@ static func allocate_centerline_chain(
 	return {"positions": positions, "proximal": proximal, "distal": distal}
 
 
-# Proximal anchor: entry orifice's Center frame world origin if
-# resolvable; otherwise the spline's start position (fallback when
-# `entry_orifice_path` is empty — useful for closed-terminal sacs
-# that have no entry orifice authored).
-static func _resolve_proximal_anchor(
+# Public helper: resolve the proximal anchor by looking up
+# `entry_orifice_path` against `orifices_root`. Returns `fallback` if
+# the path is empty, the node is missing, or it can't expose a Center
+# frame. Used by both bake-time and per-tick anchor refresh (5F.B.A);
+# kept as a static public method so concrete `CanalCenterlineSource`s
+# can call it without re-implementing the lookup.
+static func resolve_entry_orifice_anchor(
 		p_params: CanalParameters,
 		p_orifices_root: Node,
 		p_fallback: Vector3) -> Vector3:
@@ -393,28 +395,66 @@ static func _resolve_proximal_anchor(
 	return p_fallback
 
 
+# Public helper: resolve the distal anchor for open canals (exit
+# orifice's Center frame). Returns `fallback` if `exit_orifice_path`
+# can't be resolved. The closed-terminal branch lives on the source
+# (it's authoring-source-coupled — bone vs primitive offset); this
+# helper covers only the open path.
+static func resolve_exit_orifice_anchor(
+		p_params: CanalParameters,
+		p_orifices_root: Node,
+		p_fallback: Vector3) -> Vector3:
+	if p_orifices_root == null or p_params.exit_orifice_path.is_empty():
+		return p_fallback
+	var exit: Node = p_orifices_root.get_node_or_null(p_params.exit_orifice_path)
+	if exit == null:
+		return p_fallback
+	if exit.has_method("get_center_frame_world"):
+		var xf: Transform3D = exit.call("get_center_frame_world")
+		return xf.origin
+	if exit is Node3D:
+		return (exit as Node3D).global_position
+	return p_fallback
+
+
+# Proximal anchor: delegate to the public helper. Kept as a thin
+# wrapper for back-compat with 5E direct callers (test_5e calls
+# `allocate_centerline_chain` directly).
+static func _resolve_proximal_anchor(
+		p_params: CanalParameters,
+		p_orifices_root: Node,
+		p_fallback: Vector3) -> Vector3:
+	return resolve_entry_orifice_anchor(p_params, p_orifices_root, p_fallback)
+
+
 # Distal anchor (§6.12.11 + brief):
-#   open canals    → exit_orifice_path's Center frame
+#   open canals    → exit_orifice_path's Center frame (delegated)
 #   closed sacs    → <canal_name>_TerminalPin bone, if it resolves
 #                  → fall back to terminal_position_in_host_frame
-#   if all fail    → error visibly + return spline endpoint
+#   if all fail    → warn + return spline endpoint
+#
+# The closed-terminal branch stays inline here for back-compat with
+# 5E direct callers. The 5F.A.0 `bake()` flow overrides this distal
+# value via `source.resolve_closed_terminal_anchor()` so production
+# resolution routes through the adapter; this internal resolver is
+# the back-compat sub-path.
 static func _resolve_distal_anchor(
 		p_params: CanalParameters,
 		p_skeleton: Skeleton3D,
 		p_orifices_root: Node,
 		p_fallback: Vector3) -> Vector3:
 	if not p_params.closed_terminal:
+		# Determine resolution success directly — `is_equal_approx(fallback)`
+		# has false positives when the orifice happens to sit at the spline
+		# endpoint (the natural fallback for a straight-axis canal).
+		var exit_node: Node = null
 		if p_orifices_root != null and not p_params.exit_orifice_path.is_empty():
-			var exit: Node = p_orifices_root.get_node_or_null(p_params.exit_orifice_path)
-			if exit != null:
-				if exit.has_method("get_center_frame_world"):
-					var xf: Transform3D = exit.call("get_center_frame_world")
-					return xf.origin
-				if exit is Node3D:
-					return (exit as Node3D).global_position
-		push_warning("CanalAutoBaker: open canal '%s' has no resolvable exit_orifice_path; using spline endpoint as distal anchor"
-				% String(p_params.canal_name))
-		return p_fallback
+			exit_node = p_orifices_root.get_node_or_null(p_params.exit_orifice_path)
+		if exit_node == null:
+			push_warning("CanalAutoBaker: open canal '%s' has no resolvable exit_orifice_path; using spline endpoint as distal anchor"
+					% String(p_params.canal_name))
+			return p_fallback
+		return resolve_exit_orifice_anchor(p_params, p_orifices_root, p_fallback)
 
 	# Closed terminal — try TerminalPin bone first.
 	if not p_params.terminal_pin_bone.is_empty() and p_skeleton != null:

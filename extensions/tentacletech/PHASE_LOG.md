@@ -626,6 +626,48 @@ Full tentacletech suite: **204/204** passing across 23 assertion-style + 4 rc=0 
 
 **Cross-slice composition:** No tentacle / orifice / probe / collision code touched. 5E substrate accessors unchanged. 5F.A.0 adapter unchanged (the solver consumes the rest positions the adapter already provides via `CanalAutoBaker`; the adapter's per-tick path is not yet exercised — that's 5F.B). `Canal.tick` was a 5E no-op stub; 5F.A makes it real but the `is_inactive()` gate keeps production behaviour identical (zero callers drive a non-inactive Canal yet).
 
+### 5F.B.A — Per-tick anchor refresh through CanalCenterlineSource (2026-05-13)
+
+Pure-GDScript slice that closes the 5F.A spec divergence (b): chain anchors are now re-resolved every tick via `centerline_source.refresh_anchors()`. A moving host bone / orifice frame propagates into the chain at 60 Hz, without re-running the bake.
+
+**Files modified** (no new files): `gdscript/canal/centerline_source.gd` (new `refresh_anchors` virtual; base impl returns the fallbacks so any concrete that doesn't override behaves as if anchors stay at bake-time values — explicit 5F.A back-compat), `gdscript/canal/cp_bone_centerline_source.gd` (concrete `refresh_anchors`: re-resolves entry orifice + exit orifice OR closed-terminal pin per call; calls the same scene-lookup helpers `CanalAutoBaker` uses at bake time so bake/refresh share one resolution path), `gdscript/canal/canal_auto_baker.gd` (lifted the open-canal entry/exit lookup into public static helpers `resolve_entry_orifice_anchor` + `resolve_exit_orifice_anchor`; refactored `_resolve_distal_anchor` to detect "exit_node == null" directly instead of `is_equal_approx(fallback)`, which had false positives when the orifice happened to sit at the spline endpoint), `gdscript/canal/canal.gd` (new `skeleton_path` + `orifices_root_path` exports, `_resolve_skeleton()` ancestor walk fallback, `get_orifices_root()` defaulting to `get_parent()`, `_refresh_anchors_through_source()` helper invoked from both `tick` and `tick_force`).
+
+**Public API surface added**:
+
+- `CanalCenterlineSource.refresh_anchors(skeleton, canal, fallback_proximal, fallback_distal) -> { proximal: Vector3, distal: Vector3 }` — abstract; base impl returns fallbacks.
+- `CanalAutoBaker.resolve_entry_orifice_anchor(params, orifices_root, fallback) -> Vector3` (static, public).
+- `CanalAutoBaker.resolve_exit_orifice_anchor(params, orifices_root, fallback) -> Vector3` (static, public).
+- `Canal.skeleton_path: NodePath` + `Canal.orifices_root_path: NodePath` (`@export`).
+- `Canal.get_orifices_root() -> Node` (used by `CPBoneCenterlineSource.refresh_anchors`).
+
+`_resolve_proximal_anchor` becomes a thin wrapper over `resolve_entry_orifice_anchor` (kept private for back-compat with 5E direct callers). `_resolve_distal_anchor` still hosts the warn-and-fallback policy + closed-terminal bone lookup; its open-canal path delegates to the public helper.
+
+**Why this shape:**
+
+- **`refresh_anchors` is a four-arg virtual instead of mutating state.** Source returns a Dictionary so different concretes can compute proximal / distal independently (some sources may need a skeleton, some not — e.g., `CanalCenterlinePrimitiveSource` will read per-CP host_bone offsets directly from the primitive resource without touching `Canal._proximal_anchor_world`). Caller writes the dictionary back into the fields the solver reads.
+- **Fallbacks default to the bake-time anchor values.** A degenerate config (no source override, no resolvable orifice path) is a no-op rather than a snap to origin. Specifically: `Canal._refresh_anchors_through_source()` passes the existing `_proximal_anchor_world` / `_distal_anchor_world` as fallbacks; if the source returns those unchanged, the chain keeps its bake-time anchors.
+- **`Canal.get_orifices_root()` defaults to `get_parent()`** under the hero-root convention; explicit `orifices_root_path` override lets test scenes (and future asymmetric scene layouts) point elsewhere.
+- **Bake `_resolve_distal_anchor` warning fix:** the 5F.B.A refactor's first pass used `is_equal_approx(p_fallback)` to detect resolution failure, which fires spuriously when the orifice happens to sit at the spline endpoint (caught by 5F.B.A test 3 — bake-time warning leaked through the no-anchor-motion regression test). Replaced with direct `exit_node == null` check; preserves the original 5E semantics where the warning fires only when the user authored an exit path that didn't resolve.
+
+**Tests** — `test_5fbA_anchor_refresh.gd` 3/3:
+
+1. `anchors_follow_translated_skeleton` — hero root translates +0.2 m along +Y in 10 steps + 20-tick hold. Worst per-tick anchor field error vs the orifice nodes' `global_position` = **0.0e+00 m**; final chain endpoint particle err = **0.0e+00 m** prox / dist.
+2. `anchors_follow_rotated_skeleton` — hero root rotates 90° about +Y over 30 steps + 30-tick hold. Exit orifice ends at `(0, 0, -0.4)` (rotated off +X axis as expected for Godot's right-handed rotation). Worst anchor err = **0.0e+00 m**; endpoint particle err = **0.0e+00 m**.
+3. `static_skeleton_zero_drift` — regression of 5F.A test 1 through the new per-tick refresh path. Worst particle drift over 60 ticks = **8.94e-8 m** (under 1e-5 threshold; the small non-zero comes from the per-tick anchor resolution accumulating floating-point error vs the 5F.A test's direct field reads).
+
+Full tentacletech suite: **207/207** passing (was 204 + 3 new). All 27 test scripts exit rc=0. **`.so` size unchanged** — gdscript-only slice.
+
+**Spec divergences flagged:**
+
+- **(a) `refresh_anchors` is called every tick unconditionally** (when `centerline_source != null`). Skeleton + orifice resolution involves a parent walk + `get_node_or_null` lookup; for a 60 Hz chain with 5 canals on the hero that's ~300 lookups/sec. Acceptable for slice 5F.B.A; if profiling shows it hot, cache the resolved nodes on `Canal` and invalidate on `set_skeleton_path` / `set_orifices_root_path`.
+- **(b) Centerline particle REST positions are NOT refreshed**, only anchors. A canal whose CP bones translate/rotate has its anchors track but its interior rest segment lengths stay frozen at bake-time values. Sufficient because (i) anchors are hard-pinned in each iter, (ii) distance + bending constraints propagate the new anchor positions through the chain in 1-2 ticks, (iii) a hero arching their back doesn't change canal arc length, only orientation. If future anatomy needs stretchable canals (lordosis-driven elongation), revisit.
+- **(c) Spurious bake-time warning fixed.** The 5F.B.A refactor's first pass had `is_equal_approx(fallback)` checking, which has false positives when the orifice sits at the spline endpoint. Fixed before commit; the 5E tests retain identical semantics (no test asserts on warning emission, but the warning condition is preserved for production authoring).
+- **(d) `tick_force` test bypass still in place.** 5F.B.A reuses it for the same reason 5F.A did — no production activation signal exists yet. Removable when 5G lands a real `is_inactive()` body driven by EI / muscle / storage signals.
+
+**Deferred (5F.B.B):** `tunnel_state` per-tick CPU integration (§6.12.4 step 2 — spring `dynamic_wall_radius` toward `rest + plastic + Σ zones`, accumulate `damage`, optional `wall_radial_velocity`). C++ class (per the per-subsystem language rule) sibling to `CanalCenterlineSolver`. **Deferred (5F.B.C):** type-3 canal-wall contact wired to the same `tunnel_state` texture. **Deferred (5G):** `muscle[s, θ]` field + constriction-zone modulation + `muscular_curl_delta` per centerline particle. **Deferred (5F.A.1):** `CanalCenterlinePrimitiveSource` concrete (gated on body_field shipping `CanalCenterlinePrimitive`); will implement `refresh_anchors` by reading per-CP `host_bone × ctrl_local_offset`.
+
+**Cross-slice composition:** No C++ touched; `.so` not rebuilt. 5F.A solver API unchanged. 5E + 5F.A.0 + 5F.A tests all still pass (8 + 3 + 5 = 16 prior canal-related tests, plus 3 new). The `Canal.tick(dt)` body grew from "set_anchors → tick" to "refresh → set_anchors → tick"; no API broke for any existing caller.
+
 ---
 
 ## Phase 6 — Stimulus bus

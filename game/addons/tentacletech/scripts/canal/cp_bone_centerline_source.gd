@@ -44,3 +44,45 @@ func resolve_closed_terminal_anchor(
 	if p_canal_params != null:
 		return p_canal_params.terminal_position_in_host_frame
 	return p_fallback
+
+
+# Per-tick anchor refresh. Proximal = entry orifice Center (via shared
+# helper); distal = exit orifice Center (open) OR terminal pin
+# (closed). All resolution paths re-evaluate from current bone /
+# orifice transforms, so a moving host bone propagates into the chain
+# without re-running the bake.
+#
+# `canal` is expected to be a `Canal` node carrying:
+#   * `canal_parameters: CanalParameters`
+#   * `orifices_root: Node` (NodePath; resolved by caller). For 5F.B.A
+#     we ask `canal.get_orifices_root()` if defined, else fall back to
+#     the canal's parent (assumed hero-root convention).
+func refresh_anchors(
+		p_skeleton: Skeleton3D,
+		p_canal: Node,
+		p_fallback_proximal: Vector3,
+		p_fallback_distal: Vector3) -> Dictionary:
+	if p_canal == null:
+		return {"proximal": p_fallback_proximal, "distal": p_fallback_distal}
+	var params: CanalParameters = p_canal.canal_parameters
+	if params == null:
+		return {"proximal": p_fallback_proximal, "distal": p_fallback_distal}
+
+	# Orifices root: ask the canal first; fall back to its parent.
+	var orifices_root: Node = null
+	if p_canal.has_method("get_orifices_root"):
+		orifices_root = p_canal.call("get_orifices_root")
+	if orifices_root == null and p_canal is Node:
+		orifices_root = (p_canal as Node).get_parent()
+
+	var proximal := CanalAutoBaker.resolve_entry_orifice_anchor(
+			params, orifices_root, p_fallback_proximal)
+
+	var distal: Vector3
+	if params.closed_terminal:
+		distal = resolve_closed_terminal_anchor(params, p_skeleton, p_fallback_distal)
+	else:
+		distal = CanalAutoBaker.resolve_exit_orifice_anchor(
+				params, orifices_root, p_fallback_distal)
+
+	return {"proximal": proximal, "distal": distal}

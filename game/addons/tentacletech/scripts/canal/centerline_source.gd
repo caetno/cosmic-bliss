@@ -51,3 +51,35 @@ func resolve_closed_terminal_anchor(
 		_skeleton: Skeleton3D,
 		fallback: Vector3) -> Vector3:
 	return fallback
+
+
+## Per-tick anchor refresh (5F.B.A). Returns the current proximal +
+## distal anchor world positions for the canal. The solver writes these
+## into `Canal._proximal_anchor_world` / `_distal_anchor_world` each
+## tick so moving host bones propagate into the chain via `set_anchors`.
+##
+## Concretely:
+##   * Proximal: entry orifice's Center frame (via the shared
+##     `CanalAutoBaker.resolve_entry_orifice_anchor` helper).
+##   * Distal (open canal): exit orifice's Center frame (via
+##     `CanalAutoBaker.resolve_exit_orifice_anchor`).
+##   * Distal (closed terminal): the source's own
+##     `resolve_closed_terminal_anchor` — that's the only step that
+##     differs between concrete sources (CP bone vs primitive offset).
+##
+## `fallback_proximal` and `fallback_distal` are returned (or used as
+## the fallback chain) when no resolvable anchor exists. Callers
+## typically pass the chain's start/end rest positions so the chain
+## doesn't snap to (0, 0, 0) on a degenerate config.
+##
+## Returned dictionary keys: { "proximal": Vector3, "distal": Vector3 }.
+##
+## Base implementation returns the fallbacks as-is. Concrete sources
+## that don't override this method behave as if anchors never refresh
+## (matches 5F.A behavior — anchors stay at bake-time values).
+func refresh_anchors(
+		_skeleton: Skeleton3D,
+		_canal: Node,
+		fallback_proximal: Vector3,
+		fallback_distal: Vector3) -> Dictionary:
+	return {"proximal": fallback_proximal, "distal": fallback_distal}
