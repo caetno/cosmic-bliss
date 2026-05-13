@@ -28,6 +28,14 @@ void MarionetteCore::clear_bone_targets() {
 	bone_targets.clear();
 }
 
+void MarionetteCore::set_global_strength(float p_strength) {
+	global_strength = p_strength;
+}
+
+float MarionetteCore::get_global_strength() const {
+	return global_strength;
+}
+
 void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("hello"), &MarionetteCore::hello);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &MarionetteCore::tick);
@@ -36,6 +44,12 @@ void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_bone_target", "bone_name"),
 			&MarionetteCore::get_bone_target);
 	ClassDB::bind_method(D_METHOD("clear_bone_targets"), &MarionetteCore::clear_bone_targets);
+	ClassDB::bind_method(D_METHOD("set_global_strength", "strength"),
+			&MarionetteCore::set_global_strength);
+	ClassDB::bind_method(D_METHOD("get_global_strength"),
+			&MarionetteCore::get_global_strength);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "global_strength"),
+			"set_global_strength", "get_global_strength");
 }
 
 } // namespace godot

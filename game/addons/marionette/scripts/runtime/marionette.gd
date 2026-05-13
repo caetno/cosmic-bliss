@@ -316,7 +316,7 @@ func build_ragdoll() -> void:
 		if entry.archetype == BoneArchetype.Type.FIXED:
 			state = BoneStateProfile.State.KINEMATIC
 
-		var bone := _build_bone(skel, i, skel_bone_name, entry, fallback_mass)
+		var bone := _build_bone(skel, i, skel_bone_name, profile_name, entry, state, fallback_mass)
 		sim.add_child(bone)
 		_set_owner_for_editor(bone)
 		# Collider added as a separate child so the owner can be set after
@@ -328,7 +328,7 @@ func build_ragdoll() -> void:
 		bone.add_child(collider)
 		_set_owner_for_editor(collider)
 		_attach_collision_overlay(bone, collider)
-		_apply_joint_constraints(bone, entry)
+		_apply_joint_constraints(bone, entry, state)
 		bones_by_skel_index[i] = bone
 		if state != BoneStateProfile.State.KINEMATIC:
 			dynamic_bone_names.append(skel_bone_name)
@@ -802,7 +802,9 @@ func _build_bone(
 		skel: Skeleton3D,
 		skel_index: int,
 		skel_bone_name: StringName,
+		profile_name: StringName,
 		entry: BoneEntry,
+		state: int,
 		fallback_mass: float) -> MarionetteBone:
 	var bone := MarionetteBone.new()
 	bone.name = String(skel_bone_name)
@@ -821,6 +823,28 @@ func _build_bone(
 	# Total ragdoll mass lives on this Marionette node (single source — the
 	# old BoneProfile.total_mass duplicate was removed in slice 5).
 	bone.mass = total_mass * entry.mass_fraction if entry.mass_fraction > 0.0 else fallback_mass
+
+	# Slice 3b — populate the SPD authoring cache + state. State setter also
+	# flips `custom_integrator` so POWERED bones get our integrator and
+	# KINEMATIC / UNPOWERED get Jolt's default. Caching anatomical metadata
+	# on the bone avoids per-tick Resource `get()` round-trips through the
+	# BoneEntry script — see CLAUDE.md "Per-frame allocations" warning.
+	bone.anatomical_name = profile_name
+	bone.anatomical_basis = entry.anatomical_basis_in_bone_local()
+	bone.alpha = entry.alpha
+	bone.damping_ratio = entry.damping_ratio
+	bone.strength = 1.0
+	bone.archetype = int(entry.archetype)
+	bone.rest_anatomical_offset = entry.rest_anatomical_offset
+	bone.is_left_side = entry.is_left_side
+	bone.mirror_abd = entry.mirror_abd
+	# Wire MarionetteCore (the C++ anatomical target cache) so
+	# `_integrate_forces` reads targets without a scene-tree walk. Lazy-
+	# instantiated here so build_ragdoll is the single entry point — slider
+	# / composer pushes via `set_bone_target` already trigger _ensure_core
+	# but a fresh Build that hasn't seen a push needs the wiring too.
+	bone.set_core(_ensure_core())
+	bone.current_state = state
 
 	# Default to invisible in the editor so the 6DOF joint gizmo and capsule
 	# don't clutter the viewport (~80 bones at once is unreadable). The user
@@ -1016,7 +1040,7 @@ static func _collision_overlay_material() -> StandardMaterial3D:
 #    `_compute_rest_offset`); the offset combines with Jolt's X-axis
 #    decomposition in a way that mirrors the limit. SADDLE / BALL / SPINE_
 #    SEGMENT / CLAVICLE all read correctly without the flip.
-static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> void:
+static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry, _state: int = BoneStateProfile.State.POWERED) -> void:
 	# Anatomical ROM, shifted by `-rest_anatomical_offset` so canonical-anatomy
 	# bounds (rom_min/rom_max) map to joint-local Jolt limits. Joint identity
 	# is the rest pose orientation; canonical zero sits at joint angle
@@ -1046,22 +1070,16 @@ static func _apply_joint_constraints(bone: MarionetteBone, entry: BoneEntry) -> 
 		bone.set("joint_constraints/%s/angular_limit_lower" % axis, rad_to_deg(lower_rad))
 		bone.set("joint_constraints/%s/angular_limit_upper" % axis, rad_to_deg(upper_rad))
 
-		# 6DOF angular spring (slice 3). Per-axis: a positive stiffness
-		# enables the spring on that axis. Zero stiffness disables — Jolt
-		# skips the constraint, keeping joint solve cheap on locked-DOF
-		# axes (Hinge Y/Z, Saddle Y, etc.). Damping is meaningful only when
-		# the spring is enabled.
-		#
-		# Property paths are `angular_spring_{enabled,stiffness,damping}` —
-		# NOT `angular_limit_spring_*` despite the limit fields above using
-		# `angular_limit_*`. Empirically verified via get_property_list.
-		var k: float = entry.spring_stiffness[i]
-		var c: float = entry.spring_damping[i]
-		var spring_on: bool = k > 0.0
-		bone.set("joint_constraints/%s/angular_spring_enabled" % axis, spring_on)
-		if spring_on:
-			bone.set("joint_constraints/%s/angular_spring_stiffness" % axis, k)
-			bone.set("joint_constraints/%s/angular_spring_damping" % axis, c)
+		# 6DOF angular spring path. Retired for POWERED bones in P5 slice
+		# 3b — the SPD torque in MarionetteBone._integrate_forces is the
+		# replacement, and the joint spring would fight it at the integrator
+		# level. KINEMATIC / UNPOWERED bones never used the spring as a
+		# control surface either (KINEMATIC follows the skeleton; UNPOWERED
+		# is intentionally limp). So we just leave the spring disabled on
+		# every axis. The spring_stiffness / spring_damping fields on
+		# BoneEntry stay around for the gizmo / inspector to render the
+		# pre-SPD tuning history — they no longer reach Jolt.
+		bone.set("joint_constraints/%s/angular_spring_enabled" % axis, false)
 
 		# Lock linear motion across the joint — bones articulate, they don't
 		# slide. 0 is unit-agnostic (the rad-as-deg quirk doesn't matter for

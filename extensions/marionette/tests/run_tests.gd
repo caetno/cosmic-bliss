@@ -15,6 +15,10 @@ func _init() -> void:
 		_test_spd_quaternion_to_axis_angle,
 		_test_spd_compute_torque,
 		_test_spd_compute_gains,
+		_test_marionette_bone_spd_zero_at_target,
+		_test_marionette_bone_spd_nonzero_on_error,
+		_test_marionette_bone_spd_sign_flip,
+		_test_marionette_bone_state_flips_custom_integrator,
 		_test_signed_axis_to_vector3,
 		_test_signed_axis_sign_and_index,
 		_test_signed_axis_inverse,
@@ -333,6 +337,128 @@ func _test_spd_compute_gains() -> bool:
 				"α=10 ζ=1 m=1 expected (36,12), got %s" % str(g3))
 
 	return _ok("test_spd_compute_gains")
+
+
+# ---------- MarionetteBone SPD (P5 slice 3b) ----------
+# Probes compute_spd_torque_for_test directly so the unit tests don't need a
+# live SceneTree / physics step. The same code path runs in _integrate_forces;
+# the test seam exists because spinning up a PhysicalBoneSimulator3D headless
+# (with a PhysicsDirectBodyState3D pre-populated) is harder than the value
+# the test adds.
+
+const _SPD_TORQUE_EPS := 1.0e-4
+
+
+func _make_spd_bone() -> MarionetteBone:
+	# Powered, BALL-archetype, left-side, identity anatomical basis, alpha/damping
+	# from the SPD gains test for cross-reference.
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.current_state = MarionetteBone.STATE_POWERED
+	bone.alpha = 4.0
+	bone.damping_ratio = 1.0
+	bone.strength = 1.0
+	bone.archetype = int(BoneArchetype.Type.BALL)
+	bone.is_left_side = true
+	bone.mirror_abd = false
+	bone.rest_anatomical_offset = Vector3.ZERO
+	bone.anatomical_basis = Basis.IDENTITY
+	return bone
+
+
+func _test_marionette_bone_spd_zero_at_target() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_spd_zero_at_target", "MarionetteBone not registered")
+	var bone := _make_spd_bone()
+	# Current rotation matches target → axis-angle error is zero → torque zero
+	# (omega also zero). 30° flex around X for both current and target.
+	var thirty := deg_to_rad(30.0)
+	var anatomical := Vector3(thirty, 0.0, 0.0)
+	var current := Quaternion(Vector3(1, 0, 0), thirty)
+	var torque: Vector3 = bone.compute_spd_torque_for_test(
+			current, anatomical, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 1.0)
+	bone.free()
+	if torque.length() > _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_spd_zero_at_target",
+				"torque=%s expected ~ZERO" % str(torque))
+	return _ok("marionette_bone_spd_zero_at_target")
+
+
+func _test_marionette_bone_spd_nonzero_on_error() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_spd_nonzero_on_error", "MarionetteBone not registered")
+	var bone := _make_spd_bone()
+	# 45° flex error around X with identity current. SPD should fire +X torque.
+	# Identity parent basis → world torque equals parent-local torque equals
+	# pure +X.
+	var target := Vector3(deg_to_rad(45.0), 0.0, 0.0)
+	var torque: Vector3 = bone.compute_spd_torque_for_test(
+			Quaternion.IDENTITY, target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 1.0)
+	bone.free()
+	if torque.length() < _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_spd_nonzero_on_error",
+				"torque=%s expected magnitude > eps" % str(torque))
+	if torque.x <= 0.0:
+		return _fail("marionette_bone_spd_nonzero_on_error",
+				"torque.x=%f expected > 0 for +flex target" % torque.x)
+	# Cross-axis bleed: Y and Z should be ~0 for a pure-X error on an identity
+	# basis. Catches an accidental basis-swap regression.
+	if absf(torque.y) > _SPD_TORQUE_EPS or absf(torque.z) > _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_spd_nonzero_on_error",
+				"cross-axis bleed: %s" % str(torque))
+	return _ok("marionette_bone_spd_nonzero_on_error")
+
+
+func _test_marionette_bone_spd_sign_flip() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_spd_sign_flip", "MarionetteBone not registered")
+	var bone := _make_spd_bone()
+	var pos_target := Vector3(deg_to_rad(45.0), 0.0, 0.0)
+	var neg_target := Vector3(-deg_to_rad(45.0), 0.0, 0.0)
+	var tau_pos: Vector3 = bone.compute_spd_torque_for_test(
+			Quaternion.IDENTITY, pos_target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 1.0)
+	var tau_neg: Vector3 = bone.compute_spd_torque_for_test(
+			Quaternion.IDENTITY, neg_target, Vector3.ZERO, Basis.IDENTITY,
+			1.0, 1.0 / 60.0, 1.0)
+	bone.free()
+	if tau_pos.x <= 0.0 or tau_neg.x >= 0.0:
+		return _fail("marionette_bone_spd_sign_flip",
+				"+target.x=%f, -target.x=%f; expected opposite signs" %
+				[tau_pos.x, tau_neg.x])
+	# Magnitudes should match within float epsilon (anti-symmetry of SPD).
+	if absf(tau_pos.x + tau_neg.x) > _SPD_TORQUE_EPS:
+		return _fail("marionette_bone_spd_sign_flip",
+				"asymmetric magnitudes: +%f / %f" % [tau_pos.x, tau_neg.x])
+	return _ok("marionette_bone_spd_sign_flip")
+
+
+func _test_marionette_bone_state_flips_custom_integrator() -> bool:
+	# State setter must drive custom_integrator: POWERED → true, others →
+	# false. Without this, KINEMATIC bones would have Jolt's gravity disabled
+	# (silent breakage), and UNPOWERED bones would lose the default integrator.
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_bone_state_flips_custom_integrator",
+				"MarionetteBone not registered")
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.current_state = MarionetteBone.STATE_POWERED
+	if not bone.custom_integrator:
+		bone.free()
+		return _fail("marionette_bone_state_flips_custom_integrator",
+				"POWERED expected custom_integrator=true")
+	bone.current_state = MarionetteBone.STATE_KINEMATIC
+	if bone.custom_integrator:
+		bone.free()
+		return _fail("marionette_bone_state_flips_custom_integrator",
+				"KINEMATIC expected custom_integrator=false")
+	bone.current_state = MarionetteBone.STATE_UNPOWERED
+	if bone.custom_integrator:
+		bone.free()
+		return _fail("marionette_bone_state_flips_custom_integrator",
+				"UNPOWERED expected custom_integrator=false")
+	bone.free()
+	return _ok("marionette_bone_state_flips_custom_integrator")
 
 
 # ---------- SignedAxis ----------

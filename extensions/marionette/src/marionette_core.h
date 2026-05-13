@@ -33,11 +33,18 @@ public:
 	Vector3 get_bone_target(const StringName &p_bone_name) const;
 	void clear_bone_targets();
 
+	// Global strength multiplier. Per-bone SPD gain scales by
+	// `bone.strength * core.global_strength`. Anticipated by P5.4 but lives
+	// here from slice 3b so the per-tick SPD path has a single read.
+	void set_global_strength(float p_strength);
+	float get_global_strength() const;
+
 protected:
 	static void _bind_methods();
 
 private:
 	HashMap<StringName, Vector3> bone_targets;
+	float global_strength = 1.0f;
 };
 
 } // namespace godot
