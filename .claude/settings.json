@@ -1,0 +1,51 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./tools/build.sh tentacletech)",
+      "Bash(./tools/build.sh marionette)",
+      "Bash(./tools/build.sh tenticles)",
+      "Bash(./tools/build.sh body_field)",
+      "Bash(./tools/build_all.sh)",
+      "Bash(git -C * log:*)",
+      "Bash(git -C * status)",
+      "Bash(git -C * status:*)",
+      "Bash(git -C * diff:*)",
+      "Bash(git -C * show:*)",
+      "Bash(git -C * branch:*)",
+      "Bash(git -C * rev-parse:*)",
+      "Bash(git -C * ls-files:*)",
+      "Bash(git -C * blame:*)",
+      "Bash(bash $CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh)",
+      "Edit(.claude/inbox/*)",
+      "Write(.claude/inbox/*)",
+      "Read(.claude/inbox/*)",
+      "Edit(extensions/tentacletech/**)",
+      "Write(extensions/tentacletech/**)",
+      "Edit(extensions/marionette/**)",
+      "Write(extensions/marionette/**)",
+      "Edit(extensions/tenticles/**)",
+      "Write(extensions/tenticles/**)",
+      "Edit(extensions/body_field/**)",
+      "Write(extensions/body_field/**)",
+      "Edit(game/tests/tentacletech/**)",
+      "Write(game/tests/tentacletech/**)",
+      "Edit(game/tests/marionette/**)",
+      "Write(game/tests/marionette/**)",
+      "Edit(game/tests/tenticles/**)",
+      "Write(game/tests/tenticles/**)",
+      "Edit(game/tests/body_field/**)",
+      "Write(game/tests/body_field/**)",
+      "Edit(docs/Cosmic_Bliss_Update_*.md)",
+      "Write(docs/Cosmic_Bliss_Update_*.md)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\"" }
+        ]
+      }
+    ]
+  }
+}
