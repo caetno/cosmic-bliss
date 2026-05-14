@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 #include <godot_cpp/templates/hash_set.hpp>
+#include <godot_cpp/variant/basis.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/vector3.hpp>
@@ -104,6 +105,35 @@ public:
 	void register_bone(MarionetteBone *p_bone);
 	void unregister_bone(MarionetteBone *p_bone);
 
+	// Mar-I6 — parent-basis snapshot. `_integrate_forces` callbacks must not
+	// query `Node3D::get_global_transform()` (per the project "Never" list);
+	// the live read introduced phantom damping coupling that scaled with SPD
+	// stiffness, biasing exactly the high-tension regime targeted by the
+	// kasumi ragdoll-under-tension scenario. `snapshot_parent_bases()` runs
+	// once per physics frame (in `_physics_process`, before
+	// `step_strength_ramps`); the SPD path reads cached values via
+	// `get_parent_basis_snapshot`. Root / orphan bones absent from the map →
+	// caller's fallback (typically the bone's own world basis).
+	void snapshot_parent_bases();
+	Basis get_parent_basis_snapshot(MarionetteBone *p_bone, const Basis &p_fallback) const;
+
+	// Test seam — bindable variant for unit tests. Takes Object* (binds
+	// cleanly through GDScript) and casts internally. Production callers
+	// should use the typed overload above.
+	Basis get_parent_basis_snapshot_bound(Object *p_bone, const Basis &p_fallback) const;
+	bool has_parent_basis_snapshot(Object *p_bone) const;
+	void unregister_bone_bound(Object *p_bone);
+
+	// Mar-I6 test seam — directly populate the snapshot for a registered
+	// bone, bypassing the Node3D parent-chain walk. Script-context SceneTree
+	// (gdscript `extends SceneTree`) doesn't fire NOTIFICATION_ENTER_TREE
+	// before `_init` returns, so `get_global_transform()` on a freshly
+	// add_child'd Node3D reads stale identity. This seam lets cache-contract
+	// tests (returns-cached, isolation-from-mutation, unregister-clears) run
+	// without needing a live physics frame. The integration with the real
+	// `get_global_transform()` is exercised by the in-engine ragdoll demo.
+	void set_parent_basis_snapshot_for_test(Object *p_bone, const Basis &p_basis);
+
 	// Slice 5 — `is_root` cached on the bone, but the core also needs the
 	// pointer for diagnostics / future hip-anchored tether work. Setting null
 	// clears the cache (e.g., teardown). `get_root_bone` returns Object* so
@@ -130,6 +160,12 @@ private:
 
 	HashSet<MarionetteBone *> registered_bones;
 	MarionetteBone *root_bone = nullptr;
+
+	// Mar-I6 — populated once per physics frame in `snapshot_parent_bases`.
+	// Absent entries (root / orphan / cast-failure) → caller's fallback in
+	// `get_parent_basis_snapshot`. Cleared per-bone on `unregister_bone` to
+	// avoid dangling pointers after teardown.
+	HashMap<MarionetteBone *, Basis> parent_basis_snapshots;
 
 	float gravity_scale = 1.0f;
 	float hip_upward_nudge = 0.0f; // Newtons, world +Y.

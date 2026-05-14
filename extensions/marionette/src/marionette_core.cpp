@@ -1,5 +1,6 @@
 #include "marionette_core.h"
 
+#include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 
@@ -22,6 +23,13 @@ void MarionetteCore::_ready() {
 }
 
 void MarionetteCore::_physics_process(double p_delta) {
+	// Mar-I6 — refresh the parent-basis cache BEFORE the SPD substeps run.
+	// `MarionetteBone::_integrate_forces` reads from this cache instead of
+	// live-querying `Node3D::get_global_transform()` (which inside the
+	// integrator callback couples a phantom damping term to SPD stiffness).
+	// Frame-level snapshot per the audit doc; per-substep granularity is a
+	// follow-up if visible quality requires.
+	snapshot_parent_bases();
 	// Slice 6 — march effective strengths toward requested at
 	// 1.0 / strength_ramp_duration per second on increases; drops are
 	// already snapped at set-time.
@@ -212,9 +220,76 @@ void MarionetteCore::register_bone(MarionetteBone *p_bone) {
 
 void MarionetteCore::unregister_bone(MarionetteBone *p_bone) {
 	registered_bones.erase(p_bone);
+	// Mar-I6 — drop any cached parent basis under this pointer so the entry
+	// doesn't outlive the bone. Scene teardown frees children in arbitrary
+	// order; without this erase a freed bone's pointer could linger as a
+	// HashMap key until the next `snapshot_parent_bases` rebuild.
+	parent_basis_snapshots.erase(p_bone);
 	if (root_bone == p_bone) {
 		root_bone = nullptr;
 	}
+}
+
+void MarionetteCore::snapshot_parent_bases() {
+	// Mar-I6 — rebuild every frame so dropped / re-parented bones can't keep
+	// stale entries. Cheap: ~84 bones, one hash lookup + one Basis copy each.
+	// `get_parent_node_3d()` walks the scene-tree parent chain to the first
+	// Node3D ancestor (matching the live read this replaces, so the math
+	// space is identical).
+	parent_basis_snapshots.clear();
+	for (MarionetteBone *bone : registered_bones) {
+		if (bone == nullptr) {
+			continue;
+		}
+		Node3D *parent_node = bone->get_parent_node_3d();
+		if (parent_node == nullptr) {
+			// Root / orphan case — leave the entry absent; readers fall back
+			// to their caller-supplied basis (the bone's own world basis in
+			// the SPD path).
+			continue;
+		}
+		parent_basis_snapshots[bone] = parent_node->get_global_transform().basis;
+	}
+}
+
+Basis MarionetteCore::get_parent_basis_snapshot(MarionetteBone *p_bone, const Basis &p_fallback) const {
+	const HashMap<MarionetteBone *, Basis>::ConstIterator it = parent_basis_snapshots.find(p_bone);
+	if (it == parent_basis_snapshots.end()) {
+		return p_fallback;
+	}
+	return it->value;
+}
+
+void MarionetteCore::unregister_bone_bound(Object *p_bone) {
+	MarionetteBone *bone_ptr = Object::cast_to<MarionetteBone>(p_bone);
+	if (bone_ptr == nullptr) {
+		return;
+	}
+	unregister_bone(bone_ptr);
+}
+
+Basis MarionetteCore::get_parent_basis_snapshot_bound(Object *p_bone, const Basis &p_fallback) const {
+	MarionetteBone *bone_ptr = Object::cast_to<MarionetteBone>(p_bone);
+	if (bone_ptr == nullptr) {
+		return p_fallback;
+	}
+	return get_parent_basis_snapshot(bone_ptr, p_fallback);
+}
+
+bool MarionetteCore::has_parent_basis_snapshot(Object *p_bone) const {
+	MarionetteBone *bone_ptr = Object::cast_to<MarionetteBone>(p_bone);
+	if (bone_ptr == nullptr) {
+		return false;
+	}
+	return parent_basis_snapshots.find(bone_ptr) != parent_basis_snapshots.end();
+}
+
+void MarionetteCore::set_parent_basis_snapshot_for_test(Object *p_bone, const Basis &p_basis) {
+	MarionetteBone *bone_ptr = Object::cast_to<MarionetteBone>(p_bone);
+	if (bone_ptr == nullptr) {
+		return;
+	}
+	parent_basis_snapshots[bone_ptr] = p_basis;
 }
 
 void MarionetteCore::set_root_bone(MarionetteBone *p_bone) {
@@ -294,6 +369,21 @@ void MarionetteCore::_bind_methods() {
 			&MarionetteCore::get_requested_global_strength);
 	ClassDB::bind_method(D_METHOD("step_strength_ramps", "delta"),
 			&MarionetteCore::step_strength_ramps);
+
+	// Mar-I6 — surfaced for tests; production callers should not invoke
+	// `snapshot_parent_bases` manually (it runs from `_physics_process`).
+	// `get_parent_basis_snapshot` is called from C++ `_integrate_forces`,
+	// but binding it lets unit tests assert the cache contents.
+	ClassDB::bind_method(D_METHOD("snapshot_parent_bases"),
+			&MarionetteCore::snapshot_parent_bases);
+	ClassDB::bind_method(D_METHOD("get_parent_basis_snapshot", "bone", "fallback"),
+			&MarionetteCore::get_parent_basis_snapshot_bound);
+	ClassDB::bind_method(D_METHOD("has_parent_basis_snapshot", "bone"),
+			&MarionetteCore::has_parent_basis_snapshot);
+	ClassDB::bind_method(D_METHOD("unregister_bone", "bone"),
+			&MarionetteCore::unregister_bone_bound);
+	ClassDB::bind_method(D_METHOD("set_parent_basis_snapshot_for_test", "bone", "basis"),
+			&MarionetteCore::set_parent_basis_snapshot_for_test);
 }
 
 } // namespace godot

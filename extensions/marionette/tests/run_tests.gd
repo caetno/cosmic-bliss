@@ -24,6 +24,10 @@ func _init() -> void:
 		_test_marionette_bone_spd_zero_at_zero_strength,
 		_test_marionette_gravity_scale_propagates_to_bones,
 		_test_marionette_hip_nudge_only_on_root,
+		_test_marionette_core_parent_basis_snapshot_returns_cached_value,
+		_test_marionette_core_parent_basis_snapshot_isolates_from_live_mutation,
+		_test_marionette_core_parent_basis_snapshot_root_fallback,
+		_test_marionette_core_parent_basis_snapshot_unregister_clears_entry,
 		_test_marionette_global_strength_factor_smooth,
 		_test_marionette_strength_ramp_smooths_increase,
 		_test_marionette_strength_drop_is_instantaneous,
@@ -625,6 +629,159 @@ func _test_marionette_hip_nudge_only_on_root() -> bool:
 		return _fail("marionette_hip_nudge_only_on_root", "non-root bone defaulted to is_root=true")
 	root.free(); arm.free(); core.free()
 	return _ok("marionette_hip_nudge_only_on_root")
+
+
+# Mar-I6 — parent-basis snapshot replaces a live `get_global_transform()` read
+# inside `_integrate_forces`. The four tests below pin the cache semantics
+# (cached value returned, isolated from live mutation, root fallback when no
+# parent Node3D, entry cleared on unregister) so future refactors can't drop
+# the contract silently. Audit ref: 05-14-02 SHARP Mar-I6.
+#
+# Test-harness note: `extends SceneTree` runs `_init` before the SceneTree
+# fires NOTIFICATION_ENTER_TREE on freshly-added children. As a result,
+# `Node3D::get_global_transform()` reads stale identity in this context even
+# after `force_update_transform()` — `is_inside_tree()` returns false on
+# every Node3D added via `self.root.add_child(...)` during `_init`. We
+# therefore exercise the cache contract through the
+# `set_parent_basis_snapshot_for_test` seam (populates the same HashMap
+# `snapshot_parent_bases` writes to). The live `get_global_transform()` path
+# is covered by the in-engine ragdoll demo where the SceneTree is actually
+# running.
+func _test_marionette_core_parent_basis_snapshot_returns_cached_value() -> bool:
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_core_parent_basis_snapshot_returns_cached_value",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.set_core(core)
+	# Known non-identity basis (45° around +Y) — the cache must round-trip it
+	# byte-for-byte; if `get_parent_basis_snapshot` returns the fallback the
+	# test fails because identity != expected.
+	var expected_basis: Basis = Basis(Vector3(0, 1, 0), deg_to_rad(45.0))
+	core.call(&"set_parent_basis_snapshot_for_test", bone, expected_basis)
+	var got: Basis = core.call(&"get_parent_basis_snapshot", bone, Basis())
+	var ok: bool = true
+	for r in range(3):
+		for c in range(3):
+			if absf(got[r][c] - expected_basis[r][c]) > 1.0e-5:
+				ok = false
+	bone.free(); core.free()
+	if not ok:
+		return _fail("marionette_core_parent_basis_snapshot_returns_cached_value",
+				"snapshot returned wrong basis; got=%s expected=%s" % [str(got), str(expected_basis)])
+	return _ok("marionette_core_parent_basis_snapshot_returns_cached_value")
+
+
+func _test_marionette_core_parent_basis_snapshot_isolates_from_live_mutation() -> bool:
+	# Mar-I6 — the whole point of the snapshot is that the cached value is
+	# stable until the NEXT snapshot pass overwrites it. We can't mutate a
+	# live Node3D's transform in this test context (see harness note), so we
+	# simulate the two passes by writing two distinct values through the
+	# test seam: first value must persist verbatim, second must replace it.
+	# Same code path the production `snapshot_parent_bases` writes through.
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_core_parent_basis_snapshot_isolates_from_live_mutation",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.set_core(core)
+	var pre_basis: Basis = Basis(Vector3(0, 1, 0), deg_to_rad(30.0))
+	var post_basis: Basis = Basis(Vector3(1, 0, 0), deg_to_rad(80.0))
+	# Pass 1: write pre_basis. Read must return pre_basis even after we
+	# subsequently mutate an unrelated value (verifies the HashMap key is
+	# stable per-bone, no global drift).
+	core.call(&"set_parent_basis_snapshot_for_test", bone, pre_basis)
+	# Intermediate read — value must equal pre_basis exactly.
+	var got1: Basis = core.call(&"get_parent_basis_snapshot", bone, Basis())
+	var matches_pre: bool = true
+	for r in range(3):
+		for c in range(3):
+			if absf(got1[r][c] - pre_basis[r][c]) > 1.0e-5:
+				matches_pre = false
+	# Pass 2: simulate the next-frame snapshot writing a new basis. Read
+	# must now equal post_basis, not pre_basis.
+	core.call(&"set_parent_basis_snapshot_for_test", bone, post_basis)
+	var got2: Basis = core.call(&"get_parent_basis_snapshot", bone, Basis())
+	var matches_post: bool = true
+	for r in range(3):
+		for c in range(3):
+			if absf(got2[r][c] - post_basis[r][c]) > 1.0e-5:
+				matches_post = false
+	bone.free(); core.free()
+	if not matches_pre:
+		return _fail("marionette_core_parent_basis_snapshot_isolates_from_live_mutation",
+				"first cached basis did not round-trip")
+	if not matches_post:
+		return _fail("marionette_core_parent_basis_snapshot_isolates_from_live_mutation",
+				"second pass did not overwrite the cache")
+	return _ok("marionette_core_parent_basis_snapshot_isolates_from_live_mutation")
+
+
+func _test_marionette_core_parent_basis_snapshot_root_fallback() -> bool:
+	# Mar-I6 — bones absent from the cache (root case at runtime: parent has
+	# no Node3D, so `snapshot_parent_bases` skips the entry) must hit the
+	# caller's fallback. The SPD path passes its own world basis here, which
+	# keeps the error quaternion well-defined.
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_core_parent_basis_snapshot_root_fallback",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var orphan: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	orphan.set_core(core)
+	# Never write a cache entry; reader should fall back to the caller value.
+	if core.call(&"has_parent_basis_snapshot", orphan):
+		orphan.free(); core.free()
+		return _fail("marionette_core_parent_basis_snapshot_root_fallback",
+				"orphan bone unexpectedly has a cached snapshot")
+	var fallback: Basis = Basis(Vector3(0, 0, 1), deg_to_rad(17.0))
+	var got: Basis = core.call(&"get_parent_basis_snapshot", orphan, fallback)
+	var ok: bool = true
+	for r in range(3):
+		for c in range(3):
+			if absf(got[r][c] - fallback[r][c]) > 1.0e-5:
+				ok = false
+	orphan.free(); core.free()
+	if not ok:
+		return _fail("marionette_core_parent_basis_snapshot_root_fallback",
+				"absent-key path did not return caller fallback")
+	return _ok("marionette_core_parent_basis_snapshot_root_fallback")
+
+
+func _test_marionette_core_parent_basis_snapshot_unregister_clears_entry() -> bool:
+	# Mar-I6 — `unregister_bone` must erase the cache entry so a freed bone's
+	# pointer can't linger as a HashMap key. Scene teardown frees children in
+	# arbitrary order; without this erase the next snapshot could rebuild
+	# the same pointer with stale data (or worse, the slot could be reused
+	# by a different allocation).
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("marionette_core_parent_basis_snapshot_unregister_clears_entry",
+				"GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.set_core(core)
+	core.call(&"set_parent_basis_snapshot_for_test", bone, Basis(Vector3(0, 1, 0), deg_to_rad(15.0)))
+	if not core.call(&"has_parent_basis_snapshot", bone):
+		bone.free(); core.free()
+		return _fail("marionette_core_parent_basis_snapshot_unregister_clears_entry",
+				"seam write did not populate the cache")
+	# Unregister — cache entry must be gone.
+	core.call(&"unregister_bone", bone)
+	if core.call(&"has_parent_basis_snapshot", bone):
+		bone.free(); core.free()
+		return _fail("marionette_core_parent_basis_snapshot_unregister_clears_entry",
+				"cache entry persisted after unregister_bone")
+	var fallback: Basis = Basis()
+	var got: Basis = core.call(&"get_parent_basis_snapshot", bone, fallback)
+	var ok: bool = true
+	for r in range(3):
+		for c in range(3):
+			if absf(got[r][c] - fallback[r][c]) > 1.0e-5:
+				ok = false
+	bone.free(); core.free()
+	if not ok:
+		return _fail("marionette_core_parent_basis_snapshot_unregister_clears_entry",
+				"post-unregister read did not return caller fallback")
+	return _ok("marionette_core_parent_basis_snapshot_unregister_clears_entry")
 
 
 func _test_marionette_global_strength_factor_smooth() -> bool:

@@ -237,21 +237,33 @@ void MarionetteBone::_integrate_forces(PhysicsDirectBodyState3D *p_state) {
 	// body's authoritative world transform for this tick.
 	const Transform3D this_world = p_state->get_transform();
 
-	// Parent body's world basis. For the hip / root case, fall back to the
-	// body's own basis so error_quaternion still has a valid frame; later
-	// slices add the world-anchored hip tether so this path retires.
-	Basis parent_world_basis = this_world.basis;
-	Node3D *parent_node = Object::cast_to<Node3D>(get_parent_node_3d());
-	if (parent_node != nullptr) {
-		parent_world_basis = parent_node->get_global_transform().basis;
-	}
+	// Resolve the typed core pointer up front. We need it for both the
+	// parent-basis snapshot lookup (Mar-I6) and the bone-target cache read
+	// below; do the cast once. The raw `core` Object* was already null-checked
+	// above, but a wrong-type assignment still produces a null cast — fall
+	// back to identity-frame behavior in that edge case.
+	MarionetteCore *core_ptr = Object::cast_to<MarionetteCore>(core);
+
+	// Mar-I6 — parent basis sourced from MarionetteCore's per-frame snapshot
+	// (taken in MarionetteCore::_physics_process before SPD substeps), not a
+	// live `Node3D::get_global_transform()` read inside the integrator. The
+	// live read introduced phantom damping coupling that scales with SPD
+	// stiffness; the kasumi ragdoll-under-tension scenario sits exactly in
+	// that regime. The fallback (this_world.basis) preserves the prior root /
+	// orphan behavior — error_quaternion stays well-defined when no parent
+	// Node3D exists, and later slices add the world-anchored hip tether so
+	// the root case retires entirely. If the core cast failed (wrong-type
+	// assignment), fall back to identity-frame behavior — same as the
+	// pre-Mar-I6 code path's `parent_node == nullptr` branch.
+	const Basis parent_world_basis = (core_ptr != nullptr)
+			? core_ptr->get_parent_basis_snapshot(this, this_world.basis)
+			: this_world.basis;
 
 	// Current relative rotation, parent-local frame.
 	const Quaternion current_rel_parent =
 			Quaternion(parent_world_basis.transposed() * this_world.basis);
 
 	// Read target from the C++ cache. ZERO sentinel → identity target.
-	MarionetteCore *core_ptr = Object::cast_to<MarionetteCore>(core);
 	Vector3 anatomical_target;
 	if (core_ptr != nullptr) {
 		anatomical_target = core_ptr->get_bone_target(anatomical_name);
