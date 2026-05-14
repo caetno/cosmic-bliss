@@ -1434,12 +1434,54 @@ A canal with no active `EntryInteraction`, no storage chain content, and no Reve
 
 - **`wall_response_rate * dt < 1`** for first-order integration stability. Defensively clamped to `min(rate, 1/dt - ε)` per integration loop. See §14 gotchas: a designer cranking `wall_response_rate > 60Hz` with default 60Hz physics step will see oscillation.
 - **Pumping resonance.** A tentacle pumping at `~1 / wall_response_rate` excites wall ringing — discoverable gameplay phenomenon analogous to the §1.2 rib resonance. With `use_second_order_wall = true` it becomes pronounced. Flagged in `docs/Gameplay_Mechanics.md` as a hidden phenomenon.
-- **Centerline bend produces wall asymmetry but not host-bone movement.** The §6.3 reaction-on-host-bone closure operates only at rim particle loops. A canal interior bend transmits axial force to the host body through the CP bone rigging (CP bones are rigidly parented to host bones), but does NOT add an extra `body_apply_impulse` beyond what the centerline's spring-back to CP rest already implies. If gameplay needs canal-interior force feedback distinct from the rim's, add it as a separate pass — currently not in scope.
+- **Centerline bend produces wall asymmetry AND host-bone movement.** Wall deformation under tentacle pressure feeds a per-substep reaction pass that emits `body_apply_impulse` on the host bones rigidly parenting each canal cross-section's CP bone. See §6.12.12 for the full pass; see `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §6 for the design rationale and the scenario it unblocks. The pass excludes the first `N_rim` cross-sections (default 1) to avoid double-counting with §6.3 rim closure.
 - **Centerline curvature math** uses `canal.centerline.curvature_at(s)` — finite-difference on three adjacent particle positions. Returns scalar magnitude + signed bend axis.
 
 #### 6.12.11 Sacs and two-opening cavities
 
 The Canal primitive handles closed-end sacs (uterus, bladder) via `closed_terminal = true` — distal centerline particle hard-pinned at a `<Canal>_TerminalPin` bone instead of anchored to an exit orifice. Two-opening sacs (stomach) use the same Canal primitive with both `entry_orifice_path` (cardia) and `exit_orifice_path` (pylorus) plus an aggressively variable `rest_radius_profile` to capture the J-shape. **No separate `Cavity` primitive** — deferred until gameplay surfaces a demand the Canal doesn't satisfy.
+
+#### 6.12.12 Canal-interior reaction pass
+
+The canal-interior reaction pass closes the third-law loop between tentacle pressure on canal walls and ragdoll host-bone motion. It exists because the named acceptance scenario in `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` — "ragdoll with muscle tension holds a pose while constrained and penetrated" — demands that a tentacle pushing on canal walls from inside actually shoves the body around, which the original §6.12.10 / §14 decision excluded.
+
+The pass runs once per substep, after §6.12.4 step 2g wall integration (5F.B.B), after §6.12 type-3 canal-wall contact (5F.B.C) has projected tentacle particles against walls, and before §8 bus event emission.
+
+**Per substep, for each active canal:**
+
+```
+for each cross-section s in [N_rim, sections_count):
+    # Wall reaction: negated wall stiffness × displacement, summed over θ.
+    reaction[s] = vec3(0)
+    for θ in canal_theta_samples[s]:
+        reaction[s] -= wall_response_stiffness *
+                       displacement[s, θ] *
+                       rest_outward_normal[s, θ]
+    if length(reaction[s]) < ε: continue
+
+    # Host bone: CP bone's rigid parent. Single dominant bone per
+    # cross-section by construction (no skin-weight basket).
+    host_bone = canal.cross_section[s].CP_bone.rigid_parent_host_bone
+    bone_impulse[host_bone] += reaction[s] * dt
+    application_origin[host_bone] += canal.cross_section[s].world_position * length(reaction[s])
+    application_weight[host_bone] += length(reaction[s])
+
+# Apply once per host bone, at the load-weighted centroid of its
+# contributing cross-sections.
+for host_bone, impulse in bone_impulse:
+    application_point = application_origin[host_bone] / application_weight[host_bone]
+    PhysicsServer3D.body_apply_impulse(host_bone.body_rid, impulse, application_point)
+```
+
+**Host-bone resolution rule.** A canal interior is skinned to CP bones, and CP bones are rigidly parented to host bones (§6.12.2). The skin-weight basket question that exists for outer-body surfaces does not exist here — each cross-section has exactly one CP bone and exactly one rigid host-bone parent. Resolution is cached at `Canal` bake time as `canal.cross_section[s].host_bone`, never recomputed per-substep.
+
+**`N_rim` rim-overlap exclusion.** The first `N_rim` cross-sections (default 1, configurable per orifice via `OrificeProfile.canal_reaction_rim_exclusion`) are skipped — those cross-sections sit at the canal entry plane and their force contribution is already covered by the §6.3 rim closure. The two passes are disjoint by construction: §10.5 capsule suppression covers outer-body vs rim overlap, `N_rim` covers rim vs canal-interior overlap. Tuning `N_rim` is calibration, not design — raise it if a particular orifice's rim closure axially extends further into the canal than one cross-section's worth.
+
+**Cost.** Per substep: one inner loop over (`sections_count - N_rim`) × `theta_samples` per active canal (typically ~16 × 8 = 128 vec3 multiply-adds), plus one `body_apply_impulse` per contributing host bone (typically 1–3). Sub-millisecond at gameplay densities. The §6.12.9 hierarchical-activation rule already gates this: inactive canals skip the pass entirely.
+
+**Stability.** The pass introduces no new dynamics. Wall displacement is already integrated by §6.12.4 step 2g; the pass reads that state, negates it, and dispatches as an impulse. The conditional-stability constraint `wall_response_rate * dt < 1` from §6.12.10 still gates the underlying integration. The reaction magnitude is bounded by the wall displacement bound, which is bounded by the §6.12.4 clamp on `current_radius`. No new failure mode.
+
+**Composition with Marionette SPD.** The impulse arrives at the host bone as a Jolt-side force perturbation; Marionette's SPD pose-tracking inner loop (`extensions/marionette/src/marionette_bone.cpp:218-280`) sees it as a tracking error and applies restoring torque scaled by per-bone × global tension. At high tension, the body resists; at low tension, the body yields. This is the soft-physics closure the scenario tests.
 
 ---
 
@@ -2626,7 +2668,7 @@ Previously parked as a placeholder. Opened explicitly because (a) several Phase 
 - **Glancing-approach rejection** is now modeled (resolved 2026-05-03 by the rim particle loop amendment in §6.1). The rim is a connected closed loop of N PBD particles; type-2 collision treats it as a real curved surface; glancing tentacles slide off it via the standard soft-physics friction path. The 8-discrete-radial-bone limitation that motivated this gotcha is gone.
 - **Canal wall stability — `wall_response_rate * dt < 1`** (§6.12.4 step 2g). First-order lag integration is conditionally stable; a designer cranking `wall_response_rate > 1/dt` (e.g., > 60 Hz with default 60 Hz physics step) sees oscillation. Defensively clamped per-loop to `min(rate, 1/dt - ε)` but the authored value above the cap still produces "as-fast-as-possible" lag — flag visibly in tooling if the parameter is set higher than stable.
 - **Canal pumping resonance** (§6.12.10). A tentacle pumping at `~1 / wall_response_rate` excites wall ringing. With default first-order dynamics it's a soft swell; with `use_second_order_wall = true` it becomes a pronounced resonant ring. Discoverable gameplay phenomenon analogous to the §1.2 rib resonance — flagged in `docs/Gameplay_Mechanics.md` as a hidden phenomenon, not a bug.
-- **Canal centerline bend does not move host bones.** The §6.3 reaction-on-host-bone closure operates only at rim particle loops. A canal interior bend transmits axial force to the host body through the CP bone rigging (CP bones are rigidly parented to host bones), but does NOT add an extra `body_apply_impulse` beyond what the centerline's spring-back to CP rest already implies. If gameplay needs canal-interior force feedback distinct from the rim's, add it as a separate pass — currently not in scope.
+- **Canal centerline bend moves host bones via the §6.12.12 reaction pass.** Wall displacement under tentacle pressure is summed per cross-section, negated and scaled, and dispatched as `body_apply_impulse` on the cross-section's host bone (the CP bone's rigid parent). The pass excludes the first `N_rim` cross-sections to avoid double-counting with §6.3 rim closure; tuning `N_rim` per orifice is a calibration knob, not a design lever. See §6.12.12 for the pass and `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §6 for the scenario that motivated this reversing the original "not in scope" decision.
 
 **What not to do:**
 - Don't use `MeshDataTool` in hot paths
