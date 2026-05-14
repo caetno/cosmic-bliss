@@ -47,6 +47,7 @@ The compile-edit cycle is a real cost — don't push GDScript-shaped work into C
   3. The **`Marionette.body_rhythm_phase` shared clock** for body↔tentacle rhythm coupling (Reverie writes `body_rhythm_frequency`; TentacleTech `RhythmSyncedProbe` reads `body_rhythm_phase`). Phase is integrated, never recomputed. See `docs/marionette/Marionette_plan.md` P7.10 and `docs/architecture/TentacleTech_Architecture.md` §6.11.
   4. GDScript interfaces; never C++ coupling
 - **Tenticles does not subscribe to the Stimulus Bus.** User-level GDScript glue reads the bus and writes Tenticles' public params; Tenticles stays self-contained per its scope boundary.
+- **`body_field` is a fidelity upgrade, not a dependency.** No extension may require `body_field` for correct function. Every body_field consumer must have a tested fallback path that runs when the hero scene has no `BodyField` node — i.e. TentacleTech contact falls back to `BoneCollisionProfile` capsules, Marionette §15 jiggle stays on the render-mesh additive-offset path, Marionette §17 consumers keep their pre-§17 manual-authoring path, Reverie modulation channels that target body_field-only fields are no-ops. The kasumi-without-body_field smoke test gates body_field-touching PRs. See `docs/Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md`.
 
 ## Build
 
