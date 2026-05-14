@@ -1,16 +1,22 @@
-# BodyField — GPU XPBD volumetric tet substrate for hero body deformation
+# BodyField — kinematic-only tet proxy for hero body fidelity (v1)
 
-Read before every coding session. Defines project invariants and style. The phased roadmap lives in `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` (the integration brief); the architectural placement lives in `docs/marionette/Marionette_plan.md` §18; the full implementation spec is the vendored prototype doc at `docs/body_field/flesh_deformer_v2_legacy.md`.
+Read before every coding session. Defines project invariants and style. The phased roadmap lives in the three-doc stack: `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` (extension placement, migration approach, slice plan), `docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md` (v1 scope reduction), and `docs/Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md` (hard-optional invariant + dispatch redesign + `.bin` v3). The architectural placement at project level lives in `docs/marionette/Marionette_plan.md` §18; the vendored prototype spec at `docs/body_field/flesh_deformer_v2_legacy.md` is **v1.5+ reference**, not v1.
 
 ---
 
 ## Project summary
 
-BodyField is a Godot 4.6 extension that simulates flesh deformation on skinned characters using GPU-resident XPBD on a tetrahedral proxy mesh. Bone colliders drive kinematic classification. Free tet vertices simulate elastic flesh under Stable Neo-Hookean elasticity + volume preservation + bone-SDF collision + LRA tethers. Surface deformation transfers to the render mesh as `sim − kinematic_target` deltas via precomputed barycentric weights, composing cleanly with Godot's bone-LBS skinning.
+BodyField is a Godot 4.6 extension that provides a kinematically-skinned tetrahedral proxy mesh as a higher-fidelity collision surface for the hero body. In v1 the proxy runs **parallel to the render mesh, not upstream of it** — render fidelity stays with the existing DQS + Direct Delta Mush + surface-field-offset stack (per `Cosmic_Bliss_Update_2026-05-11_hero_skinning_stack.md`); the tet proxy is invisible to the player and consumed only by TentacleTech contact dispatch.
 
-**v1 role**: high-fidelity collision surface for particle-based systems (TentacleTech now, Tenticles fluids later). Substrate runs kinematic-pin-dominant — visible softbody contribution stays small; Marionette §15 jiggle bones still own post-contact wobble, integrated as additional kinematic targets feeding the compute pass (NOT additive on top of tet-deformed positions).
+**v1 = kinematic-only.** Tet vertices are skinned from bones at physics-tick rate using one compute pass (`kinematic_targets.glsl`). No XPBD predict/correct, no Stable Neo-Hookean, no LRA tethers, no SDF collision inside the substrate, no surface_transfer to render mesh, no compositor-effect delta. The remaining 8 prototype compute shaders stay on the shelf, ported only if v1.5 opens (see Status table below).
 
-**v2+ extensions** deferred to slices B7–B10: multi-region tet partitioning, tissue-type classification (Muscle/Fat/Gland/Skin/Inert), per-tet stiffness anisotropy from `∇(distance-to-bone)`, volumetric heat method, Reverie modulation API.
+**v1 role**: high-fidelity contact surface for TentacleTech where capsules visibly fail (belly, glute, throat, breast, torso). Hands and feet stay on `BoneCollisionProfile` capsules — small bones with fine articulation are exactly where the proxy underperforms capsules; the proxy plays to the opposite strength.
+
+**Hard invariant (project CLAUDE.md "Cross-extension rules"): BodyField is a fidelity upgrade, not a dependency.** No extension may require it. Every consumer must have a tested fallback path that runs when the hero scene has no `BodyField` node. The kasumi-without-body_field smoke test gates body_field-touching PRs. This invariant is load-bearing for the whole extension's design — every mechanism in this CLAUDE.md must preserve it.
+
+**v1.5 (conditional, gated on B6 validation)**: port the remaining 7 sim shaders + `surface_transfer.glsl`. Opens only if soft regions need real compliance under contact load that v1 kinematic + Marionette §15 jiggle bones can't deliver.
+
+**v2+ (B7–B10)**: multi-region tet partitioning, tissue-type classification, volumetric heat method, Reverie modulation API. Deferred.
 
 Top-level node: `BodyField : Node3D`, placed under the hero scene alongside `Skeleton3D` + `MeshInstance3D` + `PhysicalBoneSimulator3D`.
 
@@ -18,46 +24,60 @@ Top-level node: `BodyField : Node3D`, placed under the hero scene alongside `Ske
 
 ## Architectural docs (read before implementation)
 
-In reading order:
+In reading order — the three update docs form a stack; read all three before touching code:
 
-1. **`docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md`** (integration brief, commit `3228f8e`) — v1 scope, seven architecture decisions D1–D7, slice plan B0–B6 + B7–B10, five open questions Q1–Q5. The primary reading for "what's in v1 and why."
-2. **`docs/marionette/Marionette_plan.md` §18** (commit `94cc0f4`) — canonical architecture-level placement. Where BodyField sits in the project. Sibling slice family to §17 surface field inside the same extension. The primary reading for "what is body_field and where does it sit."
-3. **`docs/body_field/flesh_deformer_v2_legacy.md`** (vendored prototype spec, commit `43fb435`) — full implementation spec from the working prototype at `~/desktop/flesh-deformer/`. 13-step implementation sequence (step 0 = delta-application prototype, flagged as highest-risk integration point). Frozen reference; do not edit.
+1. **`docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md`** — extension placement (D1), migration approach (D2: port-and-extend), original v1 framing (now overridden by 05-13/05-14 on v1 scope and dispatch — kept as the v1.5+ reference for the full XPBD path).
+2. **`docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md`** — v1 scope reduction. Kinematic-only; tet proxy parallel to render mesh; 8 of 9 prototype shaders deferred. Extremities mask at authoring time.
+3. **`docs/Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md`** — hard-optional invariant; dispatch redesign (collision-layer partition + `BodyField::receive_external_impulse` + 4S.3 surface-tag material composition); `.bin` v3 layout; B6 kasumi-without-body_field acceptance gate.
+4. **`docs/marionette/Marionette_plan.md` §18** — architecture-level placement. BodyField is the home for §17 surface field (sibling slice family) and §18 volumetric tets. Note: §18 prose may still describe XPBD v1 until the 05-14 apply pass lands; trust 05-13/05-14 over §18 in case of conflict.
+5. **`docs/body_field/flesh_deformer_v2_legacy.md`** — vendored prototype spec. **Reference for v1.5+ only.** The 13-step implementation sequence, color-grouped XPBD solve, delta-application via CompositorEffect, `sim − kinematic_target` delta convention — all v1.5+ territory. Do not implement against this spec for v1. Frozen reference; do not edit.
 
 Cross-references that matter:
-- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §6.12 — canal interior pipeline; canal interior verts (`CUSTOM0.r ≥ 1`) are excluded from the BodyField tet mesh at bake time (brief Q2).
-- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §4.2 type 1 — contact integration target; B5 forks this to "tentacle particle vs. outer body" with per-hero opt-in for BodyField surface vs. bone capsule.
-- Marionette `docs/marionette/Marionette_plan.md` §15 — jiggle bones; integrate as additional kinematic targets when BodyField is active (brief Q1).
-- Marionette `docs/marionette/Marionette_plan.md` §17 — surface field sibling slice family inside this same extension.
+- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §4.2 — type-1 contact ("tentacle particle vs. outer body"). 05-14 §3.1 settles dispatch via collision-layer partition (`LAYER_BODY_PROXY | LAYER_BODY_CAPSULES_DETAIL | LAYER_BODY_CAPSULES_FULL`), not per-particle region enum. Pending apply pass on §4.2; trust 05-14 over §4.2 wording.
+- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §4.5 — body-body snapshot discipline ("once per substep, never per PBD iteration"). BodyField writes tet positions once per substep at substep boundary; consumers read at the boundary. Pending apply pass on §4.5; trust 05-14 §7.8 wording.
+- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §6.12 — canal interior pipeline. Canal interior verts (`CUSTOM0.r ≥ 1`) are excluded from the BodyField tet mesh at bake time. Authoring chain (B4) filters them out before piping to FloatTetwild.
+- TentacleTech `docs/architecture/TentacleTech_Architecture.md` §10.5 — contact suppression during active EntryInteractions. When the tentacle particle's probe hit the proxy and the particle is inside an active EI, suppress the contact (same semantic as capsule suppression, dispatched per hit body).
+- Marionette `docs/marionette/Marionette_plan.md` §15 — jiggle bones. In v1, jiggle stays on the render-mesh additive-offset path and does NOT feed BodyField. v1.5 may optionally route jiggle through `kinematic_targets`, but the render-mesh path stays live as the fallback.
+- Marionette `docs/marionette/Marionette_plan.md` §17 — surface field; sibling slice family inside this extension, opens when its consumers need it. Pre-§17 manual-authoring paths remain live as the no-body_field fallback.
+- Marionette `extensions/marionette/gdscript/resources/bone_collision_profile.gd` — capsule authoring resource. Body_field-present heroes set its active layer set to `DETAIL` (hands/feet only); body_field-absent heroes use `FULL` (entire skeleton). Coordinated at hero-init.
 
 ---
 
 ## Scope
 
-### In-scope
+### In-scope (v1)
 
-- GPU XPBD on a tetrahedral proxy mesh of the body interior (Macklin et al. 2016)
-- Per-tet Stable Neo-Hookean elasticity (Smith 2018)
-- Volume preservation + kinematic pin + bone-SDF collision + LRA tether constraints
-- Per-vertex kinematic classification + BFS-depth rigidity, computed at hero load from bone SDFs (no per-tet authoring)
-- Bone collider SDFs (sphere / capsule / box analytic primitives per IQ; convex hull half-space intersection) read from `BoneCollisionProfile` via a hero-load converter
-- `.bin` file format v2 (magic 'FLSH', Godot Y-up coords, no axis conversion at load)
-- Per-render-vert `flesh_influence` painted in Blender as the artist's only painting surface, baked into the `.bin`
-- Surface transfer via precomputed barycentric weights, delivering `sim − kinematic_target` deltas to the render mesh
-- Delta application via CompositorEffect (preferred) or texture-buffer-in-vertex-shader
-- Color-grouped XPBD constraint solve (greedy graph coloring at hero load; tets in a color group solve in parallel without write conflicts)
-- Per-hero opt-in via a `BodyField` Node3D on the hero scene
-- TentacleTech contact integration as a per-hero opt-in fork of type-1 (B5 slice)
+- **One compute pass: `kinematic_targets.glsl`.** Reads bone transforms + per-tet-vert skin weights from the `.bin`, writes tet vertex positions in Godot world space. Runs once per substep at the substep boundary, never mid-PBD-iteration.
+- **`.bin` v3 loader.** Carries tet mesh + tet skin indices + tet skin weights + (optional) per-face region material data. Version-gated; v2 rejected at load.
+- **Tet skin weights bake.** Boundary tet verts inherit weights from the render-mesh body mesh (verts coincident with body mesh per the FloatTetwild input rule). Interior tet verts get closest-bone-distance LBS at bake time.
+- **Collision-layer registration.** The tet proxy registers as a single body (e.g. `AnimatableBody3D`) on `LAYER_BODY_PROXY` at hero load. TentacleTech queries against `LAYER_BODY_PROXY | LAYER_BODY_CAPSULES_* | LAYER_WORLD` unconditionally; body_field's presence is observed by which layers are populated.
+- **`BodyField::receive_external_impulse(world_point, impulse, ps)`** — public C++ method (when C++ lands) or GDScript method (until then) called by TentacleTech's reciprocal path when the hit body is tagged as a BodyField proxy. Looks up the nearest tet, samples the weighted bones, redistributes the impulse to per-bone Jolt bodies as `impulse * w_b`. The body_field-absent fallback is TentacleTech's existing direct-`body_apply_impulse` path on the capsule's RID — preserved.
+- **Per-region material composition via 4S.3 `TentacleSurfaceTag`.** When per-region material data is authored in the `.bin`, body_field exposes it through the same tag mechanism TentacleTech uses for tentacle surface tags. Composition at contact time uses the existing TT path; no new TT-side composition logic.
+- **Extremities mask at authoring time.** Hand and foot faces are excluded from the FloatTetwild input. The mask is authored in Blender (a per-face region tag, scheme to be defined at B4). TentacleTech then naturally contacts capsule bones at the extremities via `LAYER_BODY_CAPSULES_DETAIL`.
+- **`BoneCollisionProfile` active-layer-set switching.** Coordinated with Marionette: profile-side flag selects `DETAIL` (body_field present) or `FULL` (body_field absent) at hero init.
+- **Per-hero opt-in.** A hero with no `BodyField` node falls through to the existing capsule path bit-for-bit. The kasumi-without-body_field smoke test runs the TT Phase 5 acceptance suite without BodyField and asserts identical results to the pre-body_field baseline.
+- **Debug gizmo** — tet wireframe + skin-vert ownership viz. Pull-style debug per the cross-extension debug rule; pre-allocated `ImmediateMesh` reused per frame (no per-frame allocation).
 
-### Out-of-scope (v1)
+### Out-of-scope for v1 (gated as v1.5 conditional)
+
+The 8 prototype compute shaders remain on the shelf, ready to port additively:
+
+- `integrate.glsl`, `solve_volume.glsl`, `solve_kinematic_pin.glsl`, `solve_sdf_collision.glsl`, `solve_lra_tether.glsl`, `solve_elasticity.glsl`, `update_velocity.glsl` — full XPBD pipeline
+- `surface_transfer.glsl` — barycentric transfer of tet positions to render mesh
+- `BoneCollisionProfile → GPU SDF` converter — only consumed by `solve_sdf_collision.glsl`, so deferred with it
+- Color-grouped XPBD solve, Stable Neo-Hookean elasticity, LRA tethers, kinematic-pin compliance tuning
+- CompositorEffect-based delta application or texture-buffer vertex-shader delta path
+- Per-vertex `render_influence` / `flesh_influence` painting (the consumer is `surface_transfer.glsl`, which is v1.5+)
+
+These open only if B6 validation finds soft-region compliance under contact load (belly/glute/throat depression under tentacle pressure) is needed. v1.5 is purely additive over v1 *for runtime architecture* — TentacleTech still contacts the tet proxy; only the source of proxy-vertex positions changes from "pure skinning" to "skinning + simulated delta." Note: v1.5 *will* change render-mesh ownership — once `surface_transfer.glsl` runs, the tet proxy starts driving render. The render-mesh-parallel invariant is v1-only.
+
+### Out-of-scope (v2+)
 
 - Multi-material per-tet labels (Muscle/Fat/Gland/Skin) → v2+ slice B8
-- Per-tet stiffness anisotropy from `∇(distance-to-bone)` → v2+ slice B8 (depends on B9)
-- Volumetric heat method on tets for body-interior scalars (distance-to-bone, deep-contact sensitivity) → v2+ slice B9
+- Per-tet stiffness anisotropy from `∇(distance-to-bone)` → v2+ slice B8
+- Volumetric heat method on tets → v2+ slice B9
 - Fiber-axis fallback for midline tets → v2+ alongside B8
-- Reverie-routed runtime modulation (belly inflation, region stiffness) → v2+ slice B10
-- Visible softbody jiggle as the primary visual signal — v1 keeps this small; Marionette §15 jiggle bones own post-contact wobble
-- Multi-hero runtime `.bin` swap → v1.5 (loader API accepts path; v1.5 is just "call load() per hero")
+- Reverie-routed runtime modulation (belly inflation, region stiffness, fiber direction) → v2+ slice B10
 - §17 surface field (cotan-Laplacian on body surface) — sibling slice family inside this same extension, opens separately when its consumers need it
 
 ### Explicitly NOT this extension's concern
@@ -66,13 +86,16 @@ Cross-references that matter:
 - Tentacle PBD physics, orifice rim, canal interior dynamics → TentacleTech
 - GPU particles, fluid sim → Tenticles
 - Reaction system, emotion states, facial expressions → Reverie
-- Jolt-side ragdoll-internal physics (joint limits, bone-vs-bone constraints, ground contact) — unchanged; BodyField sources bone SDFs from the same `BoneCollisionProfile` that Jolt uses but does not replace Jolt
+- Jolt-side ragdoll-internal physics (joint limits, bone-vs-bone constraints, ground contact) — unchanged; body_field does not touch Jolt's bone-shape consumption. In v1.5, when `solve_sdf_collision.glsl` lands, body_field reads `BoneCollisionProfile` via a new converter (D4 contract); in v1 it reads nothing from `BoneCollisionProfile`.
+- Skinning of the render mesh — DQS + DDM + surface-field offsets per `Cosmic_Bliss_Update_2026-05-11_hero_skinning_stack.md`. v1 body_field does not touch the render mesh.
 
 ---
 
 ## C++ / GDScript split
 
-**Pure-GDScript-for-now** per integration brief D2. The orchestrator + `.bin` loader + bone SDF converter start in GDScript; promotion of the per-tick compute dispatch loop to C++ happens only if profiling shows it's hot. The 9 compute shaders are GLSL, driven via Godot's `RenderingDevice`.
+**Pure-GDScript-for-now** per integration brief D2. The orchestrator + `.bin` loader start in GDScript; the `kinematic_targets.glsl` dispatch glue is GDScript driving `RenderingDevice`. Promotion to C++ happens only if profiling shows the dispatch loop or the impulse-re-routing path is hot — neither is expected to be hot in v1.
+
+`BodyField::receive_external_impulse` is conceptually a C++ method (the path is called from TentacleTech's tick), but for v1 it lives in GDScript on the `BodyField` Node3D, called via the public method on the node. If profiling demands, lift to C++ in a coherent slice with the rest.
 
 ### Active layout
 
@@ -82,11 +105,10 @@ extensions/body_field/
 ├── plugin.cfg                        — addon manifest, lifted to addon root on deploy
 ├── plugin.gd                         — EditorPlugin entry; minimal until editor surface earns it
 ├── gdscript/                         — flat-copied to game/addons/body_field/ at deploy time
-│   ├── runtime/                      — BodyField node + orchestrator + .bin loader
+│   ├── runtime/                      — BodyField node + orchestrator + .bin v3 loader + impulse re-routing
 │   ├── resources/                    — Resource subclasses (BodyFieldProfile, etc., when authored)
-│   ├── collision/                    — BoneCollisionProfile → GPU SDF buffer converter
 │   └── debug/                        — gizmo overlays for tet wireframe + skin-vert ownership
-├── shaders/                          — GLSL compute shaders, RenderingDevice-driven
+├── shaders/                          — GLSL compute shaders (v1 = kinematic_targets.glsl only)
 └── tests/                            — run_tests.gd harness; SceneTree pattern per TT 5E
 ```
 
@@ -96,31 +118,35 @@ extensions/body_field/
 - `extensions/body_field/SConstruct` — godot-cpp-based build
 - `extensions/body_field/src/` — C++ source
 
-When C++ lands (B2 if profiling demands, possibly never), these arrive as a coherent slice together. Until then: pure-GDScript addon, flat-copied to `game/addons/body_field/` by `tools/build.sh`.
+When C++ lands (only if profiling demands), these arrive as a coherent slice together. Until then: pure-GDScript addon, flat-copied to `game/addons/body_field/` by `tools/build.sh`.
 
-**Rule of thumb**: if it runs inside the per-tick compute dispatch and touches per-particle / per-tet state, the shader handles it (GLSL). The CPU side is bake-time setup + per-tick uniform/buffer uploads + dispatch glue. Both stay GDScript until profiled-hot.
+**Rule of thumb**: if it runs inside the per-substep compute dispatch and touches per-particle / per-tet state, the shader handles it (GLSL). The CPU side is bake-time setup + per-substep uniform/buffer uploads + dispatch glue. Both stay GDScript until profiled-hot.
 
 ---
 
 ## Status
 
-Authoritative slice plan: integration brief §"Slice breakdown — `body_field` Phase B" (3228f8e). Per-slice history will land in `PHASE_LOG.md` once B1+ slices ship.
+Authoritative slice plan: 05-13 §"Revised slice breakdown — `body_field` Phase B" + 05-14 §3 dispatch mechanisms. Per-slice history in `PHASE_LOG.md` once B1+ slices ship.
 
 | Slice | State |
 |---|---|
-| B0 — Extension scaffolding | not yet shipped |
-| B1 — `.bin` loader + sanity gizmo | blocked on B0 |
-| B2 — GPU XPBD pipeline port | blocked on B1 |
-| B3 — `BoneCollisionProfile` → GPU SDF converter | parallel-able after B0 |
-| B4 — `.bin` authoring chain (Blender side) | parallel-able after B0 |
-| B5 — TentacleTech type-1 fork | blocked on B2 + B3; gated on TT Phase 5 acceptance |
-| B6 — Validation pass + tuning | blocked on B5 |
+| B0 — Extension scaffolding | landed (plugin.cfg, plugin.gd, GDScript skeleton, tests harness) |
+| B1 — `.bin` v3 loader + sanity gizmo | next; v3 layout per 05-14 §6 |
+| B2 — `kinematic_targets.glsl` dispatch + tet skin weights bake | parallel-able after B1 |
+| B3 — Collision-layer registration + `BodyField::receive_external_impulse` + 4S.3 surface-tag exposure | parallel-able after B1; coordinated with TT B5 |
+| B4 — `.bin` authoring chain (Blender side, vendored to `tools/blender/body_field/`) + extremities mask + per-region material authoring | parallel-able after B1 |
+| B5 — TentacleTech type-1 fork against layer-partitioned bodies | TT-side slice, coordinated; this extension provides `receive_external_impulse` and per-region tags |
+| B6 — Validation pass + kasumi-without-body_field smoke test | blocked on B5; gates v1 close and decides whether v1.5 opens |
+| B5.5 — XPBD compute pipeline port (7 sim shaders) | **conditional** on B6 finding soft-region compliance needed |
+| B5.6 — `surface_transfer.glsl` + render-mesh integration | **conditional**; landing this changes the render-mesh-parallel invariant |
+| B5.7 — XPBD tuning (pin compliance, NH stiffness, LRA tether length) | **conditional** |
+| B3.5 — `BoneCollisionProfile → GPU SDF` converter | **conditional** with B5.5 (consumer is `solve_sdf_collision.glsl`) |
 | B7 — Multi-region tet partitioning | v2+; gated on visible-quality bar moving |
 | B8 — Tissue-type classification + per-tet anisotropy | v2+; depends on B9 |
 | B9 — Volumetric heat method on tets | v2+ |
 | B10 — Reverie modulation API | v2+ |
 
-Always re-read the integration brief before starting — this table can drift; the brief is the source of truth.
+Always re-read the three-doc stack (05-12-02 → 05-13 → 05-14) before starting — this table can drift; the docs are the source of truth.
 
 ---
 
@@ -128,10 +154,10 @@ Always re-read the integration brief before starting — this table can drift; t
 
 You are a sub-Claude scoped to this extension. The repo's top-level Claude (started in `../..` at the repo root) holds cross-cutting context — architecture, build system, doc consistency, contracts between extensions, integration with Marionette + TentacleTech + Tenticles.
 
-- **Implementation lives here.** You do the GDScript / GLSL / Blender-side work in `extensions/body_field/`, `tools/blender/`, `game/tests/body_field/`.
+- **Implementation lives here.** You do the GDScript / GLSL / Blender-side work in `extensions/body_field/`, `tools/blender/body_field/`, `game/tests/body_field/`.
 - **Top-repo reviews and commits.** Sub-Claude does not commit. Hand off uncommitted; top-repo reviews the diff against the slice prompt's acceptance criteria and commits with a properly-framed message.
 - **Cross-extension changes go through top-repo.** If a slice surfaces a need to touch `extensions/marionette/`, `extensions/tentacletech/`, or `extensions/tenticles/` — stop and surface. Don't unilaterally cross extension boundaries; the cross-cutting impact needs top-repo review.
-- **Brief Q1–Q5 + B-slice gate rules apply.** Q1 (jiggle composition with tet sim), Q2 (canal interior verts vs tet mesh), Q3 (orifice rim contact dedup), Q4 (multi-hero `.bin` ownership), Q5 (ragdoll snapshot discipline) — flagged for B2/B5 resolution. If your slice touches any of these, follow the brief's documented recommendation; if you find yourself wanting to deviate, surface and stop.
+- **The hard-optional invariant gates every slice.** If a slice you're working on would introduce a body_field-required code path in another extension, stop and surface. The kasumi-without-body_field smoke test must remain green after every body_field-touching change.
 
 ---
 
@@ -139,32 +165,43 @@ You are a sub-Claude scoped to this extension. The repo's top-level Claude (star
 
 Changes to these require explicit top-repo approval before writing code.
 
-- **Tet substrate covers the outer body only.** Canal interior verts (TT §6.12, `CUSTOM0.r ≥ 1`) are excluded at bake time. They route through TentacleTech's canal pipeline, not through BodyField. Authoring chain (B4) filters canal interior faces before piping the body mesh to FloatTetwild.
-- **Bone collider source of truth is `BoneCollisionProfile`.** A single converter at hero load reshapes its entries into the GPU SDF buffer the `solve_sdf_collision.glsl` shader expects. The prototype's standalone `bone_sdf_primitive.gd` / `bone_sdf_convex.gd` files become readers from `BoneCollisionProfile`, not standalone authoring resources.
-- **Delta = sim − kinematic_target, NOT sim − rest.** This is load-bearing for clean composition with Godot's bone-LBS skinning. Render mesh receives `bone-LBS + delta × render_influence`. Float-path divergence between the XPBD bone-multiply path and Godot's internal LBS is the failure mode the convention exists to prevent.
-- **Tet surface positions snapshotted once per substep, never re-read during constraint iteration.** Same discipline as TentacleTech's §4.5 ragdoll snapshot rule. The deformer's compute pipeline runs once per substep, produces surface positions, and consumers (TT type-1 fork from B5) read them at substep boundary.
-- **Jiggle bone integration is via kinematic_targets, not additive offsets.** Marionette §15 jiggle bones feed `kinematic_targets.glsl` as additional kinematic target sources. Adding their offsets on top of tet-deformed positions double-counts deformation and produces artifacts. Per brief Q1.
-- **Canal interior contact suppression at active EntryInteractions.** When a tentacle particle is currently inside an active TT `EntryInteraction`, type-1 outer-body contact (against the tet surface, when BodyField is opted in) is suppressed for that particle. Matches the §10.5 capsule-suppression-during-interactions pattern. Per brief Q3.
-- **Kinematic vertex = overwrite, not constrain.** Bone-attached tet vertices have their positions written directly from the live bone transform each substep, before any constraint solve. No spring constraints between kinematic and simulated tet vertices; no joint authoring between bone and tet. Per the prototype's `kinematic_targets.glsl` shader. Per Marionette §18 amendment 2 (active in v1 substrate; the prototype already implements this).
-- **Color-grouped XPBD solve.** Tets partitioned into color groups via greedy graph coloring at hero load; tets in a group solve in parallel without write conflicts. Don't break this invariant — it's what makes the per-tick solve viable on the GPU.
-- **`render_influence` is the artist's only painting surface.** Painted per render vert in Blender as `flesh_influence`, baked into the `.bin`. Controls "how much jiggle reaches the surface" per vertex. No other per-vertex authoring — the rest is derived from volume primitives + numeric sliders + tissue-type dropdowns (the latter at B8+).
-- **`.bin` files are version 2 and Godot-space.** Magic 'FLSH', version uint32 = 2, little-endian. Coordinates already in Godot Y-up world space — no axis conversion at load.
-- **Hero opt-in is per-hero, not scene-wide.** Per integration brief D3. Heroes without BodyField fall back to the existing capsule-based TT type-1 contact path. BoneCollisionProfile stays live for non-opted-in heroes.
+- **BodyField is a fidelity upgrade, not a dependency.** Every consumer must have a tested fallback path that runs with no `BodyField` node in the hero scene. The kasumi-without-body_field smoke test (B6 acceptance + per-PR gate) is the verification mechanism. If a slice you're implementing makes another extension require body_field, stop and surface — this is the top-level invariant.
+- **Tet proxy runs parallel to the render mesh in v1.** Render mesh keeps its DQS + DDM + surface-field-offset stack from 05-11 entirely. The tet proxy is invisible to the player; its only consumer is TentacleTech contact dispatch. No `surface_transfer.glsl`, no compositor-effect delta, no driving of render-mesh verts. This invariant retires in v1.5 if/when surface_transfer ships.
+- **Tet substrate covers the outer body only.** Canal interior verts (TT §6.12, `CUSTOM0.r ≥ 1`) are excluded at bake time. Authoring chain (B4) filters canal interior faces before piping the body mesh to FloatTetwild.
+- **Extremities (hands + feet) are excluded from the tet proxy.** Per 05-13, hand/foot faces are masked out at authoring time. TentacleTech contacts capsule bones at the extremities via `LAYER_BODY_CAPSULES_DETAIL`. The mask is authored per-face in Blender (scheme defined at B4).
+- **Friction reciprocal goes through `BodyField::receive_external_impulse`.** When the tet proxy receives an impulse from TentacleTech, body_field redistributes it to the skin-weighted bones at the contact point as `impulse * w_b` per influencing bone. Per-bone impulses go to the Jolt-side bone bodies via `body_apply_impulse`. Do **not** apply impulses directly to the tet body — that's a no-op for ragdoll motion and silently breaks §4.3 "tentacle drags hero" feel.
+- **Tet positions snapshotted once per substep, never re-read during constraint iteration.** Body-body discipline (renamed from "ragdoll snapshot" in 05-14 §7.8). v1 has no iteration, so this is trivially satisfied for the writer; consumers (TentacleTech) read at the substep boundary. Dispatch ordering: body_field's kinematic-targets pass must run *before* TentacleTech's per-substep probe within the same physics tick. Coordinated through node ordering or explicit `_physics_process` priority.
+- **Bone collider source of truth is `BoneCollisionProfile`.** v1 reads nothing from it; v1.5's SDF converter (B3.5) will read it as the single source of truth shared with Jolt. Don't pre-wire reads in v1 — they'd be dead until v1.5.
+- **`.bin` files are version 3.** Magic 'FLSH', version uint32 = 3, little-endian. Layout per 05-14 §6: tet mesh + tet skin indices/weights + render-vert barycentric weights + (optional) per-face region material data. Coordinates already in Godot Y-up world space — no axis conversion at load. Reader rejects `version != 3`. v2 files require re-bake.
+- **Per-hero opt-in is observed by node presence.** A hero with a `BodyField` node opts in; a hero without it falls through to the capsule path. Coordinated at hero-init with `BoneCollisionProfile`'s active layer set (`DETAIL` vs `FULL`).
+- **Per-region material composition uses TentacleTech's existing 4S.3 `TentacleSurfaceTag` mechanism.** Body_field exposes tags through the same path TT uses for tentacle surface tags. No new TT-side composition logic.
+
+The following non-negotiables apply **only to v1.5+** when the gated slices open — listed so they're visible while implementing v1, but do not pre-wire any of them:
+
+- v1.5: Delta = sim − kinematic_target, NOT sim − rest. Load-bearing for v1.5 composition with bone-LBS. (See legacy prototype spec.)
+- v1.5: Color-grouped XPBD solve. Tets partitioned into color groups at hero load.
+- v1.5: Kinematic vertex = overwrite, not constrain. Bone-attached tet verts written directly from live bone transform each substep, before constraint solve. (v1 has no constraint solve, so the "before" is trivially satisfied; v1.5 preserves the ordering.)
+- v1.5: Jiggle bone integration. Optionally route jiggle through `kinematic_targets.glsl` *in addition to* the render-mesh additive-offset path. The render-mesh path stays live in either case as the no-body_field fallback. Brief Q1 recommendation applies; do not double-count.
 
 ---
 
 ## What not to do
 
-- Do not generate Godot test scenes without explicit user confirmation. Even with confirmation, keep them simple: node tree + scripts + a few `@export` numbers. No animation tracks, no `AnimationPlayer`/`AnimationTree` setups, no baked lighting, no multi-resource asset pipelines, no rigged characters beyond what's already in the kasumi hero scene. If anything beyond that seems necessary, ask before creating it.
-- Do not use `MeshDataTool` in hot paths.
-- Do not use Godot's `SoftBody3D`. Forbidden by repo convention.
-- Do not allocate `ArrayMesh` or `ShaderMaterial` per-frame. Allocate once at hero load.
-- Do not break the once-per-substep snapshot discipline (see non-negotiables above).
-- Do not paint canal interior verts with `flesh_influence` — they're routed through TT §6.12, not BodyField. Painting them silently breaks the routing.
-- Do not modify `~/desktop/flesh-deformer/` — that's the prototype source, read-only reference. Only the spec doc was vendored.
-- Do not edit `docs/body_field/flesh_deformer_v2_legacy.md` — it's a frozen vendored reference. Edits go to a new design update doc if the design needs to evolve.
-- Do not write Reverie modulation hooks before B10. Belly inflation / region stiffness / fiber direction modulation are v2+ slices; pre-wiring them in v1 creates dead-config that B10 has to either honor (wrong) or rip out (wasted work).
-- Do not pre-wire C++ scaffolding ahead of profiling demand. The `.gdextension` + SConstruct + `src/` directory earn their place when there's a concrete C++ surface to register, not before.
+- **Do not generate Godot test scenes without explicit user confirmation.** Even with confirmation, keep them simple: node tree + scripts + a few `@export` numbers. No animation tracks, no `AnimationPlayer`/`AnimationTree` setups, no baked lighting, no multi-resource asset pipelines, no rigged characters beyond what's already in the kasumi hero scene. If anything beyond that seems necessary, ask before creating it.
+- **Do not implement the XPBD pipeline in v1.** The 8 deferred shaders are gated behind B6 validation. Pre-porting them is dead code that complicates v1's narrow acceptance.
+- **Do not wire `surface_transfer.glsl` in v1.** The tet proxy must not drive render mesh in v1. If you find a slice tempting you to, stop and surface.
+- **Do not require body_field anywhere outside this extension.** No `preload("res://addons/body_field/...")` from another extension's code without a `has_node("BodyField")`-guarded fallback path.
+- **Do not paint or author `render_influence` / `flesh_influence` in v1.** Its consumer (`surface_transfer.glsl`) doesn't run in v1. v1 .bin format reserves the slot but the artist doesn't paint it. The "only painting surface" claim from 05-12-02 is v1.5+ only.
+- **Do not allocate `ArrayMesh` or `ShaderMaterial` per-frame.** Allocate once at hero load. Same rule applies to `ImmediateMesh` in debug gizmos — pre-allocate once, mutate per frame.
+- **Do not use `MeshDataTool` in hot paths.**
+- **Do not use Godot's `SoftBody3D`.** Forbidden by repo convention.
+- **Do not break the once-per-substep snapshot discipline.** Even though v1's kinematic_targets pass is non-iterative, dispatch ordering relative to TentacleTech's per-substep probe must place body_field's write before TT's read.
+- **Do not paint canal interior verts with anything destined for body_field.** They're routed through TT §6.12, not body_field.
+- **Do not modify `~/desktop/flesh-deformer/`.** That's the prototype source, read-only reference. Only the spec doc was vendored.
+- **Do not edit `docs/body_field/flesh_deformer_v2_legacy.md`** — frozen vendored reference. Edits go to a new design update doc.
+- **Do not write Reverie modulation hooks before B10.** Pre-wiring creates dead-config that B10 has to honor (wrong) or rip out (wasted work).
+- **Do not pre-wire C++ scaffolding ahead of profiling demand.** The `.gdextension` + SConstruct + `src/` directory earn their place when there's a concrete C++ surface to register, not before.
+- **Do not couple body_field to Marionette's `body_rhythm_phase` or anything else on the shared clock.** Body_field has no rhythmic component in v1.
 
 ---
 
@@ -172,7 +209,7 @@ Changes to these require explicit top-repo approval before writing code.
 
 - One extension: `./tools/build.sh body_field`
 - All: `./tools/build_all.sh`
-- Output: `extensions/body_field/gdscript/` flat-copied to `game/addons/body_field/` (no `scripts/` subdir, since no SConstruct exists). When C++ lands (if ever), build.sh's mixed-mode path migrates the deploy to a `scripts/` subdir automatically.
+- Output: `extensions/body_field/gdscript/` flat-copied to `game/addons/body_field/` (no `scripts/` subdir while there's no SConstruct).
 
 Build commands run from repo root.
 
@@ -182,32 +219,38 @@ Build commands run from repo root.
 
 - Tests live under `extensions/body_field/tests/` + `game/tests/body_field/` for scene-level integration.
 - Run pattern: `godot --headless --quit-after 5 --script /abs/path/to/extensions/body_field/tests/run_tests.gd`.
-- The harness pattern is SceneTree-based with `_process` one-shot (mirrors TentacleTech 5E's `test_5e_canal_infrastructure.gd`). Single-test scaffolds for B0; the harness can graduate to the Marionette-style internal-`_test_*`-function-list pattern when the test surface multiplies in B1+.
-- Per-slice acceptance criteria live in the slice prompt. Hand-computed numeric tolerances are expected for math-heavy work (mirrors Marionette SPD math slice).
-- Synthetic test fixtures (ArrayMesh built in GDScript with CUSTOM0/1/2 attributes) are the load-bearing test surface until the `.bin` authoring chain (B4) lands real test data.
+- The harness pattern is SceneTree-based with `_process` one-shot (mirrors TentacleTech 5E's `test_5e_canal_infrastructure.gd`).
+- **Per-slice acceptance criteria live in the slice prompt.** Hand-computed numeric tolerances are expected for math-heavy work.
+- **B6 acceptance includes the kasumi-without-body_field regression test.** Run the TT Phase 5 acceptance scenario suite on kasumi twice (with `BodyField` node, without `BodyField` node) and assert run #2 is bit-for-bit equivalent to the pre-body_field baseline under deterministic seeded scenarios. This test gates merges, not just B6 close-out.
+- Synthetic test fixtures (ArrayMesh built in GDScript with tet weights as test data) are the load-bearing surface until B4 lands real `.bin` v3 data.
 
 ---
 
 ## Commit conventions
 
-- Per-slice prefix: `[B0]`, `[B1]`, ..., `[B10]`.
+- Per-slice prefix: `[B0]`, `[B1]`, ..., `[B10]`. Conditional slices: `[B5.5]`, `[B5.6]`, `[B5.7]`, `[B3.5]`.
 - Type prefix: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`.
-- Example: `[B2] feat: GPU XPBD pipeline port — kinematic_targets + integrate + elasticity`.
+- Example: `[B2] feat: kinematic_targets dispatch + tet skin weights upload`.
 - Top-repo Claude commits, not sub-Claude. The slice prompt's acceptance criteria are the commit's load-bearing claim.
 
 ---
 
 ## Red flags that should halt work and escalate
 
-1. Per-frame heap allocations (`Mesh.new()`, `Image.new()`, `Resource.new()` inside `_physics_process` or compute dispatch path).
-2. Reading bone transforms during the per-tick constraint iteration (must be snapshotted once at substep boundary).
-3. Authoring surface creep: a slice introduces a new per-tet, per-vertex, or per-region authoring requirement that the artist has to touch beyond volume primitives + numeric sliders + `flesh_influence` painting.
-4. Cross-extension coupling that doesn't go through a public node accessor or shared Resource (`#include`-equivalent in GDScript = `preload(...)` of internal headers from another extension's path).
-5. Editor-side work that should be a separate Tools menu or inspector plugin slipping into the runtime path.
-6. C++ scaffolding (SConstruct, `.gdextension`, `src/`) landing without a concrete profiling-demand justification.
-7. Canal-interior verts getting tagged with `flesh_influence` or routed through BodyField (they belong to TT §6.12).
-8. Jiggle bone integration as additive offset on top of tet-deformed positions instead of as a kinematic target source (brief Q1 invariant).
-9. A slice growing past its prompt's stated file count or scope. If the diff is ballooning, surface and stop.
+1. A slice introduces a body_field requirement in another extension (violates the hard-optional invariant).
+2. The kasumi-without-body_field smoke test breaks.
+3. Per-frame heap allocations (`Mesh.new()`, `Image.new()`, `Resource.new()` inside `_physics_process` or compute dispatch path).
+4. Reading bone transforms from inside a constraint-solve callback (Jolt `_integrate_forces`, PBD inner loop). Snapshot at substep boundary instead.
+5. A slice tempts you to wire `surface_transfer.glsl` or any of the deferred 7 sim shaders before B6 validation has opened v1.5.
+6. A slice tempts you to drive the render mesh from tet positions in v1 (the parallel-paths invariant).
+7. Authoring surface creep: a slice introduces a new per-tet, per-vertex, or per-region authoring requirement that the artist has to touch beyond what 05-13/05-14 specified (boundary inheritance + interior closest-bone + extremities mask + optional per-region material).
+8. Cross-extension coupling that doesn't go through a public node accessor or shared Resource. `preload(...)` of internal headers from another extension's path is the forbidden pattern.
+9. Editor-side work that should be a separate Tools menu or inspector plugin slipping into the runtime path.
+10. C++ scaffolding (SConstruct, `.gdextension`, `src/`) landing without a concrete profiling-demand justification.
+11. Canal-interior verts getting routed through body_field (they belong to TT §6.12).
+12. A slice growing past its prompt's stated file count or scope. If the diff is ballooning, surface and stop.
+13. Pre-wiring Reverie modulation channels, color-grouped solve, Stable Neo-Hookean elasticity, or the BoneCollisionProfile→SDF converter in v1.
+14. Applying a TentacleTech impulse directly to the tet body's RID instead of routing through `BodyField::receive_external_impulse` (silently breaks §4.3 reciprocal routing).
 
 Each indicates an architectural assumption is wrong and needs discussion.
 
@@ -217,21 +260,22 @@ Each indicates an architectural assumption is wrong and needs discussion.
 
 | Concept | Reference |
 |---|---|
-| Integration brief (v1 scope, decisions, slice plan) | `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` |
+| v1 scope reduction (kinematic-only) | `docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md` |
+| Hard-optional invariant + dispatch redesign + `.bin` v3 | `docs/Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md` |
+| Original integration brief (placement, migration, v1.5+ reference) | `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` |
 | Architecture-level placement in the project | `docs/marionette/Marionette_plan.md` §18 |
-| Full implementation spec (vendored prototype) | `docs/body_field/flesh_deformer_v2_legacy.md` |
-| `.bin` file format v2 | legacy spec §".bin File Format", line ~87 |
-| 13-step implementation sequence | legacy spec §"Implementation Sequence", line ~1153 |
-| Step 0 = delta-application prototype (HIGHEST-RISK) | legacy spec §"Implementation Sequence" step 0; B5 prerequisite |
-| Color-grouped XPBD solve | legacy spec §"Build color groups", line ~778 |
-| Delta = sim − kinematic_target rationale | legacy spec §"Delta = sim − kinematic target", line ~126 |
-| GPU collider struct (112 bytes, std430-safe) | legacy spec §"GPU Collider Struct", line ~152 |
-| Kinematic classification at-load algorithm | legacy spec §"Kinematic Classification", line ~644 |
-| BFS depth-based rigidity algorithm | legacy spec §"Depth-based rigidity", line ~702 |
+| Prototype spec (v1.5+ reference, frozen) | `docs/body_field/flesh_deformer_v2_legacy.md` |
+| `.bin` file format v3 | 05-14 §6 (`tet_skin_indices`, `tet_skin_weights`, optional per-region material slots) |
+| Collision-layer partition | 05-14 §3.1 (`LAYER_BODY_PROXY` / `_CAPSULES_DETAIL` / `_CAPSULES_FULL`) |
+| Impulse re-routing API | 05-14 §3.2 (`BodyField::receive_external_impulse(world_point, impulse, ps)`) |
+| Per-region material composition via 4S.3 surface tags | 05-14 §3.3 |
+| kasumi-without-body_field smoke test | 05-14 §5 |
+| Apply-pass roadmap (Marionette + TT canonical doc edits) | 05-14 §7 |
+| TentacleTech §4.2 / §4.5 / §10.5 (pending apply) | `docs/architecture/TentacleTech_Architecture.md` |
 | TentacleTech §6.12 canal interior pipeline | `docs/architecture/TentacleTech_Architecture.md` §6.12 |
-| TentacleTech §4.2 contact types + §4.5 ragdoll snapshot rule | `docs/architecture/TentacleTech_Architecture.md` §4.2, §4.5 |
-| Marionette §15 jiggle bones | `docs/marionette/Marionette_plan.md` §15 |
-| Marionette §17 surface field sibling | `docs/marionette/Marionette_plan.md` §17 |
-| `BoneCollisionProfile` (Marionette resource, shared SoT) | `extensions/marionette/gdscript/resources/bone_collision_profile.gd` |
+| Hero skinning stack (DQS + DDM + surface-field offsets) | `docs/Cosmic_Bliss_Update_2026-05-11_hero_skinning_stack.md` |
+| Marionette §15 jiggle bones (pending apply) | `docs/marionette/Marionette_plan.md` §15 |
+| Marionette §17 surface field sibling (pending apply) | `docs/marionette/Marionette_plan.md` §17 |
+| `BoneCollisionProfile` (Marionette resource, shared SoT for v1.5+ SDFs) | `extensions/marionette/gdscript/resources/bone_collision_profile.gd` |
 | Repo-root build script | `tools/build.sh` (read first 60 lines for layout rules) |
 | Prototype source (read-only reference) | `~/desktop/flesh-deformer/` |

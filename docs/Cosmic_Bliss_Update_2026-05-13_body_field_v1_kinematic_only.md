@@ -1,7 +1,16 @@
 ## Cosmic Bliss — Design Update 2026-05-13 — `body_field` v1: kinematic-only proxy, parallel to render mesh
 
-> **Status: drafted 2026-05-13, awaiting apply pass to
-> `Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md`.**
+> **Status: drafted 2026-05-13.** Per-particle per-region dispatch
+> claims in §"Two parallel paths" and §"Extremities mask" are
+> **superseded** by `Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md`
+> — that dispatch model was not implementable against TentacleTech's
+> probe architecture and silently broke friction reciprocal bone
+> routing. 05-14 replaces it with collision-layer partition +
+> `BodyField::receive_external_impulse` + per-region material via
+> 4S.3 surface tags, and codifies the hard-optional invariant. The
+> v1 scope (kinematic-only, parallel to render mesh, no XPBD, no
+> surface_transfer in v1) is **unchanged** by 05-14.
+>
 > Amends the v1 scope, slice breakdown (D5/D7), and open question Q1
 > of the 05-12-02 brief. Does not change extension placement (D1),
 > migration approach (D2), TT contact-fork model (D3), or
@@ -10,7 +19,7 @@
 > for why render-mesh fidelity is preserved.
 >
 > **Audience: top-level Claude (canonical record). Sub-Claude reading
-> the 05-12-02 brief should read this as the v1-scope override until
+> the 05-12-02 brief should read 05-13 + 05-14 as the v1 stack until
 > the apply pass folds these changes into the original brief.**
 
 ---
