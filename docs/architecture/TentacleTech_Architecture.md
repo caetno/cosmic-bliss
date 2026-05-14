@@ -260,7 +260,7 @@ All share the PBD projection pattern from §4.3. Different detection and differe
 
 | # | Type | Detection | Resolution | Has friction |
 |---|---|---|---|---|
-| 1 | Particle vs ragdoll capsule | Once-per-tick snapshot + AABB broadphase | Project outside capsule surface; apply reaction impulse to bone | Yes |
+| 1 | Particle vs outer body (proxy or capsule, per collision-layer partition) | Per-particle sphere `get_rest_info` query against `LAYER_BODY_PROXY \| LAYER_BODY_CAPSULES_DETAIL \| LAYER_BODY_CAPSULES_FULL` | Project outside hit surface; route reciprocal impulse to bones — direct `body_apply_impulse` on capsule hit, weighted re-routing via `BodyField::receive_external_impulse` on proxy hit | Yes |
 | 2 | Particle vs orifice rim | EntryInteraction geometric test | Per-direction ring bilateral compliance (§6.3) | Yes |
 | 3 | Particle vs tunnel wall | Spline projection with radius tolerance | Project onto tunnel cylinder; record wall pressure | Yes |
 | 4 | Particle vs environment | Per-particle sphere `get_rest_info` query, iterated up to `MAX_CONTACTS_PER_PARTICLE = 2` slots with growing exclude list (slice 4M, 2026-05-03) | Per-contact XPBD penetration projection with persistent `normal_lambda` accumulator; Jacobi+SOR position apply averages multi-contact deltas | Yes (per-contact lambda-bounded cone) |
@@ -271,6 +271,16 @@ All share the PBD projection pattern from §4.3. Different detection and differe
 **Type 2 (orifice rim) is not a simple particle-surface projection.** It operates through the `EntryInteraction` and rim particle loop model. See §6.
 
 **Type 6 (attachment) is how tentacles grab limbs.** Particle is pinned to a point on a target surface (ragdoll bone, static geometry, another tentacle). Attachment holds while tangential force is within static friction cone; breaks with slip accumulation.
+
+**Type 1 collision-layer partition (per `Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md` §3).** The hero body presents to TT on three collision layers, assigned at hero-init based on whether a `BodyField` node is in the scene:
+
+- `LAYER_BODY_PROXY` — body_field's tet outer surface, when present. Single `AnimatableBody3D` covering torso/limbs/head; hands and feet are excluded at authoring time and stay on capsules.
+- `LAYER_BODY_CAPSULES_DETAIL` — `BoneCollisionProfile` capsules for hands and feet only. Active when body_field is present.
+- `LAYER_BODY_CAPSULES_FULL` — `BoneCollisionProfile` capsules for the entire skeleton. Active when body_field is absent.
+
+TT particles query against `LAYER_BODY_PROXY | LAYER_BODY_CAPSULES_DETAIL | LAYER_BODY_CAPSULES_FULL | LAYER_WORLD` unconditionally. Whichever layers are populated by the hero get hit. No per-particle dispatch; no region enum at runtime; no pre-probe classification. body_field-absent heroes naturally fall through to the full capsule path because `LAYER_BODY_PROXY` and `LAYER_BODY_CAPSULES_DETAIL` are empty — bit-for-bit equivalent to the pre-body_field baseline.
+
+**Type 1 reciprocal routing on proxy hits.** When the hit body's metadata names a `BodyField` node, the impulse is routed through `BodyField::receive_external_impulse(world_point, impulse, ps)`. Body_field redistributes the impulse to the skin-weighted bones at the contact point as `impulse * w_b` per influencing bone, applying per-bone `body_apply_impulse` to the Jolt-side bone bodies. Applying TT's impulse directly to the tet body's RID would be a no-op for ragdoll motion (the tet body has no Marionette bone as a child) and silently break the "tentacle drags hero" feel — `receive_external_impulse` is the bridge. Capsule hits remain direct: `ps->body_apply_impulse(hit_rid, impulse, offset)` on the per-bone Jolt body as before.
 
 ### 4.3 Unified PBD friction projection
 
@@ -393,25 +403,15 @@ if BARBED:
 | Barbed | 0.9 | 0.5 | 0.7 | 1.1 | 1.5 |
 | Sticky | 0.6 +adh 0.4 | 0.4 +adh 0.2 | 0.5 +adh 0.3 | 0.7 +adh 0.4 | 0.8 +adh 0.5 |
 
-### 4.5 Once-per-tick ragdoll snapshot
+### 4.5 Body-body snapshot discipline (once per substep)
 
-**The single most important performance rule.** Before the PBD iteration loop:
+**The single most important performance rule.** Body-body queries (hero capsules; body_field tet proxy, when present) are snapshotted **once per substep** at the substep boundary, never re-read inside the PBD iteration loop. Substeps can be > 1 per outer tick; the rule applies per-substep, not per-tick.
 
-```
-ragdoll_snapshot = []
-for each PhysicalBone3D in the hero's skeleton:
-    capsule_a_world = bone.global_transform × capsule.endpoint_a
-    capsule_b_world = bone.global_transform × capsule.endpoint_b
-    ragdoll_snapshot.append({
-        a: capsule_a_world,
-        b: capsule_b_world,
-        radius: capsule.radius,
-        bone_ref: bone,
-        surface_material: bone.surface_material
-    })
-```
+**The substep-boundary mechanism is per-particle `get_rest_info`.** Type-1 detection (per the §4.2 table) and type-4 environment detection share the same probe path: a per-particle sphere `get_rest_info` query at the start of the substep returns the colliding body's RID, surface normal, and contact point. Body identification, surface material lookup, and per-body local-frame caching all flow from the probe result. The `ragdoll_snapshot` array that earlier ticks of this spec described is effectively retired — `get_rest_info` returns the colliding body directly, so per-bone pre-snapshot is redundant. The single literal "snapshot" that remains is a per-body local-frame cache (4S.2): for each body the probe has hit recently, cache `body_node->get_global_transform()` at substep boundary so per-particle contact persistence reads from the cache rather than re-querying the physics server mid-iteration.
 
-During PBD iterations, type-1 collision reads from this array. **Never query `PhysicalBone3D.global_transform` inside the iteration loop** — it triggers physics-server synchronization and destroys performance.
+**Body_field tet proxy obeys the same discipline.** When body_field is present, its `kinematic_targets.glsl` compute pass writes tet vertex positions once per substep at the substep boundary, *before* TT's per-particle probe runs in the same substep. Dispatch ordering is enforced via node `_physics_process` priority — body_field's pass runs first, then TT consumes the resulting tet surface positions through the probe. body_field's writer is non-iterative in v1 (kinematic-only) so the discipline is trivially satisfied for the writer; v1.5 sim shaders, when they land, preserve the discipline because the full XPBD predict/correct still runs once per substep, not per PBD iteration.
+
+**Never query `Node3D::get_global_transform()` from inside an `_integrate_forces` callback** — during Jolt's parallel-tick dispatch the skeleton's bone poses are mid-write by `PhysicalBoneSimulator3D` and partial. This applies to consumers in TT (`tentacle.cpp` contact-persistence path) and to consumers in sibling extensions (`jiggle_bone.gd`, Marionette's bone-frame reads). Snapshot at the substep boundary and read from the cache.
 
 ### 4.6 Wetness accumulation from external friction
 
@@ -1026,7 +1026,7 @@ A tentacle may traverse multiple orifices as a chained path ("all-the-way-throug
 
 - Each `EntryInteraction` gains optional `downstream_interaction` and `upstream_interaction` pointers.
 - Tunnel projection sums along the linked chain; the tentacle spline passes through all orifices' tunnel splines in sequence.
-- Capsule suppression (§10.5) unions the suppression lists of all chained orifices.
+- Contact suppression (§10.5) unions the suppression lists of all chained orifices.
 - Bulger sampling (§7.2) covers the full chained interior — allocate 6 samples per orifice in the chain, not 6 samples per tentacle.
 - AI targeting uses the entry orifice only; the exit orifice is emergent from physics.
 - Chain linking is detected by proximity: when a penetrating tentacle's tip enters a second orifice's entry plane while still engaged upstream, a downstream `EntryInteraction` is created and linked.
@@ -1244,7 +1244,7 @@ struct CanalCenterline {
 
 Per-tick centerline update (same Jacobi+SOR pattern as the rim loop, §6.4):
 
-1. **Refresh rest positions** from the CP bones — once per tick before iterate, same discipline as §4.5 ragdoll snapshot.
+1. **Refresh rest positions** from the CP bones — once per substep before iterate, same discipline as §4.5 body-body snapshot.
 2. **XPBD distance** between consecutive particles — preserves canal length, axial-plastic compliance for sustained-stretch memory.
 3. **XPBD bending** at each interior triple — preserves smooth rest curvature.
 4. **XPBD spring-back** to `rest_position_world + plastic_lateral_offset + muscular_curl_delta` — controls how stiff the canal axis is. Per-particle stiffness distribution is the per-canal "bend compliance" knob.
@@ -1504,7 +1504,7 @@ Each hero's `SkinBulgeDriver` aggregates capsule bulgers each tick from the foll
 - For tentacle-root beads: emit capsules between the pinned particles (treats the stored tentacle's base as a short segmented shape in the tunnel).
 - Strength = 1.0. Priority tier = `Storage` (see §7.6).
 
-**External contacts** (type-1 capsule collisions with significant normal force):
+**External contacts** (type-1 outer-body collisions with significant normal force, either path per §4.2):
 - Emit a capsule with `A == B` at contact point (degenerate = sphere).
 - Radius = `clamp(normal_force / reference_force, 0, max_external_radius) × external_bulge_factor`.
 - Strength = 1.0. Priority tier = `Transient`.
@@ -2230,15 +2230,20 @@ When any manual override is set, that step's auto-derivation is skipped; other s
 
 **Ragdoll colliders:** start with capsules everywhere (auto-generated from bone lengths). Upgrade specific bones to convex hulls only where capsules fail visibly (hands, feet). Start collision layer: `ragdoll_body`. Tentacles don't collide with it directly via physics server — they read the per-tick snapshot and apply per-tentacle suppression lists.
 
-### 10.5 Capsule suppression during interactions
+### 10.5 Contact suppression during interactions
 
-When a tentacle has an active `EntryInteraction` with an orifice, specific ragdoll capsules are excluded from its type-1 collision queries. The `OrificeProfile` lists these by bone name. Typical:
+When a tentacle has an active `EntryInteraction` with an orifice, type-1 contacts in the orifice's anatomical neighborhood are suppressed for the involved particles. The semantic is "let the tentacle go *inside* the body at the orifice without fighting outer-body geometry"; the dispatch is per the §4.2 path that produced the hit.
+
+Suppression is authored once per orifice via `OrificeProfile.suppressed_bones` (a list of bone names — auto-populated per §10.4 from proximity at bake time, with manual override via `OrificeProfile.manual_suppressed_bones`). At runtime:
+
+- **Capsule path (body_field absent, or hand/foot extremities under body_field).** The hit body's RID identifies a `BoneCollisionProfile` capsule; suppression is direct — if the capsule's bone name is in the orifice's suppressed list, the contact is discarded for that particle.
+- **Proxy path (body_field present, torso/limbs/head).** The hit point identifies a tet surface face; that face maps back to the skin-weighted bones via the same per-tet bone-weight table `BodyField::receive_external_impulse` uses (§4.2). If the face's dominant skin-weighted bone is in the suppressed list, the contact is discarded — equivalently, the suppressed region of the proxy is "masked off" for particles inside the EI.
+
+Same semantic in both cases (suppress contact in the orifice's anatomical neighborhood); the dispatch is keyed on which path produced the hit, not authored separately. Typical suppressed-bone lists:
 - Mouth orifice → suppress jaw, neck, upper chest
 - Torso orifice → suppress pelvis, hips, upper thighs
 
-This is the mechanism enabling tentacles to go *inside* the body at the orifice without fighting internal ragdoll geometry.
-
-Auto-suppression per §10.4 populates this list from proximity at bake time; manual override remains available via `OrificeProfile.manual_suppressed_bones`.
+This is the mechanism enabling tentacles to go *inside* the body at the orifice without fighting outer-body geometry.
 
 ### 10.6 Authoring workflow — ARP + FaceIt + Godot export
 
@@ -2610,7 +2615,7 @@ Previously parked as a placeholder. Opened explicitly because (a) several Phase 
 - **Fresh-contact snapshot vs last-tick snapshot:** `PBDSolver::get_particle_in_contact_snapshot()` reflects the previous tick's iterate-loop flags (gated on `inv_mass > 0`). Behavior drivers reducing stiffness on contact should consume `Tentacle::get_in_contact_this_tick_snapshot()` (slice 4N, 2026-05-03; written between probe and iterate, fires for any particle within probe range including pinned). The two accessors have different semantics by design — choose by use case. Process-order requirement: drivers consuming the fresh accessor must run their `_physics_process` after the Tentacle's; default parent-first ordering when the driver is a child of the Tentacle gives this for free.
 - **`predict()` clears `in_contact_this_tick`:** the `target_softness_when_blocked` modulation in iterate step 2 (slice 4M-pre.2) reads the flag set by the *previous* iter's collision step, so iter 0 of every tick pulls at full strength regardless of contact state — a 1-iter latency on the softening. Acceptable for headless tests (steady-state convergence dominates); flagged for future work if a scenario shows soft-vs-stiff difference invisibly.
 - **Orifice boundary flipping:** hysteresis on "inside tunnel" vs "outside" — enter at 5cm past plane, exit at 2cm outside.
-- **Double-counting at orifice entry:** type-1 capsule collision is suppressed per-particle for capsules in the orifice's `suppressed_bones` list. Prevents particle feeling both capsule push and ring compression.
+- **Double-counting at orifice entry:** type-1 outer-body contact is suppressed per-particle for the bodies/regions in the orifice's `suppressed_bones` list (§10.5; capsule path discards per-bone, proxy path masks the corresponding tet faces). Prevents particle feeling both outer-body push and ring compression.
 - **Friction resonance/jitter:** high `μ_s` with low iteration count oscillates at the cone boundary. Add 5% dead-band around static cone threshold.
 - **Ring runaway:** hard clamp on `current_radius` prevents spring from pushing past anatomical limits. Velocity zeroed at clamp.
 - **Attachment slip compounding:** slip accumulates; after `max_slip_from_original` drift, detach entirely rather than re-anchor further.
