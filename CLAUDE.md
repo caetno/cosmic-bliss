@@ -104,5 +104,5 @@ Design updates that amend the canonical docs live in `docs/Cosmic_Bliss_Update_*
 - Per-frame `ArrayMesh` rebuilds
 - Godot's `SoftBody3D` for anything in this project
 - SSBOs in spatial shaders (4.6 still doesn't support this — use RGBA32F data textures)
-- Querying `PhysicalBone3D.global_transform` during PBD iterations (snapshot once per tick)
+- Querying `Node3D::get_global_transform()` from inside an `_integrate_forces` callback or PBD iteration loop — snapshot once per substep at the substep boundary
 - Generating Godot test scenes without explicit permission, OR scenes containing animation tracks, baked lighting, custom Resource files, or rigged characters even with permission (those still require a separate explicit ask)
