@@ -1,12 +1,19 @@
 # Cosmic Bliss — Design Update 2026-05-12-02 — Flesh-deformer integration (`body_field` extension)
 
-> **Status: applied 2026-05-12 to `docs/marionette/Marionette_plan.md`
-> §18 in commit `94cc0f4`** (STRETCH → ACTIVE, retitle to "Volumetric
-> tet substrate", cross-references from §15 / §16 / §17 to `body_field`
-> extension, three §18 amendments reframed as v2+ slices B7–B10).
-> Brief retained as the v1 design record; sub-Claudes can read this
-> for "what's in v1 and why," Marionette_plan.md §18 for the
-> architecture-level placement.
+> **Status: superseded for v1 by `Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md`
+> and `Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md`.**
+> This brief retains as the v1.5+ reference (the full GPU XPBD path
+> when v1.5 opens) and as the canonical record for extension placement
+> (D1), migration approach (D2), TT contact-fork model (D3), and
+> `BoneCollisionProfile`-as-source-of-truth (D4). v1 scope, slice
+> breakdown (D5/D7), and open questions Q1–Q5 are overridden by 05-13
+> (v1 scope reduction) and 05-14 (dispatch redesign + hard-optional
+> invariant + `.bin` v3). Read 05-12-02 → 05-13 → 05-14 as a stack.
+>
+> Apply pass to `docs/marionette/Marionette_plan.md` §18 (STRETCH →
+> ACTIVE, retitle, three §18 amendments to v2+ slices B7–B10) landed
+> at commit `94cc0f4`; the further apply-pass items per 05-14 §7 are
+> still pending.
 >
 > A working GPU XPBD volumetric tet deformer prototype exists at
 > `~/desktop/flesh-deformer/` (full inventory in
