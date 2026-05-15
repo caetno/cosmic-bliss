@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://6jdkh22t7fpc"
+path="res://.godot/imported/kinematic_targets.glsl-6feac35849cf9f3a42e69963dfcf477b.res"
+
+[deps]
+
+source_file="res://addons/body_field/shaders/kinematic_targets.glsl"
+dest_files=["res://.godot/imported/kinematic_targets.glsl-6feac35849cf9f3a42e69963dfcf477b.res"]
+
+[params]
+

@@ -1,12 +1,10 @@
 extends SceneTree
 
-# B1 — body_field test harness. SceneTree + _process one-shot pattern
-# (mirrors TentacleTech 5E). The harness graduates to the Marionette
-# internal-`_test_*`-function-list pattern when the test surface multiplies
-# further in B2+.
+# B2 — body_field test harness. SceneTree + _process one-shot pattern
+# (mirrors TentacleTech 5E).
 #
 # Run from repo root:
-#   godot --headless --quit-after 5 \
+#   godot --headless --quit-after 10 \
 #     --script /home/caetano/desktop/cosmic-bliss/extensions/body_field/tests/run_tests.gd
 
 var _ran: bool = false
@@ -28,8 +26,9 @@ func _run() -> void:
 		"test_flesh_data_bad_magic",
 		"test_flesh_data_v2_rejected",
 		"test_flesh_data_v3_weight_normalization",
+		"test_kinematic_targets_lbs",
 	]:
-		var result: bool = call(test_name)
+		var result: bool = await call(test_name)
 		if result:
 			passed += 1
 		else:
@@ -39,11 +38,9 @@ func _run() -> void:
 
 
 func test_body_field_bridge() -> bool:
-	# Pure-GDScript class_name registers in the global script class
-	# cache but NOT in ClassDB (which only tracks engine-native + GDExtension
-	# classes). Verify via load() against the deployed res:// path — this
-	# bridges the full chain: build.sh deploy → res:// resolution →
-	# script parse → instantiate → method call.
+	# B2 refactor: bridge marker is gone. Smoke-test that the deployed
+	# script loads + instantiates as a Node3D (the v1 BodyField surface).
+	# All real verification moves to test_kinematic_targets_lbs.
 	const SCRIPT_PATH := "res://addons/body_field/runtime/body_field.gd"
 	var script: GDScript = load(SCRIPT_PATH) as GDScript
 	if script == null:
@@ -52,10 +49,6 @@ func test_body_field_bridge() -> bool:
 	var bf: Node3D = script.new() as Node3D
 	if bf == null:
 		print("[FAIL] test_body_field_bridge: script.new() returned null or non-Node3D")
-		return false
-	if bf._bridge_test_marker() != "body_field ok":
-		print("[FAIL] test_body_field_bridge: _bridge_test_marker() returned %s" % bf._bridge_test_marker())
-		bf.free()
 		return false
 	bf.free()
 	print("[PASS] test_body_field_bridge")
@@ -307,6 +300,183 @@ func test_flesh_data_v3_weight_normalization() -> bool:
 			return false
 
 	print("[PASS] test_flesh_data_v3_weight_normalization")
+	return true
+
+
+# --- B2 LBS test --------------------------------------------------------
+
+func test_kinematic_targets_lbs() -> bool:
+	# B2 acceptance: kinematic_targets.glsl produces 4-bone weighted LBS
+	# that matches a GDScript reference computation within 1e-4.
+	#
+	# We use a LOCAL RenderingDevice (create_local_rendering_device) here,
+	# not the global one. Reasons:
+	#   1. In `--headless`, the global RD's submit/sync timing is awkward
+	#      (the test would need to wait for the engine to flush a frame).
+	#   2. A local RD lets us call submit()/sync() explicitly right after
+	#      compute_list_end(), then read back tet_pos deterministically
+	#      via buffer_get_data().
+	# The production code path stays on the global RD via
+	# RenderingServer.get_rendering_device(); the test path injects a
+	# local RD via _set_rendering_device_for_test().
+
+	const BodyFieldScript := preload("res://addons/body_field/runtime/body_field.gd")
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+
+	# --- Build a synthetic Skeleton3D with 3 bones at non-trivial poses.
+	# Rests are all identity at origin so `global_rest_inv = identity` and
+	# the skinning matrix reduces to `sw * posed`. With sw = identity:
+	# skinning[bone_b] == posed[bone_b], simplifying the GDScript-side
+	# reference computation.
+	var skel := Skeleton3D.new()
+	skel.add_bone("b0")
+	skel.add_bone("b1")
+	skel.add_bone("b2")
+	# Rests stay at the default identity Transform3D — leaving them so the
+	# skinning-matrix simplification above holds.
+
+	# Pose 0: identity. Pose 1: translate (1, 0, 0). Pose 2: rotate
+	# 90° around Y. (Different transform shapes for coverage.)
+	var pose0 := Transform3D.IDENTITY
+	var pose1 := Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0))
+	var pose2 := Transform3D(Basis(Vector3(0, 1, 0), PI / 2.0), Vector3.ZERO)
+
+	# Build a tiny scene root so global_transform / global_pose are
+	# well-defined and Skeleton3D processes its pose.
+	var root := Node3D.new()
+	get_root().add_child(root)
+	root.add_child(skel)
+	skel.set_bone_pose_position(0, pose0.origin)
+	skel.set_bone_pose_rotation(0, pose0.basis.get_rotation_quaternion())
+	skel.set_bone_pose_position(1, pose1.origin)
+	skel.set_bone_pose_rotation(1, pose1.basis.get_rotation_quaternion())
+	skel.set_bone_pose_position(2, pose2.origin)
+	skel.set_bone_pose_rotation(2, pose2.basis.get_rotation_quaternion())
+
+	# Skeleton3D updates its global pose lazily; force it.
+	skel.force_update_all_bone_transforms()
+
+	# --- Build synthetic FleshData with 4 tet verts.
+	var flesh := FleshDataScript.new()
+	flesh.mesh_name = "lbs_test"
+	flesh.n_tet_verts = 4
+	flesh.n_tet_cells = 0
+	flesh.n_render_verts = 0
+	# Rest positions chosen NOT at origin so translations are visible.
+	flesh.tet_verts = PackedFloat32Array([
+		0.5, 0.0, 0.0,       # vert 0
+		0.0, 0.7, 0.0,       # vert 1
+		0.3, 0.3, 0.3,       # vert 2
+		1.0, 0.5, 0.2,       # vert 3
+	])
+	flesh.tet_cells = PackedInt32Array()
+	flesh.bary_tet_idx = PackedInt32Array()
+	flesh.bary_uvw = PackedFloat32Array()
+	flesh.render_influence = PackedFloat32Array()
+	# Vert 0: 1-bone bone 0 weight 1.0
+	# Vert 1: 1-bone bone 1 weight 1.0
+	# Vert 2: 2-bone bone 0 weight 0.5 + bone 1 weight 0.5
+	# Vert 3: 2-bone bone 0 weight 0.3 + bone 2 weight 0.7
+	flesh.tet_skin_indices = PackedInt32Array([
+		0, 0, 0, 0,
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 2, 0, 0,
+	])
+	flesh.tet_skin_weights = PackedFloat32Array([
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+		0.5, 0.5, 0.0, 0.0,
+		0.3, 0.7, 0.0, 0.0,
+	])
+
+	# --- Compute expected positions in GDScript, mirroring the shader.
+	# Skinning matrix = sw * posed * rest_inv. rest = identity so
+	# rest_inv = identity. sw = skel.global_transform; force-update above
+	# means skel is in the scene tree but root is at identity, so
+	# sw == identity. Skinning[b] == posed[b].
+	var sw := skel.global_transform
+	var skin: Array[Transform3D] = []
+	for bi in range(skel.get_bone_count()):
+		var posed := skel.get_bone_global_pose(bi)
+		var rest_inv := skel.get_bone_global_rest(bi).affine_inverse()
+		skin.append(sw * posed * rest_inv)
+
+	var expected: PackedVector3Array = PackedVector3Array()
+	expected.resize(flesh.n_tet_verts)
+	for v in range(flesh.n_tet_verts):
+		var rest_v := Vector3(
+			flesh.tet_verts[v * 3 + 0],
+			flesh.tet_verts[v * 3 + 1],
+			flesh.tet_verts[v * 3 + 2])
+		var sum := Vector3.ZERO
+		for k in range(4):
+			var b: int = flesh.tet_skin_indices[v * 4 + k]
+			var w: float = flesh.tet_skin_weights[v * 4 + k]
+			sum += w * (skin[b] * rest_v)
+		expected[v] = sum
+
+	# --- Create BodyField with local RD and dispatch once.
+	var local_rd := RenderingServer.create_local_rendering_device()
+	if local_rd == null:
+		print("[FAIL] test_kinematic_targets_lbs: create_local_rendering_device returned null")
+		root.queue_free()
+		return false
+
+	var bf: Node3D = BodyFieldScript.new()
+	bf.flesh_data = flesh
+	bf.skeleton = skel
+	bf._set_rendering_device_for_test(local_rd)
+	root.add_child(bf)
+	# _ready runs synchronously when adding to tree, so _init_compute()
+	# has been called.
+
+	if not bf._compute_ready:
+		print("[FAIL] test_kinematic_targets_lbs: _compute_ready is false after _ready()")
+		root.queue_free()
+		return false
+
+	bf.dispatch_once()
+	# Local RD: submit + sync explicitly to make the buffer readable.
+	local_rd.submit()
+	local_rd.sync()
+
+	var tet_pos_rid: RID = bf.get_tet_positions_buffer_rid()
+	if not tet_pos_rid.is_valid():
+		print("[FAIL] test_kinematic_targets_lbs: invalid tet_pos buffer RID")
+		root.queue_free()
+		return false
+
+	var bytes := local_rd.buffer_get_data(tet_pos_rid)
+	var actual := bytes.to_float32_array()
+	if actual.size() != flesh.n_tet_verts * 3:
+		print("[FAIL] test_kinematic_targets_lbs: buffer size %d != %d" % [
+			actual.size(), flesh.n_tet_verts * 3])
+		root.queue_free()
+		return false
+
+	const TOL := 1e-4
+	var ok := true
+	for v in range(flesh.n_tet_verts):
+		var got := Vector3(actual[v * 3 + 0], actual[v * 3 + 1], actual[v * 3 + 2])
+		var exp: Vector3 = expected[v]
+		if abs(got.x - exp.x) > TOL or abs(got.y - exp.y) > TOL or abs(got.z - exp.z) > TOL:
+			print("[FAIL] test_kinematic_targets_lbs: vert %d expected %s got %s" % [v, exp, got])
+			ok = false
+
+	# Free BodyField (its _exit_tree() frees the GPU resources it owns on
+	# the local RD) before we drop the local RD. Use free() not queue_free()
+	# so teardown is synchronous and the RD cleanup ordering is deterministic.
+	bf.get_parent().remove_child(bf)
+	bf.free()
+	root.queue_free()
+	# Note: local_rd is owned by us. Godot frees it when the variable goes
+	# out of scope at end of function. On some NVIDIA driver builds a stray
+	# OpenGL teardown crash can happen at engine exit AFTER this test's
+	# pass print; that's a driver-side issue, not a test failure.
+	if not ok:
+		return false
+	print("[PASS] test_kinematic_targets_lbs")
 	return true
 
 
