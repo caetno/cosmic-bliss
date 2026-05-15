@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include "marionette_bone.h"
 
@@ -23,6 +24,13 @@ void MarionetteCore::_ready() {
 }
 
 void MarionetteCore::_physics_process(double p_delta) {
+	// Mar-I14 — body rhythm clock. Runs at the TOP of the physics callback
+	// so any downstream consumer (cyclic evaluator, future composer) reads
+	// the same phase the SPD substeps will see. Body of the integrator
+	// lives in `step_body_rhythm_phase` so unit tests can drive it without
+	// a live SceneTree.
+	step_body_rhythm_phase(p_delta);
+
 	// Mar-I6 — refresh the parent-basis cache BEFORE the SPD substeps run.
 	// `MarionetteBone::_integrate_forces` reads from this cache instead of
 	// live-querying `Node3D::get_global_transform()` (which inside the
@@ -306,6 +314,51 @@ Object *MarionetteCore::get_root_bone() const {
 	return root_bone;
 }
 
+void MarionetteCore::set_body_rhythm_frequency(float p_hz) {
+	// Mar-I14 — clamp at the setter so the integrator hot path stays branch-
+	// free. Negative frequency would run phase backward (pathological);
+	// emit a one-line warning so misconfigured callers surface in logs.
+	if (p_hz < 0.0f) {
+		UtilityFunctions::push_warning(
+				"MarionetteCore: body_rhythm_frequency clamped to 0 (got negative value)");
+		p_hz = 0.0f;
+	}
+	body_rhythm_frequency = p_hz;
+}
+
+float MarionetteCore::get_body_rhythm_frequency() const {
+	return body_rhythm_frequency;
+}
+
+double MarionetteCore::get_body_rhythm_phase() const {
+	return body_rhythm_phase;
+}
+
+int64_t MarionetteCore::get_body_rhythm_cycle_index() const {
+	return body_rhythm_cycle_index;
+}
+
+void MarionetteCore::step_body_rhythm_phase(double p_delta) {
+	// Mar-I14 — INTEGRATED form (`phase += freq * TAU * dt`), never the
+	// recomputed form (`phase = freq * t`). A frequency change therefore
+	// does NOT snap the phase — TT's `RhythmSyncedProbe` lock and any
+	// other external consumer stay continuous across arousal transitions.
+	// `while` (not `if + fmod`) so cycle events don't drop at high freq ×
+	// low fps (closes Mar-I7 code side). Negative delta is a no-op: the
+	// setter clamps frequency at 0, the hot path stays branch-free, and
+	// pathological inputs from callers (rewound time) leave the phase
+	// alone instead of running backward.
+	if (p_delta <= 0.0) {
+		return;
+	}
+	body_rhythm_phase += static_cast<double>(body_rhythm_frequency) * Math_TAU * p_delta;
+	while (body_rhythm_phase >= Math_TAU) {
+		body_rhythm_phase -= Math_TAU;
+		++body_rhythm_cycle_index;
+		emit_signal("body_rhythm_cycle_completed", body_rhythm_cycle_index);
+	}
+}
+
 void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("hello"), &MarionetteCore::hello);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &MarionetteCore::tick);
@@ -384,6 +437,25 @@ void MarionetteCore::_bind_methods() {
 			&MarionetteCore::unregister_bone_bound);
 	ClassDB::bind_method(D_METHOD("set_parent_basis_snapshot_for_test", "bone", "basis"),
 			&MarionetteCore::set_parent_basis_snapshot_for_test);
+
+	// Mar-I14 — body rhythm clock. Frequency is settable from anywhere
+	// (Reverie writes once on arousal change; future composer writes the
+	// slewed value once per tick); phase + cycle index are read-only.
+	ClassDB::bind_method(D_METHOD("set_body_rhythm_frequency", "hz"),
+			&MarionetteCore::set_body_rhythm_frequency);
+	ClassDB::bind_method(D_METHOD("get_body_rhythm_frequency"),
+			&MarionetteCore::get_body_rhythm_frequency);
+	ClassDB::bind_method(D_METHOD("get_body_rhythm_phase"),
+			&MarionetteCore::get_body_rhythm_phase);
+	ClassDB::bind_method(D_METHOD("get_body_rhythm_cycle_index"),
+			&MarionetteCore::get_body_rhythm_cycle_index);
+	ClassDB::bind_method(D_METHOD("step_body_rhythm_phase", "delta"),
+			&MarionetteCore::step_body_rhythm_phase);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "body_rhythm_frequency"),
+			"set_body_rhythm_frequency", "get_body_rhythm_frequency");
+
+	ADD_SIGNAL(MethodInfo("body_rhythm_cycle_completed",
+			PropertyInfo(Variant::INT, "cycle_index")));
 }
 
 } // namespace godot

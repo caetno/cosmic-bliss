@@ -628,11 +628,13 @@ Per-tick (in `_physics_process` or wherever the cyclic evaluator runs):
 
 ```
 body_rhythm_phase += body_rhythm_frequency * TAU * delta
-if body_rhythm_phase >= TAU:
-    body_rhythm_phase = fmod(body_rhythm_phase, TAU)
+while body_rhythm_phase >= TAU:
+    body_rhythm_phase -= TAU
     cycle_index += 1
     body_rhythm_cycle_completed.emit(cycle_index)
 ```
+
+Use `while` (not `if + fmod`) so cycle events don't drop at high frequency × low fps. Closes Mar-I7 latent issue.
 
 **Cyclic evaluator change.** All `BoneOscillator` and `TravelingWaveCyclic` evaluation reads `body_rhythm_phase` as the time argument, scaled by the resource's own `freq_mult` (oscillator) or `temporal_frequency` (wave) **relative to** `body_rhythm_frequency`. The resource specifies its frequency *as a multiple of the body's rhythm*, not in absolute Hz. This is the right semantics — the hip ellipse and the spinal undulation should slow down together when arousal drops, not drift apart.
 
@@ -640,7 +642,7 @@ if body_rhythm_phase >= TAU:
 
 Tasks:
 - **P7.10.1** — Add `body_rhythm_frequency`, `body_rhythm_phase`, `body_rhythm_cycle_completed` to `Marionette`.
-- **P7.10.2** — Integrate phase per physics tick (integrated, never recomputed).
+- **P7.10.2** — Integrator lives on `MarionetteCore` (C++), inside `_physics_process` — single source of truth for the rhythm clock. GDScript wrapper exposes get/set forwarders and re-emits `body_rhythm_cycle_completed`. The integrated form (phase += freq · dt) is mandatory — recomputed form (`phase = freq · t`) snaps on frequency changes.
 - **P7.10.3** — Migrate `BoneOscillator` and `TravelingWaveCyclic` evaluators to read `body_rhythm_phase`.
 - **P7.10.4** — Resource fields renamed/repurposed: oscillator `frequency_multiplier` is now relative to `body_rhythm_frequency`; document the migration. `TravelingWaveCyclic.temporal_frequency` becomes a multiplier rather than absolute Hz.
 
@@ -850,8 +852,8 @@ These are binding for this phase. Implement them; don't renegotiate.
   Pump direction is observed (estimator), pump phase is committed (read from `body_rhythm_phase` directly). No filter lag in the active output.
 - **P10.7** — Strain computation: per-tick, composer queries each `MarionetteBone` for current required-vs-clamp ratio. `body_strain = Σ smoothstep(0.7, 1.0, required_torque[j] / max_torque[j])²`. Published on Stimulus Bus continuous channel `body_strain`.
 - **P10.8** — Two-stage strain solve: solve IK once without strain cost. Compute strain. If any joint saturates above threshold, re-solve with `strain_cost` term added. Most ticks pay only the cheap pass.
-- **P10.9** — Frequency compliance integration: composer reads `body_rhythm_frequency_proposed` (Reverie writes) and lerps `body_rhythm_frequency` toward it at rate `compliance × dt × responsiveness`, capped by `df_dt_max` from the current mindset's frequency compliance curve.
-- **P10.10** — `body_rhythm_phase` integration in C++ — never reset, monotonically increasing modulo 2π for evaluation, integrated continuously from `body_rhythm_frequency × dt`. (P7.10 commits this; this task confirms the integrator lives in `MarionetteComposer`.)
+- **P10.9** — Frequency compliance integration: composer reads `body_rhythm_frequency_proposed` (Reverie writes) and lerps `body_rhythm_frequency` toward it at rate `compliance × dt × responsiveness`, capped by `df_dt_max` from the current mindset's frequency compliance curve. Composer writes the slewed frequency to `MarionetteCore::set_body_rhythm_frequency` once per tick; core integrates phase from the latest value.
+- **P10.10** — `body_rhythm_phase` is owned by `MarionetteCore` per P7.10. The composer **reads** phase + frequency from core; it does not duplicate or migrate the integrator. Single source of truth: `MarionetteCore::_physics_process`.
 - **P10.11** — Bind composer API to GDScript on `Marionette.gd`: `set_engagement_vector(magnitude, phase, phase_noise)`, `add_position_goal(end_effector, world_pos, weight)`, `add_orientation_goal(end_effector, world_quat, weight)`, `add_pin_anchor(bone, world_pos, weight)`, `clear_goals()`, `set_posture_pattern_weights(Array of {pattern, weight})`, `set_proposed_rhythm_frequency(hz)`, `set_frequency_compliance_curve(curve)`, `get_body_rhythm_phase()`, `get_body_rhythm_frequency()`, `get_body_strain()`, `get_strain_per_bone()`.
 - **P10.12** — `RhythmAnchorBone` config resource: lists which bones the rhythm-readout reads from. Default: pelvis only. Future-extensible to sternum/head without breaking the API.
 - **P10.13** — Composer diagnostic gizmo: in editor mode, draw `drive_axis_linear`, `drive_axis_angular`, current strain per joint as colored badge, current `body_rhythm_phase` and frequency, current engagement vector. Editor-only, no runtime cost.

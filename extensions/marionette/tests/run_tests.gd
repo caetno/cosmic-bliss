@@ -161,6 +161,10 @@ func _init() -> void:
 		_test_jiggle_bone_snapshots_populated_by_physics_process,
 		_test_jiggle_bone_integrate_reads_from_snapshot_not_live,
 		_test_jiggle_bone_configure_spring_primes_snapshots,
+		_test_marionette_core_body_rhythm_phase_advances_at_expected_rate,
+		_test_marionette_core_body_rhythm_cycle_signal_fires_per_cycle,
+		_test_marionette_core_body_rhythm_frequency_change_does_not_snap_phase,
+		_test_marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -4546,3 +4550,145 @@ func _test_jiggle_bone_configure_spring_primes_snapshots() -> bool:
 		return _fail("jiggle_bone_configure_spring_primes_snapshots",
 				"configure_spring did not arm the spring path / cache fields")
 	return _ok("jiggle_bone_configure_spring_primes_snapshots")
+
+
+# ---------- body_rhythm_phase publisher (Mar-I14 / P7.10) ----------
+# `MarionetteCore` owns the rhythm clock per 05-14-02 §4.2 (single source
+# of truth: `_physics_process` integrates phase from `body_rhythm_frequency`).
+# Tests drive `step_body_rhythm_phase` directly — the same path
+# `_physics_process` calls — so the harness doesn't need a live SceneTree.
+
+func _test_marionette_core_body_rhythm_phase_advances_at_expected_rate() -> bool:
+	# At 0.5 Hz, 2 seconds of simulation = one full cycle. Phase should wrap
+	# back to ~0 with cycle_index == 1. Sub-step (0.02 s × 100 ticks) so the
+	# integrated form is tested over many small increments — drift accumulates
+	# here if the integrator is using `float` storage; the spec mandates
+	# `double` for exactly this reason.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_core_body_rhythm_phase_advances_at_expected_rate",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_body_rhythm_frequency", 0.5)
+	# 101 × 0.02 = 2.02 s → slightly past one full cycle. Using exactly
+	# 100 × 0.02 lands at TAU ± float-roundoff, which is ambiguous w.r.t.
+	# the wrap branch. One extra step guarantees the wrap fired and lets us
+	# assert a concrete post-wrap phase: 0.5 * TAU * 0.02 = 0.01 TAU.
+	for i in range(101):
+		core.call(&"step_body_rhythm_phase", 0.02)
+	var phase: float = core.call(&"get_body_rhythm_phase")
+	var cycles: int = core.call(&"get_body_rhythm_cycle_index")
+	core.free()
+	var expected_phase: float = 0.5 * TAU * 0.02
+	# Tolerance ~1e-9 — double precision over 101 small increments at this
+	# magnitude. Float storage would land ~1e-6 off (still loose-pass here,
+	# but the FREQUENCY_CHANGE test below pins the `double` requirement
+	# more tightly).
+	if absf(phase - expected_phase) > 1.0e-9:
+		return _fail("marionette_core_body_rhythm_phase_advances_at_expected_rate",
+				"phase=%.12f, expected %.12f after one cycle + one tick"
+						% [phase, expected_phase])
+	if cycles != 1:
+		return _fail("marionette_core_body_rhythm_phase_advances_at_expected_rate",
+				"cycle_index=%d, expected 1" % cycles)
+	return _ok("marionette_core_body_rhythm_phase_advances_at_expected_rate")
+
+
+# Captures `cycle_index` arguments from the signal so the test can assert the
+# emit count + monotonicity. Lives at script scope (not nested) because GDScript
+# disallows nested functions; Callable.create binds to this method.
+var _rhythm_signal_indices: Array[int] = []
+func _on_rhythm_cycle_test(cycle_index: int) -> void:
+	_rhythm_signal_indices.append(cycle_index)
+
+
+func _test_marionette_core_body_rhythm_cycle_signal_fires_per_cycle() -> bool:
+	# At 1.0 Hz, one second of 0.016 s ticks (~62.5 ticks) completes exactly
+	# one cycle. The signal must fire once with cycle_index == 1.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_core_body_rhythm_cycle_signal_fires_per_cycle",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_body_rhythm_frequency", 1.0)
+	_rhythm_signal_indices.clear()
+	core.connect(&"body_rhythm_cycle_completed",
+			Callable(self, "_on_rhythm_cycle_test"))
+	# Step ~1 s total: 63 × 0.016 = 1.008 s → 1.008 cycles. Signal fires once.
+	for i in range(63):
+		core.call(&"step_body_rhythm_phase", 0.016)
+	var cycles: int = core.call(&"get_body_rhythm_cycle_index")
+	core.free()
+	if _rhythm_signal_indices.size() != 1:
+		return _fail("marionette_core_body_rhythm_cycle_signal_fires_per_cycle",
+				"signal fired %d times, expected 1; indices=%s"
+						% [_rhythm_signal_indices.size(), str(_rhythm_signal_indices)])
+	if _rhythm_signal_indices[0] != 1:
+		return _fail("marionette_core_body_rhythm_cycle_signal_fires_per_cycle",
+				"first signal cycle_index=%d, expected 1" % _rhythm_signal_indices[0])
+	if cycles != 1:
+		return _fail("marionette_core_body_rhythm_cycle_signal_fires_per_cycle",
+				"core.get_body_rhythm_cycle_index()=%d, expected 1" % cycles)
+	return _ok("marionette_core_body_rhythm_cycle_signal_fires_per_cycle")
+
+
+func _test_marionette_core_body_rhythm_frequency_change_does_not_snap_phase() -> bool:
+	# Start at 0.4 Hz, step 0.5 s — phase advances to 0.4 * TAU * 0.5 = 0.4π.
+	# Change frequency to 1.6 Hz. Step ONE tick of 0.01 s.
+	# Correct (integrated) behavior: phase += 1.6 * TAU * 0.01 ≈ 0.032π,
+	#   so new_phase ≈ 0.4π + 0.032π = 0.432π.
+	# Wrong (recomputed) behavior would jump phase to 1.6 * TAU * (0.5 + 0.01)
+	#   ≈ 0.816π — visibly snapped. Defense: assert the increment matches the
+	#   integrated form to ~1e-9.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_core_body_rhythm_frequency_change_does_not_snap_phase",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_body_rhythm_frequency", 0.4)
+	# 50 × 0.01 = 0.5 s at 0.4 Hz → phase = 0.4 * TAU * 0.5 = 0.4π.
+	for i in range(50):
+		core.call(&"step_body_rhythm_phase", 0.01)
+	var phase_pre: float = core.call(&"get_body_rhythm_phase")
+	core.call(&"set_body_rhythm_frequency", 1.6)
+	core.call(&"step_body_rhythm_phase", 0.01)
+	var phase_post: float = core.call(&"get_body_rhythm_phase")
+	core.free()
+	var expected_increment: float = 1.6 * TAU * 0.01
+	var actual_increment: float = phase_post - phase_pre
+	# Tolerance loosened slightly vs first test (1e-7) because we're now also
+	# defending against single-precision float storage of `body_rhythm_phase`.
+	# 1e-9 would over-fit and pass even a buggy `float` impl; 1e-7 reliably
+	# fails the recomputed form (off by ~1.2) while comfortably passing the
+	# integrated form.
+	if absf(actual_increment - expected_increment) > 1.0e-7:
+		return _fail("marionette_core_body_rhythm_frequency_change_does_not_snap_phase",
+				"phase increment=%.10f, expected=%.10f (integrated form) — frequency change snapped the phase"
+						% [actual_increment, expected_increment])
+	return _ok("marionette_core_body_rhythm_frequency_change_does_not_snap_phase")
+
+
+func _test_marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles() -> bool:
+	# At 30 Hz, a single 0.1 s tick traverses 3 full cycles. The `while` loop
+	# (replacing the prior `if + fmod` form) must emit the signal 3 times and
+	# advance cycle_index by 3. Mar-I7 latent bug: a single `if` would emit
+	# once and lose the other 2. This test pins that fix.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles",
+				"MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"set_body_rhythm_frequency", 30.0)
+	_rhythm_signal_indices.clear()
+	core.connect(&"body_rhythm_cycle_completed",
+			Callable(self, "_on_rhythm_cycle_test"))
+	core.call(&"step_body_rhythm_phase", 0.1) # 30 * 0.1 = 3 cycles.
+	var cycles: int = core.call(&"get_body_rhythm_cycle_index")
+	core.free()
+	if cycles != 3:
+		return _fail("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles",
+				"cycle_index=%d, expected 3 (dropped cycles?)" % cycles)
+	if _rhythm_signal_indices.size() != 3:
+		return _fail("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles",
+				"signal fired %d times, expected 3" % _rhythm_signal_indices.size())
+	# Indices must be 1, 2, 3 in order (monotonic, no skips).
+	if _rhythm_signal_indices != [1, 2, 3]:
+		return _fail("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles",
+				"indices=%s, expected [1,2,3]" % str(_rhythm_signal_indices))
+	return _ok("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles")

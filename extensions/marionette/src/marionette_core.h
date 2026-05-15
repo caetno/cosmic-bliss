@@ -1,6 +1,8 @@
 #ifndef MARIONETTE_CORE_H
 #define MARIONETTE_CORE_H
 
+#include <cstdint>
+
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 #include <godot_cpp/templates/hash_set.hpp>
@@ -142,6 +144,27 @@ public:
 	MarionetteBone *get_root_bone_ptr() const;
 	Object *get_root_bone() const;
 
+	// Mar-I14 — body rhythm shared clock. Phase is INTEGRATED (`phase +=
+	// freq * TAU * dt`), never recomputed (`phase = freq * t`), so a
+	// frequency change doesn't snap the phase — critical for the
+	// TentacleTech `RhythmSyncedProbe` lock and any external consumer.
+	// Owner of the integrator per 05-14-02 §4.2: `MarionetteCore`,
+	// `_physics_process` — single source of truth. Future composer reads
+	// the same fields; it does not duplicate or migrate the integrator.
+	// Phase storage is `double` deliberately — float at 0.4 Hz accumulates
+	// visible drift over long sessions.
+	void set_body_rhythm_frequency(float p_hz);
+	float get_body_rhythm_frequency() const;
+	double get_body_rhythm_phase() const;
+	int64_t get_body_rhythm_cycle_index() const;
+
+	// Test seam — runs ONE integration step at `p_delta`. Production code
+	// reaches this path via `_physics_process`; tests need a deterministic
+	// callable that doesn't depend on a live SceneTree (run_tests.gd
+	// instantiates MarionetteCore as a bare Object). Idempotent / pure
+	// function of (frequency, current phase, delta).
+	void step_body_rhythm_phase(double p_delta);
+
 protected:
 	static void _bind_methods();
 
@@ -171,6 +194,14 @@ private:
 	float hip_upward_nudge = 0.0f; // Newtons, world +Y.
 	float hip_nudge_strength_threshold = 0.5f;
 	float strength_ramp_duration = 0.5f; // Seconds for 0 → 1 increase.
+
+	// Mar-I14 — rhythm clock state. `body_rhythm_phase` kept in `[0, TAU)`
+	// after wrap; `body_rhythm_cycle_index` is monotonic across the
+	// session lifetime. Negative frequency clamped at the setter, so the
+	// integrator hot path can assume non-negative input.
+	float body_rhythm_frequency = 0.4f; // Hz.
+	double body_rhythm_phase = 0.0;     // Radians, [0, TAU).
+	int64_t body_rhythm_cycle_index = 0;
 };
 
 } // namespace godot
