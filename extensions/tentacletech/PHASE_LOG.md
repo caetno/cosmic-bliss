@@ -668,6 +668,95 @@ Full tentacletech suite: **207/207** passing (was 204 + 3 new). All 27 test scri
 
 **Cross-slice composition:** No C++ touched; `.so` not rebuilt. 5F.A solver API unchanged. 5E + 5F.A.0 + 5F.A tests all still pass (8 + 3 + 5 = 16 prior canal-related tests, plus 3 new). The `Canal.tick(dt)` body grew from "set_anchors → tick" to "refresh → set_anchors → tick"; no API broke for any existing caller.
 
+### Slice TT-S3 — §10.5 contact suppression (2026-05-15)
+
+Closed cross-cutting slice from the 2026-05-14 audit (`docs/Cosmic_Bliss_Update_2026-05-14-02_cross_extension_audit_findings.md` finding TT-S3; scenario doc 05-14-03 §4 slice 2). Capsule-path implementation; proxy-path stubbed for body_field B5+.
+
+**Deliverables:**
+
+- `OrificeProfile` Resource (`gdscript/resources/orifice_profile.gd`) — `suppressed_bones` (auto-baked, future OrificeAutoBaker output) + `manual_suppressed_bones` (author override) + `get_effective_suppression_set()` union-with-dedup.
+- `OrificeSuppression` GDScript helper (`gdscript/util/orifice_suppression.gd`) — `resolve_bone_names_to_object_ids(skeleton, names)` walks the skeleton subtree (handles `PhysicalBoneSimulator3D` or bare children) and returns the matching `PhysicalBone3D` Object IDs. `apply_to_orifice(orifice, profile, skeleton)` does the resolve + push in one call.
+- `Orifice` (C++) — `set_suppressed_object_ids(PackedInt64Array)` / `get_suppressed_object_ids_snapshot()` / `is_object_id_suppressed(uint64_t)` / `clear_suppressed_object_ids()`. Storage: `std::unordered_set<uint64_t>` for O(1) lookup + `LocalVector<uint64_t>` mirror for the §15 snapshot. Destructor unregisters this orifice from any tentacle that holds a back-pointer so freed orifices don't dangle.
+- `Tentacle` (C++) — `register_active_ei_orifice(Orifice*)` / `unregister_active_ei_orifice(Orifice*)` / `get_active_ei_orifice_count()`. The Orifice's EI lifecycle (`_update_entry_interactions`) is the producer; tracks prev-tick `active` state per EI slot, registers on flip-to-active and unregisters on flip-to-inactive AND on grace-period purge.
+- `EnvironmentContact.hit_suppressed[k]` — per-slot bool flag set by the suppression filter; cleared at the top of `EnvironmentProbe::probe`.
+- `Tentacle::_apply_contact_suppression` — runs inside `_run_environment_probe` AFTER the 4S.2 persistence override but BEFORE the scratch arrays are built. Walks `_active_ei_orifices` for each contact slot, flags + zero-depth on hit. Scratch-build loop slides unsuppressed slots forward so the solver sees a compact (count, points, normals, rids) tuple. The reciprocal pass re-derives the scratch slot from a running unsuppressed counter so `friction_applied[slot]` aligns.
+- Proxy-path stub: `// TODO §10.5 proxy path:` comment inline at the suppression call site flagging the body_field B5 dispatch.
+- `get_environment_contacts_snapshot()` per-slot dictionary gains `hit_suppressed: bool` for the gizmo overlay.
+- `orifice_layer.gd` — new `SUPPRESSED_BONE_COLOR` (cyan-magenta CMY-palette) marker at each suppressed-bone `PhysicalBone3D.global_position`. Drawn unconditionally so the author can verify the suppression list before any EI activates.
+
+**Tests:** `game/tests/tentacletech/test_tt_s3_contact_suppression.gd` — 6/6 passed.
+
+1. `test_profile_effective_set_unions` — auto/manual/auto+manual cases; dedup verified.
+2. `test_orifice_resolves_bone_names_to_object_ids` — Skeleton3D + `PhysicalBoneSimulator3D` + three `PhysicalBone3D` children; profile suppresses Spine only; `is_object_id_suppressed` returns true for Spine, false for Hips/Neck; snapshot matches.
+3. `test_suppression_drops_capsule_contact_in_ei` — control tick confirms contact fires; after `set_suppressed_object_ids + register_active_ei_orifice`, the slot is `hit_suppressed=true` with `hit_depth=0`; after `unregister_active_ei_orifice`, the slot is no longer suppressed.
+4. `test_suppression_does_not_affect_non_ei_tentacles` — two tentacles, only one registered; only the registered tentacle sees suppression even though both bodies are in the orifice set.
+5. `test_no_skeleton_no_suppression` — `OrificeSuppression.apply_to_orifice(o, profile, null)` returns empty `PackedInt64Array` and the orifice's set stays empty; contacts pass through.
+6. `test_unresolvable_bone_name_warns_but_doesnt_crash` — three names, one bogus; resolves to 2 IDs; warning is emitted (visible in test output).
+
+**Full TT suite:** 213 passed / 0 failed across 25 assertion-bearing scripts (4 4q diagnostic scripts are no-result by design). `.so` size 2.17 MB → 2.19 MB (+16 KB).
+
+**Spec divergences:** none. Implementation matches §10.5 capsule-path semantics. The proxy path is explicitly out-of-scope per the audit; the stub comment is the load-bearing marker for the B5 follow-up.
+
+**Confirmation (audit TT-T3):** `Skeleton3D + PhysicalBoneSimulator3D > PhysicalBone3D (child)` is the assumed scene structure. The implementation walks the Skeleton3D subtree without requiring `PhysicalBoneSimulator3D` as the literal parent (any descendant `PhysicalBone3D` is picked up), so bare `PhysicalBone3D` children of `Skeleton3D` or non-standard layouts also resolve. `PhysicalBone3D.bone_name` is the source-of-truth for the name match.
+
+**Deferred:**
+
+- **Proxy path (§10.5 second bullet).** Body_field B5+. The dispatch point is marked; implementation reads `hit_object_id == BodyField tet body ObjectID → BodyField.get_face_dominant_bone(contact_point)` and checks against the suppressed bone-name set.
+- **`OrificeAutoBaker` proximity-driven population of `suppressed_bones`.** §10.4 step 5. Not on this slice's plate; until it ships, authors populate `manual_suppressed_bones` by hand.
+
+### Slice TT-S6 — `OrificeBusy` boolean retired; area-stiffening replacement (2026-05-15)
+
+Closed cross-cutting slice from the 2026-05-14 audit (`docs/Cosmic_Bliss_Update_2026-05-14-02_cross_extension_audit_findings.md` finding TT-S6; scenario doc 05-14-03 §4 slice 3). Replaces the original "Cap: 3 simultaneous per orifice. 4th is rejected at entry." wording (§6.5) with a per-loop area-stiffening force-scaling mechanism. The boolean had never shipped — slice TT-S6 retires the SPEC before it would have.
+
+**Mechanism:** each rim loop's per-iter effective area compliance is divided by `(1 + area_stiffening_per_ei × active_ei_count)`. As tentacles stack inside an orifice, the rim physically resists further expansion via stiffer area constraint. Default `area_stiffening_per_ei = 0.5` makes a 3-EI orifice 2.5× stiffer than idle, which is high enough to make a 4th-tentacle entry visibly hard without scripting a refusal. Tuning lever per anatomy via `OrificeProfile.area_stiffening_per_ei`; per-loop override via `Orifice::set_loop_area_stiffening_per_ei`.
+
+**Files modified:** `extensions/tentacletech/src/orifice/orifice.h` (new `Loop.area_stiffening_per_ei` field + `set_loop_area_stiffening_per_ei` / `get_loop_area_stiffening_per_ei` / `compute_effective_area_compliance` declarations), `extensions/tentacletech/src/orifice/orifice.cpp` (formula inline in `_iterate_loop_one_pass` now delegates to the new helper; getter / setter / helper impls + bindings), `extensions/tentacletech/gdscript/resources/orifice_profile.gd` (new `@export_range(0, 4, 0.05) area_stiffening_per_ei: float = 0.5` field with anatomy-tuning docstring), `docs/architecture/TentacleTech_Architecture.md` §6.5 (cap-3 paragraph rewritten) + §8 events (`OrificeBusy` reason retired from `EntryRejected`).
+
+**Files added:** `game/tests/tentacletech/test_tt_s6_area_stiffening.gd` (7 tests, all passing).
+
+**Public surface:**
+
+- C++ (`Orifice`): `set_loop_area_stiffening_per_ei(loop_index, value)`, `get_loop_area_stiffening_per_ei(loop_index)`, `compute_effective_area_compliance(loop_index, dt, hypothetical_ei_count)`.
+- GDScript (`OrificeProfile`): `area_stiffening_per_ei` (`@export_range` 0..4).
+
+**Architecture-doc edits applied this slice** (supervisor-side; tracked here for audit-trail completeness):
+
+- §6.5: "Cap: 3 simultaneous per orifice. 4th is rejected at entry. Override flag exists for player/narrative-driven forced multi-entry." → replaced with the area-stiffening paragraph; reference the TT-S6 slice and the §1 soft-physics rule.
+- §8 `EntryRejected` reasons: removed `OrificeBusy` bullet; added a one-liner noting TT-S6 retired it.
+
+**Tests** — `test_tt_s6_area_stiffening.gd` 7/7:
+
+1. `profile_default_stiffening` — `OrificeProfile.area_stiffening_per_ei` defaults to 0.5.
+2. `loop_default_stiffening` — `Orifice` rim-loop `area_stiffening_per_ei` defaults to 0.5.
+3. `effective_compliance_no_eis` — at N=0, `compute_effective_area_compliance` returns `area_compliance / dt²` (the XPBD `dt2_inv` form).
+4. `effective_compliance_scales_with_eis` — at N ∈ {1, 2, 3, 4}, the formula `base / (1 + k × N)` is reproduced exactly (worst relative err < 1e-4).
+5. `setter_clamps_negative` — `set_loop_area_stiffening_per_ei(-0.5)` clamps to 0 (non-negative invariant).
+6. `monotonic_with_count` — effective compliance shrinks strictly as N grows over [0..5]; no equality, no inversion.
+7. `per_loop_stiffening_independent` — two loops on the same orifice with different `area_stiffening_per_ei` (0.2 vs 1.0) produce different effective compliances at the same N.
+
+Full TT suite: **220/220** passing across 28 assertion-bearing scripts (was 213 + 7 new). All 28 scripts rc=0. `.so` 2,187,560 → 2,195,752 bytes (+8,192 / ~8 KB — small inline helper).
+
+**Spec divergences:**
+
+- **(a) Default `area_stiffening_per_ei` is 0.5.** Audit text leaves the constant unspecified ("area-conservation force scaling against active count"). 0.5 chosen because at N=3 it gives 2.5× idle stiffness, which crosses the threshold where a 4th entry feels "no, this orifice can't take any more" without making N=1 entry feel sluggish. Per-anatomy tuning expected once authoring opens (lax-rim anatomies lower, tight-rim higher).
+- **(b) Replacement mechanism is per-iter compliance scaling, not target-area shrinking or lambda-magnitude scaling.** Compliance scaling integrates cleanly with the existing XPBD projection (one line in the inner loop) and preserves the area-conservation semantics — the orifice still wants the same rest area, it just fights harder to keep it. Target-area shrinking would actively pull the rim inward, which is a different physical claim. Lambda scaling would be an iter-rate scalar without an XPBD-correct stiffness interpretation.
+- **(c) Per-loop stiffening, not per-orifice scalar.** Different loops on a multi-loop orifice (outer rim, inner sphincter) may want different stiffening rates — a relaxed outer flesh + a tight inner sphincter is a real anatomy. Per-loop authoring keeps this open without forcing it.
+- **(d) Helper `compute_effective_area_compliance` is public-bound** to give tests + future debug UI a stable entry point into the formula. Production code calls it inline from `_iterate_loop_one_pass`; the perf cost is one extra function call + a couple of float ops, negligible at orifice cadences.
+- **(e) Spec edits applied in the same slice as the code.** Following the same convention as PR #9's §4.2/§4.5/§10.5 rewrite (architecture doc edits applied alongside the code changes that implement them). Architecture doc is top-level scope per project CLAUDE.md, but the edit is small and load-bearing for this slice's correctness; top-level review can adjust at PR-cut time.
+
+**Cross-slice composition:**
+
+- §6.5 multi-tentacle support spec replaced; the §6.5 aggregation pseudocode (lines 939-948) is unchanged.
+- §6.3 reaction-on-host-bone closure unchanged.
+- Slice TT-S3 contact suppression unchanged.
+- Slice 5C-A type-2 contact iter cadence unchanged; the stiffening only affects the area projection step.
+- Stimulus bus `EntryRejected` event keeps the two remaining reasons (`InsufficientPressure`, `FrictionStuck`); subscribers compiling against the old `OrificeBusy` enum value need to update — fine because the event hasn't shipped (Phase 6 still blocked).
+
+**Deferred:**
+
+- Per-anatomy tuning of `area_stiffening_per_ei` per orifice profile. Authored once `OrificeAutoBaker` ships and starts emitting profile defaults; until then, the global 0.5 default rides.
+- Tight scenario-validation that 4th-tentacle entry "feels" right at the chosen stiffness. Verified physically in the ragdoll-under-tension scenario test scene once it stands up.
+
 ---
 
 ## Phase 6 — Stimulus bus

@@ -6,13 +6,17 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/node_path.hpp>
+#include <godot_cpp/templates/local_vector.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int64_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include <unordered_set>
 #include <vector>
 
 #include "entry_interaction.h"
@@ -97,6 +101,19 @@ struct RimLoopState {
 	// Per-loop tunables (§6.4).
 	float area_compliance = 1e-4f;     // low → near-incompressible
 	float distance_compliance = 1e-6f; // low → taut circumference (compression branch in 4P-A)
+
+	// Slice TT-S6 (§6.5 area-stiffening, retires the 4th-EI hard reject
+	// from the original "Cap: 3 simultaneous per orifice" wording). The
+	// per-iter effective area compliance is divided by
+	// `(1.0 + area_stiffening_per_ei × active_ei_count)`, where
+	// `active_ei_count` is the number of EntryInteractions on the
+	// owning orifice. Higher EI counts → stiffer area constraint →
+	// orifice physically resists further expansion. With the default
+	// 0.5, a 3-EI orifice has 2.5× stiffness vs idle, which is high
+	// enough to make a 4th-tentacle entry visibly hard without a
+	// boolean reject. Tuning lever, not design lever — orifice profile
+	// authoring sets it per anatomy.
+	float area_stiffening_per_ei = 0.5f;
 
 	// Slice 5D §4P-A — anisotropic distance constraints. Anatomical
 	// flesh is incompressible (rim can't collapse below authored
@@ -325,6 +342,23 @@ public:
 	// friction_applied, in_static_cone }.
 	godot::Array get_type2_friction_snapshot() const;
 
+	// Slice TT-S3 (§10.5 contact suppression) — set of `Object` IDs
+	// (PhysicalBone3D body nodes, capsule colliders, etc.) whose type-1
+	// contacts are suppressed for tentacle particles belonging to a
+	// tentacle with an active EntryInteraction on this orifice. The set
+	// is resolved once at hero-init by a small GDScript glue helper that
+	// walks the host skeleton's `PhysicalBoneSimulator3D` and matches
+	// `OrificeProfile.get_effective_suppression_set()` against each
+	// `PhysicalBone3D.bone_name`. Runtime lookup is O(1) via the
+	// `_suppressed_object_ids_set` hash backing the `LocalVector`. An
+	// empty set is the no-op default — no suppression occurs.
+	//
+	// Snapshot accessor (§15) returns the resolved IDs by copy.
+	void set_suppressed_object_ids(const godot::PackedInt64Array &p_ids);
+	godot::PackedInt64Array get_suppressed_object_ids_snapshot() const;
+	bool is_object_id_suppressed(uint64_t p_id) const;
+	void clear_suppressed_object_ids();
+
 	// Authoring API --------------------------------------------------------
 
 	// Append a new rim loop. Returns the loop index, or -1 on invalid
@@ -426,6 +460,26 @@ public:
 	// target.
 	void set_loop_target_enclosed_area(int p_loop_index, float p_target);
 
+	// Slice TT-S6 (§6.5) — per-loop area-stiffening coefficient. The
+	// per-iter effective area compliance is divided by
+	// `(1 + value × active_ei_count)`. Default 0.5; raise for orifices
+	// that should saturate faster, lower for ones that accept many
+	// tentacles loosely. `get_loop_area_stiffening_per_ei` returns the
+	// authored value (not the effective compliance — that's per-tick
+	// state). Snapshot is `get_loop_area_lambda` per §15.
+	void set_loop_area_stiffening_per_ei(int p_loop_index, float p_value);
+	float get_loop_area_stiffening_per_ei(int p_loop_index) const;
+
+	// Slice TT-S6 area-stiffening accessor. Returns the per-iter
+	// effective area compliance the projection step uses, computed as
+	// `(loop.area_compliance × dt²) / (1 + loop.area_stiffening_per_ei × hypothetical_ei_count)`.
+	// Production code (`_iterate_loop_one_pass`) calls this with
+	// `_entry_interactions.size()`; tests pass synthetic counts to
+	// verify the formula without standing up a full tentacle-vs-orifice
+	// scenario. Out-of-range loop index returns 0.0f.
+	float compute_effective_area_compliance(
+			int p_loop_index, float p_dt, int p_hypothetical_ei_count) const;
+
 protected:
 	static void _bind_methods();
 
@@ -525,6 +579,14 @@ private:
 	mutable godot::RID _host_body_rid;
 	mutable bool _host_body_active = false;
 	mutable bool _host_body_dirty = true;
+
+	// Slice TT-S3 (§10.5) — resolved suppression set. `_suppressed_object_ids`
+	// is the canonical fast-lookup hash; `_suppressed_object_ids_list` mirrors
+	// it as a flat list for the snapshot accessor and binding-friendly
+	// returns. Mutated only through `set_suppressed_object_ids` /
+	// `clear_suppressed_object_ids` so the two structures stay in sync.
+	std::unordered_set<uint64_t> _suppressed_object_ids;
+	godot::LocalVector<uint64_t> _suppressed_object_ids_list;
 
 	// Tick stages — per-loop.
 	void _predict_loop(RimLoopState &loop, float p_dt);

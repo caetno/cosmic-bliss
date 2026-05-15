@@ -79,7 +79,22 @@ inline float signed_polygon_area_packed(
 } // namespace
 
 Orifice::Orifice() {}
-Orifice::~Orifice() {}
+Orifice::~Orifice() {
+	// Slice TT-S3 (§10.5) — clear back-pointers to this orifice from any
+	// tentacle that has it registered as an active-EI orifice. Without
+	// this, a freed orifice would dangle in `Tentacle::_active_ei_orifices`
+	// and the next suppression filter would dereference garbage.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		Tentacle *t = _entry_interactions[i].tentacle;
+		if (t == nullptr && _entry_interactions[i].tentacle_idx >= 0 &&
+				_entry_interactions[i].tentacle_idx < (int)_tentacles_resolved.size()) {
+			t = _tentacles_resolved[_entry_interactions[i].tentacle_idx];
+		}
+		if (t != nullptr) {
+			t->unregister_active_ei_orifice(this);
+		}
+	}
+}
 
 void Orifice::_ready() {
 	if (Engine::get_singleton()->is_editor_hint()) {
@@ -215,7 +230,19 @@ void Orifice::_iterate_loop_one_pass(RimLoopState &loop, float p_dt) {
 	// rim), this value is unused and the step falls back to the
 	// symmetric 5A behaviour.
 	const float compliance_distance_stretch = loop.distance_stretch_compliance * dt2_inv;
-	const float compliance_area = loop.area_compliance * dt2_inv;
+	// Slice TT-S6 (§6.5) — area-stiffening replaces the original
+	// "Cap: 3 simultaneous per orifice. 4th is rejected at entry."
+	// hard boolean. Effective compliance divided by
+	// `(1.0 + area_stiffening_per_ei × active_ei_count)`. With default
+	// stiffening 0.5 and 3 active EIs the area constraint is 2.5×
+	// stiffer than idle — a 4th tentacle has to push hard to enter,
+	// which is the soft-physics version of "no, you can't fit." Formula
+	// lives in `compute_effective_area_compliance` so tests can verify
+	// the math against synthetic EI counts.
+	const int loop_idx_for_compliance =
+			(int)(&loop - rim_loops.data());
+	const float compliance_area = compute_effective_area_compliance(
+			loop_idx_for_compliance, p_dt, (int)_entry_interactions.size());
 
 	// Slice 5B — Center frame is bone-driven when host bone is active,
 	// else falls back to the orifice node's own transform (which itself
@@ -788,6 +815,26 @@ void Orifice::set_particle_inv_mass(
 void Orifice::set_loop_target_enclosed_area(int p_loop_index, float p_target) {
 	if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return;
 	rim_loops[p_loop_index].target_enclosed_area = p_target;
+}
+
+void Orifice::set_loop_area_stiffening_per_ei(int p_loop_index, float p_value) {
+	if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return;
+	rim_loops[p_loop_index].area_stiffening_per_ei = p_value < 0.0f ? 0.0f : p_value;
+}
+
+float Orifice::get_loop_area_stiffening_per_ei(int p_loop_index) const {
+	if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return 0.0f;
+	return rim_loops[p_loop_index].area_stiffening_per_ei;
+}
+
+float Orifice::compute_effective_area_compliance(
+		int p_loop_index, float p_dt, int p_hypothetical_ei_count) const {
+	if (p_loop_index < 0 || p_loop_index >= (int)rim_loops.size()) return 0.0f;
+	const RimLoopState &loop = rim_loops[p_loop_index];
+	const float dt2_inv = 1.0f / (p_dt * p_dt + 1e-20f);
+	const int n = p_hypothetical_ei_count < 0 ? 0 : p_hypothetical_ei_count;
+	const float stiffening = 1.0f + loop.area_stiffening_per_ei * (float)n;
+	return (loop.area_compliance * dt2_inv) / stiffening;
 }
 
 void Orifice::set_rim_contact_radius(int p_loop_index, int p_particle_index, float p_radius) {
@@ -1429,7 +1476,18 @@ void Orifice::_update_entry_interactions(float p_dt) {
 	// loop, EIs that didn't get re-flagged accumulate
 	// `retirement_timer` and get purged once it exceeds the grace
 	// period.
+	//
+	// Slice TT-S3 (§10.5) — snapshot the previous-tick `active` state so
+	// the post-pass below can detect active→inactive transitions and
+	// unregister this orifice from the corresponding tentacle's
+	// suppression list. Registrations on inactive→active flips happen
+	// inline at the engaged branch so a fresh EI is registered the same
+	// tick it activates.
+	std::vector<int> prev_active_tentacle_idx;
+	prev_active_tentacle_idx.reserve(_entry_interactions.size());
 	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		prev_active_tentacle_idx.push_back(
+				_entry_interactions[i].active ? _entry_interactions[i].tentacle_idx : -1);
 		_entry_interactions[i].active = false;
 	}
 
@@ -1461,10 +1519,22 @@ void Orifice::_update_entry_interactions(float p_dt) {
 			_resize_per_loop_k_arrays(fresh);
 			_entry_interactions.push_back(fresh);
 			ei = &_entry_interactions.back();
+			// Slice TT-S3 — fresh EI is a 0→1 transition; register this
+			// orifice on the tentacle's suppression list. Idempotent on
+			// the tentacle side (no-op if somehow already registered).
+			t->register_active_ei_orifice(this);
 		} else {
 			// Refresh the cached pointer — `_resolve_tentacles_lazy`
 			// could have re-resolved to a different Tentacle instance.
 			ei->tentacle = t;
+			// Slice TT-S3 — if the EI was inactive last tick (within
+			// grace), this is an inactive→active transition; re-register.
+			// `prev_active_tentacle_idx` for this EI's slot encodes the
+			// previous-tick state. We don't have a direct EI-index here
+			// (vector index is identity in `_entry_interactions`), but
+			// the `register_active_ei_orifice` call is idempotent — safe
+			// to call regardless.
+			t->register_active_ei_orifice(this);
 			ei->active = true;
 			ei->retirement_timer = 0.0f;
 		}
@@ -1489,8 +1559,48 @@ void Orifice::_update_entry_interactions(float p_dt) {
 			}
 		}
 	}
+	// Slice TT-S3 — for every EI that just flipped active→inactive,
+	// unregister this orifice from the tentacle's suppression list. We
+	// match by tentacle_idx against the `prev_active_tentacle_idx`
+	// snapshot taken at the top of this function; an entry stays in the
+	// snapshot iff that EI was active last tick. EIs that purged below
+	// the grace period (the erase loop) still get their unregister via
+	// this same path (the EI's `active` is false at the time of erase,
+	// matching the active→inactive criterion). Calls are idempotent;
+	// duplicate unregisters for the same tentacle/orifice pair are
+	// safe.
+	for (size_t i = 0; i < _entry_interactions.size(); i++) {
+		const EntryInteraction &ei = _entry_interactions[i];
+		if (ei.active) continue;
+		// Was active last tick, inactive now → unregister.
+		int prev_idx = (i < prev_active_tentacle_idx.size()) ? prev_active_tentacle_idx[i] : -1;
+		if (prev_idx < 0) continue;
+		// Resolve the tentacle pointer. `ei.tentacle` may already have
+		// been nulled by the fast-purge path (tentacle_gone above) — fall
+		// back to the resolved list when present.
+		Tentacle *t = ei.tentacle;
+		if (t == nullptr && prev_idx < (int)_tentacles_resolved.size()) {
+			t = _tentacles_resolved[prev_idx];
+		}
+		if (t != nullptr) {
+			t->unregister_active_ei_orifice(this);
+		}
+	}
 	for (auto it = _entry_interactions.begin(); it != _entry_interactions.end();) {
 		if (!it->active && it->retirement_timer > entry_interaction_grace_period) {
+			// Belt-and-suspenders: the unregister loop above already
+			// covered this path on the same tick the EI flipped to
+			// inactive. Calling again here is a no-op (idempotent) and
+			// catches edge cases where the EI was purged across multiple
+			// ticks without ever flipping back to active.
+			Tentacle *t = it->tentacle;
+			if (t == nullptr && it->tentacle_idx >= 0 &&
+					it->tentacle_idx < (int)_tentacles_resolved.size()) {
+				t = _tentacles_resolved[it->tentacle_idx];
+			}
+			if (t != nullptr) {
+				t->unregister_active_ei_orifice(this);
+			}
 			it = _entry_interactions.erase(it);
 		} else {
 			++it;
@@ -1941,6 +2051,43 @@ void Orifice::set_host_physical_bone_path(const NodePath &p_path) {
 }
 NodePath Orifice::get_host_physical_bone_path() const { return host_physical_bone_path; }
 
+// -- Slice TT-S3 (§10.5) contact suppression API --------------------------
+
+void Orifice::set_suppressed_object_ids(const PackedInt64Array &p_ids) {
+	_suppressed_object_ids.clear();
+	_suppressed_object_ids_list.clear();
+	int n = p_ids.size();
+	for (int i = 0; i < n; i++) {
+		int64_t raw = p_ids[i];
+		if (raw == 0) continue; // 0 == null ObjectID; nothing to suppress.
+		uint64_t id = (uint64_t)raw;
+		auto ins = _suppressed_object_ids.insert(id);
+		if (ins.second) {
+			_suppressed_object_ids_list.push_back(id);
+		}
+	}
+}
+
+PackedInt64Array Orifice::get_suppressed_object_ids_snapshot() const {
+	PackedInt64Array out;
+	out.resize((int)_suppressed_object_ids_list.size());
+	int64_t *w = out.ptrw();
+	for (uint32_t i = 0; i < _suppressed_object_ids_list.size(); i++) {
+		w[i] = (int64_t)_suppressed_object_ids_list[i];
+	}
+	return out;
+}
+
+bool Orifice::is_object_id_suppressed(uint64_t p_id) const {
+	if (p_id == 0) return false;
+	return _suppressed_object_ids.find(p_id) != _suppressed_object_ids.end();
+}
+
+void Orifice::clear_suppressed_object_ids() {
+	_suppressed_object_ids.clear();
+	_suppressed_object_ids_list.clear();
+}
+
 // -- Type-2 contact snapshot (slice 5C-A) ---------------------------------
 
 Array Orifice::get_type2_contacts_snapshot() const {
@@ -2035,6 +2182,9 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_particle_position", "loop_index", "particle_index"), &Orifice::get_particle_position);
 	ClassDB::bind_method(D_METHOD("set_particle_inv_mass", "loop_index", "particle_index", "inv_mass"), &Orifice::set_particle_inv_mass);
 	ClassDB::bind_method(D_METHOD("set_loop_target_enclosed_area", "loop_index", "target"), &Orifice::set_loop_target_enclosed_area);
+	ClassDB::bind_method(D_METHOD("set_loop_area_stiffening_per_ei", "loop_index", "value"), &Orifice::set_loop_area_stiffening_per_ei);
+	ClassDB::bind_method(D_METHOD("get_loop_area_stiffening_per_ei", "loop_index"), &Orifice::get_loop_area_stiffening_per_ei);
+	ClassDB::bind_method(D_METHOD("compute_effective_area_compliance", "loop_index", "dt", "hypothetical_ei_count"), &Orifice::compute_effective_area_compliance);
 
 	// Slice 5B — host bone soft attachment.
 	ClassDB::bind_method(D_METHOD("set_skeleton_path", "path"), &Orifice::set_skeleton_path);
@@ -2112,6 +2262,16 @@ void Orifice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_host_physical_bone_path"), &Orifice::get_host_physical_bone_path);
 	ClassDB::bind_method(D_METHOD("get_host_body_state"), &Orifice::get_host_body_state);
 	ClassDB::bind_method(D_METHOD("get_type2_friction_snapshot"), &Orifice::get_type2_friction_snapshot);
+
+	// Slice TT-S3 (§10.5) — capsule-path type-1 contact suppression.
+	ClassDB::bind_method(D_METHOD("set_suppressed_object_ids", "ids"),
+			&Orifice::set_suppressed_object_ids);
+	ClassDB::bind_method(D_METHOD("get_suppressed_object_ids_snapshot"),
+			&Orifice::get_suppressed_object_ids_snapshot);
+	ClassDB::bind_method(D_METHOD("is_object_id_suppressed", "id"),
+			&Orifice::is_object_id_suppressed);
+	ClassDB::bind_method(D_METHOD("clear_suppressed_object_ids"),
+			&Orifice::clear_suppressed_object_ids);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "iteration_count",
 						 PROPERTY_HINT_RANGE, "1,8,1"),

@@ -953,7 +953,7 @@ When a tentacle needs to resolve its own angular location against the authored r
 
 **Inter-tentacle separation inside an orifice:** type-5 (particle-particle) collision is always enabled for particles flagged as inside any orifice, even if disabled globally. This lets two tentacles jam in side-by-side and physically push each other apart.
 
-**Cap: 3 simultaneous per orifice.** 4th is rejected at entry. Override flag exists for player/narrative-driven forced multi-entry.
+**Area-stiffening with active EI count (no hard cap).** Each loop's per-iter effective area compliance is divided by `(1 + area_stiffening_per_ei × active_ei_count)` (slice TT-S6, 2026-05-15). As tentacles stack inside an orifice the rim physically resists further expansion — the soft-physics version of the original "Cap: 3 simultaneous per orifice. 4th is rejected at entry" wording, which violated the §1 soft-physics rule and was retired before it shipped. The tuning knob is `OrificeProfile.area_stiffening_per_ei` (default 0.5; with 3 active EIs the orifice is 2.5× stiffer than idle, which makes a 4th-tentacle entry visibly hard without scripting a refusal). Per-loop override via `Orifice::set_loop_area_stiffening_per_ei`. No override flag exists — there is no boolean to override; lower the stiffening coefficient instead.
 
 **Knot-aware grip ramp.** When a girth differential is straddling the rim, grip engagement ramps faster:
 
@@ -1707,9 +1707,8 @@ Pattern + per-pulse + discrete-beat events (added 2026-04-27):
 - `EntryRejected` (`peak_pressure`, `reason`) — soft-physics rejection of an entry attempt. Reasons:
   - `InsufficientPressure` — approach pressure below grip-engagement threshold.
   - `FrictionStuck` — tentacle pinned by static friction before crossing the entry plane.
-  - `OrificeBusy` — cap of 3 simultaneous tentacles per §6.5 reached.
 
-  There is no hard-refusal lever (per §1 discipline). `EntryRejected` exists to tell subscribers that a soft-physics rejection happened, not to be triggered by a script.
+  There is no hard-refusal lever (per §1 discipline). `EntryRejected` exists to tell subscribers that a soft-physics rejection happened, not to be triggered by a script. The `OrificeBusy` reason was retired in slice TT-S6 (2026-05-15) — multi-tentacle resistance now lives in §6.5's area-stiffening mechanism, not in an entry-time enum value.
 
 **No event-type-per-pattern.** Adding `OrgasmContraction`, `LustfulSpasm`, `PostCoitalRipple` as distinct event types would inflate the enum unboundedly. Patterns are data; events are type-checked enum values that subscribers compile against. The generic `ContractionPulseFired` carries pattern identity in its `extra` dictionary. Lifecycle events are coarse-grained brackets, kept as a small fixed set.
 
