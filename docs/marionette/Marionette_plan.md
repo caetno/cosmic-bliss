@@ -1165,9 +1165,9 @@ game/tests/marionette/skeletons/
 
 ## Soft-tissue jiggle bone clusters
 
-> **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires the "jiggle bones must be in the Blender skeleton at modeling time" gotcha. Jiggle attachments become Godot-side `SurfaceJiggleAttachment` nodes placed under the hero scene; the surface field auto-derives the per-vertex skinning weight. The shipped breast jiggle on kasumi (translation-only SPD) keeps the same physics; only the authoring path migrates. New jiggle attachments (glutes, jowls) become trivially addable without re-export. Apply this amendment after §17.5 lands.
+> **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` adds a `SurfaceJiggleAttachment` Godot-side authoring path under `body_field` §17.5. When `body_field` is **present**, jiggle attachments are placed as nodes under the hero scene and the surface field auto-derives the per-vertex skinning weight — glutes, jowls, and belly become trivially addable without re-export. When `body_field` is **absent**, jiggle bones use the modeling-time Blender-skeleton path described below; that path is the no-`body_field` authoring fallback, not a transitional artifact, and the gotcha section below stays in force for that path indefinitely (top-level `CLAUDE.md` hard-optional invariant). The shipped breast jiggle on kasumi (translation-only SPD) keeps the same physics under either authoring path; only the weight derivation differs. Apply the §17.5-path migration after §17.5 lands.
 >
-> **Composition with `body_field` (§18 substrate)** — when a hero opts in for `body_field` per `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` (brief Q1), jiggle bone poses feed `body_field`'s `kinematic_targets` compute pass as additional kinematic targets, **not** as additive offsets applied on top of tet-deformed positions. The SPD physics is unchanged; the bone's pose becomes one of the inputs the tet solver reads each tick, and the surrounding tissue deforms around it via the tet's elastic + volume constraints. Pre-`body_field` heroes keep the standalone jiggle path described below.
+> **Composition with `body_field` (§18 substrate)** — v1 jiggle uses the **render-mesh additive-offset path** described below; this is the path that runs whether `body_field` is present or not, and it is the only path in v1 because the v1 tet substrate is kinematic-only (no XPBD sim) and does not drive the render mesh. In **v1.5+** (`body_field` Phase B with XPBD enabled), jiggle bone poses optionally feed `body_field`'s `kinematic_targets` compute pass **additively** as additional kinematic targets, per `docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md` and brief Q1; the SPD physics is unchanged. When `body_field` is **absent**, the additive-offset path remains the standalone jiggle path — no required `body_field` dependency (top-level `CLAUDE.md` hard-optional invariant).
 
 Non-rim soft tissue regions (gluteus, breast, belly, jowls, etc.) currently have no autonomous dynamics: TentacleTech's bulger system (`docs/architecture/TentacleTech_Architecture.md` §7) deforms them while a contact is active, but bulger eviction fade is 2 frames (§7.5) — once contact ends, motion stops. Real fat tissue keeps wobbling for ~1 second after impact.
 
@@ -1214,7 +1214,7 @@ Same SPD code Marionette already runs on the spine; copy with different paramete
 >
 > **Pending amendment 2026-05-07-02** — `docs/Cosmic_Bliss_Update_2026-05-07-02_body_surface_field.md` retires the volume-SDF blend for visual mesh deformation in favor of geodesic surface-field weights derived from a prefactored cotan-Laplacian on the body mesh. The volume primitive remains as the particle spawn scaffold; only the visual blend math changes. Authoring contract (host bone + volume + numeric profile) is unchanged for the artist. **Implementation should not begin past §16.1 (resource schemas) until the BodySurfaceField §17 infrastructure lands** — implementing the volume-SDF blend in §16.2+ is wasted work.
 >
-> **Composition with `body_field` (§18 substrate)** — v1 of `body_field` per `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` does **not** compose soft-region clusters on top of the tet substrate; clusters and `body_field` are independent in v1. The composition (cluster particles absorbed into the tet sim as additional sub-clusters, or riding on top of tet-deformed surface verts via additive blend) opens at slice **B7** of `body_field` Phase B, when multi-region tet partitioning lands.
+> **Composition with `body_field` (§18 substrate)** — v1 of `body_field` per `docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md` does **not** compose soft-region clusters on top of the tet substrate; the standalone cluster solver described below is the **v1 default** for soft-region deformation and is also the path that runs when `body_field` is **absent** (top-level `CLAUDE.md` hard-optional invariant — no required dependency on `body_field`). Composition with the tet substrate (cluster particles absorbed into the tet sim as additional sub-clusters, or riding on top of tet-deformed surface verts via additive blend) opens at slice **B7** of `body_field` Phase B (v2+), when multi-region tet partitioning lands; B7 is also conditional on the v1.5 XPBD pipeline having opened per the 05-13 amendment.
 
 ### What this is, and what it is not
 
@@ -1531,7 +1531,9 @@ None of these change runtime *physics*. Only the authoring path and the visual m
 
 §17.1–§17.2 are infrastructure; they can land in parallel with TentacleTech Phase 4.5 (Oriented Particles). §17 itself is independent of TT 4.5. §17.3 must land before Marionette §16 progresses past §16.1 (resource schema); otherwise §16.2+ implements blend math that's about to be retired.
 
-Extension home: probably a new top-level `extensions/body_surface_field/` since it's cross-cutting (TentacleTech, Marionette, appearance all consume). Decide at §17.1 implementation.
+Extension home: **`body_field` extension** (resolved per `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` §D7 — §17 surface field and §18 tet substrate are sibling slice families under the same `body_field` extension). Closes Q17.3 below.
+
+**Fallback when `body_field` is absent.** §17 surface-field-derived per-vertex weights are a fidelity upgrade, not a dependency. Every §17 consumer keeps its **pre-§17 manual-authoring path** live as the no-`body_field` fallback (top-level `CLAUDE.md` hard-optional invariant): §15 jiggle uses the Blender modeling-time skeleton path with its mandatory authoring gotcha, §16 soft-region clusters use the volume-SDF blend baked from the volume primitive, TT §10.4 orifice rims use Blender-painted rim weights. The §17 migration paths in §17.3–§17.5 below describe what changes when `body_field` is present; when absent, none of them engage and the manual-authoring paths remain canonical.
 
 ### §17.7 — `MouseTouchProbe` (test fixture)
 
@@ -1548,32 +1550,36 @@ Not in the 05-07-02 brief; called out here because the "mouse-controlled touch f
 
 - **Q17.1.** Heat-method falloff vs BBW as default for additive? Bench at §17.2.
 - **Q17.2.** Sparse vs dense per-vertex weight storage? Probably sparse (4–8 slots indexed).
-- **Q17.3.** `BodySurfaceField` as new top-level extension, or in `extensions/shared/`?
+- **Q17.3. Resolved.** `BodySurfaceField` lives in the `body_field` extension alongside §18 (per `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md` §D7); §17 and §18 are sibling slice families sharing the body mesh source and hero-load bake.
 - **Q17.4.** Compatibility migration for kasumi's existing orifice rim Blender weights — strip at re-export, or leave as no-op zero-weights? Not load-bearing for ship.
 - **Q17.5.** Bilateral mask — host_bone LBS weight only, or `host_bone + neighbors`? Direct host_bone first; revisit if results look too narrow.
 
 ---
 
-## §18 — Volumetric tet substrate
+## §18 — Volumetric tet substrate (`body_field` extension)
 
-> **Status: ACTIVE in `body_field` extension v1 per `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md`.** A working GPU XPBD prototype (spec vendored at `docs/body_field/flesh_deformer_v2_legacy.md`) ports into cosmic-bliss as the substrate's implementation home. v1 ships a high-fidelity collision surface for particle-based systems (TentacleTech now, Tenticles fluids later). The three §18 amendments below (volumetric heat method, per-tet stiffness anisotropy, fiber-axis fallback) defer to v2+ slices in `body_field` Phase B; **the substrate itself is no longer stretch.**
+> **Status: ACTIVE in `body_field` extension v1 per `docs/Cosmic_Bliss_Update_2026-05-13_body_field_v1_kinematic_only.md` (which amends `docs/Cosmic_Bliss_Update_2026-05-12-02_flesh_deformer_integration.md`).** v1 ships a **kinematic-only** tet proxy — a collision surface for particle-based systems (TentacleTech now, Tenticles fluids later), running parallel to the render mesh rather than driving it. The XPBD pipeline (Stable Neo-Hookean, volume preservation, LRA tethers, SDF collisions, `surface_transfer`) and the three §18 amendments below defer to **v1.5+ slices in `body_field` Phase B**, conditional on B6 visible-quality validation. **The substrate itself is no longer stretch**; the XPBD machinery that originally accompanied it is.
+>
+> **Hard-optional invariant (top-level `CLAUDE.md`).** No Marionette feature requires `body_field` for correct function. When a `BodyField` node is present in the hero scene, §18 paths engage as described below; when absent, every consumer falls through to its pre-`body_field` path (capsule contact in TT, render-mesh additive-offset jiggle in §15, manual-authoring soft regions in §16, manual-authoring surface attachments in §17). The kasumi-without-`body_field` smoke test gates body_field-touching PRs.
 
 Implementation home: **`body_field` extension**, alongside §17 surface field as a sibling slice family. The two share the body mesh source, the hero-load bake step, and (when §17 lands) the cotan-Laplacian factorization machinery. Implementation order is independent; whichever lands first sets up the shared bake.
 
-### The substrate (v1, active)
+### The substrate (v1, active — kinematic-only)
 
-GPU-resident XPBD on a tetrahedral proxy mesh of the body interior. Per-vertex kinematic classification drives a `kinematic_target` field every tick; simulated tet vertices project against per-tet Stable Neo-Hookean elasticity (Smith 2018), volume preservation, bone-SDF collisions, and LRA tethers. Surface deformation reaches the render mesh as `sim − kinematic_target` deltas via precomputed barycentric weights — load-bearing for compositing cleanly with Godot's bone-LBS skinning without float-path divergence.
+A tetrahedral proxy mesh of the body interior whose vertices are **skinned from bone transforms once per physics tick** (`kinematic_targets.glsl`, single compute pass). No XPBD predict/correct, no Neo-Hookean, no LRA tethers, no SDF collision inside the substrate in v1 — those are v1.5+ additions gated on B6. The proxy is invisible: it does **not** drive the render mesh; the 05-11 skinning stack (DQS + Delta Mush + surface-field offsets) owns render fidelity. The proxy's only consumer is TentacleTech contact dispatch — particles whose nearest-bone region is torso/limbs/head contact the tet outer surface; hand and foot particles stay on `BoneCollisionProfile` capsules (extremities mask, baked at authoring time).
 
-Tetrahedralisation is bake-time (FloatTetwild on the closed body surface mesh; resolution exposed as one numeric slider). The tet substrate covers the outer body only; canal interior verts (TT §6.12, `CUSTOM0.r ≥ 1`) are excluded at bake time and route through the canal pipeline (brief Q2). Per-vertex kinematic classification + BFS-depth rigidity are runtime-derived from bone SDFs at hero load; two numeric tuning params shape the rigidity ramp, no per-tet authoring. Bone SDFs read from `BoneCollisionProfile` via a hero-load converter — single source of truth shared with Jolt-side ragdoll shapes.
+Tetrahedralisation is bake-time (FloatTetwild on the closed body surface mesh; resolution exposed as one numeric slider). Canal interior verts (TT §6.12, `CUSTOM0.r ≥ 1`) and hand/foot regions are excluded at bake time. Boundary tet verts inherit skinning weights from the render mesh; interior tet verts get a cheap closest-bone LBS at bake time (interior verts never drive contact in v1, so quality is moot). Bone SDFs read from `BoneCollisionProfile` via a hero-load converter — single source of truth shared with Jolt-side ragdoll shapes; the converter itself (B3) only earns its keep when XPBD runs and defers to v1.5.
 
-References: XPBD (Macklin et al. 2016), Stable Neo-Hookean (Smith 2018), IQ analytic SDF primitives. Slice plan + v1 scope detail in the integration brief; full implementation spec in `docs/body_field/flesh_deformer_v2_legacy.md`.
+When `body_field` is **present**, TentacleTech particles in the proxy-eligible regions contact the tet outer surface and `body_field` receives external impulses via the layer-partitioned dispatch path (`docs/Cosmic_Bliss_Update_2026-05-14_body_field_optionality_and_dispatch.md`). When **absent**, the entire body contacts via `BoneCollisionProfile` capsules exactly as it does today — no regression, no required fallback authoring.
+
+References: XPBD (Macklin et al. 2016), Stable Neo-Hookean (Smith 2018), IQ analytic SDF primitives — all for v1.5+. v1 slice plan in the 05-13 amendment; v1.5+ implementation spec in `docs/body_field/flesh_deformer_v2_legacy.md`.
 
 ### What §18 v1 does not change
 
 - **Authoring contract**: ARP+toes in Blender + volume primitives + numeric sliders in Godot + `flesh_influence` painted per render vert in Blender (the only painting surface). All bake-time derivation otherwise.
 - **Surface skinning path**: body mesh still rendered via bone-LBS + the §18 delta. Verts outside the tet mesh deform unchanged.
 - **Decal diffusion + vector-θ + bulger array** stay where they are; §18 doesn't replace TT §7's bulger path for storage beads / internal tentacles; bulgers and tet deformation compose at the shader.
-- **Marionette §15 jiggle bones** stay live and integrate as additional kinematic targets feeding `kinematic_targets.glsl`, not as additive offsets on top of tet-deformed positions (brief Q1).
+- **Marionette §15 jiggle bones** stay live on their render-mesh additive-offset path. In v1 there is no tet sim to compose with, so the question is moot; in v1.5+ (when XPBD opens), jiggle bone poses optionally feed `kinematic_targets.glsl` additively as additional kinematic targets, per brief Q1. When `body_field` is absent, the additive-offset path is the only path.
 
 ### Three amendments deferred to v2+ slices in `body_field` Phase B
 
