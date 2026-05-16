@@ -226,6 +226,202 @@ void CanalCenterlineSolver::set_particle_position(int p_index, const Vector3 &p_
 	prev_positions[p_index] = p_pos;
 }
 
+// ─── 5F.B.B per-arc-length evaluators ─────────────────────────────────
+//
+// Helper: given `s`, find the bracketing segment index `i` such that
+// `s ∈ [cum_len[i], cum_len[i+1]]`, plus the in-segment fraction.
+// Returns segment index in `r_seg`, fraction in `r_frac`, total arc in
+// `r_total`. `r_seg` is clamped to [0, n-2] so degenerate cases (n=1) are
+// caught by the caller, not here.
+static void _locate_segment(const std::vector<Vector3> &positions, float p_s,
+		int &r_seg, float &r_frac, float &r_total) {
+	r_seg = 0;
+	r_frac = 0.0f;
+	r_total = 0.0f;
+	const int n = static_cast<int>(positions.size());
+	if (n < 2) {
+		return;
+	}
+	// Compute segment lengths inline; cheap (n-1 sqrt's) and avoids
+	// dragging a per-tick cache field for a per-cell-call API. With M=12,
+	// the per-canal cost is 11 sqrt per cell × 256 cells = ~3K sqrt per
+	// tick per canal — negligible.
+	std::vector<float> cum;
+	cum.resize(n);
+	cum[0] = 0.0f;
+	for (int i = 0; i < n - 1; ++i) {
+		cum[i + 1] = cum[i] + (positions[i + 1] - positions[i]).length();
+	}
+	r_total = cum[n - 1];
+	if (r_total <= 1e-9f) {
+		return;
+	}
+	const float s_clamped = std::max(0.0f, std::min(p_s, r_total));
+	// Binary-search the segment. n is tiny (≤ 64); linear scan is fine and
+	// avoids any std::upper_bound dance.
+	int seg = 0;
+	for (int i = 0; i < n - 1; ++i) {
+		if (s_clamped <= cum[i + 1]) {
+			seg = i;
+			break;
+		}
+		seg = i; // clamp to last segment for s == total
+	}
+	const float seg_len = cum[seg + 1] - cum[seg];
+	r_seg = seg;
+	r_frac = (seg_len > 1e-9f) ? ((s_clamped - cum[seg]) / seg_len) : 0.0f;
+}
+
+float CanalCenterlineSolver::get_total_arc_length() const {
+	const int n = static_cast<int>(positions.size());
+	if (n < 2) {
+		return 0.0f;
+	}
+	float total = 0.0f;
+	for (int i = 0; i < n - 1; ++i) {
+		total += (positions[i + 1] - positions[i]).length();
+	}
+	return total;
+}
+
+Vector3 CanalCenterlineSolver::evaluate_at(float p_s) const {
+	const int n = static_cast<int>(positions.size());
+	if (n == 0) {
+		return Vector3();
+	}
+	if (n == 1) {
+		return positions[0];
+	}
+	int seg = 0;
+	float frac = 0.0f;
+	float total = 0.0f;
+	_locate_segment(positions, p_s, seg, frac, total);
+	return positions[seg].lerp(positions[seg + 1], frac);
+}
+
+Basis CanalCenterlineSolver::basis_at(float p_s) const {
+	const int n = static_cast<int>(positions.size());
+	if (n < 2) {
+		return Basis();
+	}
+	int seg = 0;
+	float frac = 0.0f;
+	float total = 0.0f;
+	_locate_segment(positions, p_s, seg, frac, total);
+
+	// Tangent: segment direction at `seg`.
+	Vector3 tangent = positions[seg + 1] - positions[seg];
+	const float tlen = tangent.length();
+	if (tlen <= 1e-9f) {
+		return Basis();
+	}
+	tangent /= tlen;
+
+	// Parallel-transport the normal from segment 0 forward to `seg`. The
+	// initial normal is chosen perpendicular to the segment-0 tangent;
+	// the second axis (Y if |tangent.y| < 0.9, else Z) is the seed.
+	Vector3 t0 = positions[1] - positions[0];
+	const float t0_len = t0.length();
+	if (t0_len <= 1e-9f) {
+		return Basis();
+	}
+	t0 /= t0_len;
+	Vector3 seed = (std::abs(t0.y) < 0.9f) ? Vector3(0.0f, 1.0f, 0.0f)
+										   : Vector3(0.0f, 0.0f, 1.0f);
+	Vector3 normal = (seed - t0 * seed.dot(t0)).normalized();
+
+	for (int i = 0; i < seg; ++i) {
+		const Vector3 ti = (positions[i + 1] - positions[i]).normalized();
+		const Vector3 ti_next = (i + 2 < n)
+				? (positions[i + 2] - positions[i + 1]).normalized()
+				: ti;
+		// Rotate `normal` by the rotation that maps `ti` → `ti_next`. This
+		// is Rotation-Minimizing-Frame parallel transport along a polyline.
+		const Vector3 axis = ti.cross(ti_next);
+		const float sin_a = axis.length();
+		if (sin_a > 1e-9f) {
+			const float cos_a = ti.dot(ti_next);
+			const float angle = std::atan2(sin_a, cos_a);
+			normal = normal.rotated(axis / sin_a, angle);
+		}
+	}
+	// Project normal perpendicular to the current segment tangent
+	// (numerical hygiene; the analytic transport keeps them ⟂ but FP error
+	// accumulates over a long chain).
+	normal = (normal - tangent * normal.dot(tangent));
+	const float nlen = normal.length();
+	if (nlen <= 1e-9f) {
+		// Fallback: rebuild from seed against current tangent.
+		Vector3 seed2 = (std::abs(tangent.y) < 0.9f) ? Vector3(0.0f, 1.0f, 0.0f)
+													 : Vector3(0.0f, 0.0f, 1.0f);
+		normal = (seed2 - tangent * seed2.dot(tangent)).normalized();
+	} else {
+		normal /= nlen;
+	}
+	const Vector3 binormal = tangent.cross(normal).normalized();
+	// Godot Basis(x, y, z) takes column vectors. Convention matches
+	// `_project_onto_spline` in canal_auto_baker.gd:
+	//   columns = (tangent, normal, binormal).
+	return Basis(tangent, normal, binormal);
+}
+
+float CanalCenterlineSolver::curvature_at(float p_s) const {
+	const int n = static_cast<int>(positions.size());
+	if (n < 3) {
+		return 0.0f;
+	}
+	int seg = 0;
+	float frac = 0.0f;
+	float total = 0.0f;
+	_locate_segment(positions, p_s, seg, frac, total);
+	// Pick the interior particle index closest to `s`: seg vs seg+1.
+	int mid = (frac < 0.5f) ? seg : seg + 1;
+	if (mid <= 0) {
+		mid = 1;
+	}
+	if (mid >= n - 1) {
+		mid = n - 2;
+	}
+	const Vector3 &a = positions[mid - 1];
+	const Vector3 &b = positions[mid];
+	const Vector3 &c = positions[mid + 1];
+	// Discrete |d²r/ds²| estimate: |a - 2b + c| / h², with h = avg leg.
+	const float h = 0.5f * ((b - a).length() + (c - b).length());
+	if (h <= 1e-9f) {
+		return 0.0f;
+	}
+	const Vector3 second = a - b * 2.0f + c;
+	return second.length() / (h * h);
+}
+
+Vector3 CanalCenterlineSolver::bend_axis_at(float p_s) const {
+	const int n = static_cast<int>(positions.size());
+	if (n < 3) {
+		return Vector3();
+	}
+	int seg = 0;
+	float frac = 0.0f;
+	float total = 0.0f;
+	_locate_segment(positions, p_s, seg, frac, total);
+	int mid = (frac < 0.5f) ? seg : seg + 1;
+	if (mid <= 0) {
+		mid = 1;
+	}
+	if (mid >= n - 1) {
+		mid = n - 2;
+	}
+	const Vector3 &a = positions[mid - 1];
+	const Vector3 &b = positions[mid];
+	const Vector3 &c = positions[mid + 1];
+	const Vector3 mid_ac = (a + c) * 0.5f;
+	Vector3 axis = mid_ac - b;
+	const float l = axis.length();
+	if (l <= 1e-9f) {
+		return Vector3();
+	}
+	return axis / l;
+}
+
 void CanalCenterlineSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure", "rest_positions_world", "inv_mass_per_particle"),
 			&CanalCenterlineSolver::configure);
@@ -248,4 +444,10 @@ void CanalCenterlineSolver::_bind_methods() {
 			&CanalCenterlineSolver::get_particle_count);
 	ClassDB::bind_method(D_METHOD("set_particle_position", "index", "pos"),
 			&CanalCenterlineSolver::set_particle_position);
+	ClassDB::bind_method(D_METHOD("evaluate_at", "s"), &CanalCenterlineSolver::evaluate_at);
+	ClassDB::bind_method(D_METHOD("basis_at", "s"), &CanalCenterlineSolver::basis_at);
+	ClassDB::bind_method(D_METHOD("curvature_at", "s"), &CanalCenterlineSolver::curvature_at);
+	ClassDB::bind_method(D_METHOD("bend_axis_at", "s"), &CanalCenterlineSolver::bend_axis_at);
+	ClassDB::bind_method(D_METHOD("get_total_arc_length"),
+			&CanalCenterlineSolver::get_total_arc_length);
 }

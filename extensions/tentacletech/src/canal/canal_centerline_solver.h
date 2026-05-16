@@ -2,6 +2,7 @@
 #define TENTACLETECH_CANAL_CENTERLINE_SOLVER_H
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/variant/basis.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
@@ -74,6 +75,34 @@ public:
 	// a particle without restructuring inv_mass. Out-of-range index is a
 	// no-op so test errors surface as failing assertions, not crashes.
 	void set_particle_position(int p_index, const godot::Vector3 &p_pos);
+
+	// 5F.B.B per-arc-length evaluators — consumed by `TunnelStateIntegrator`.
+	// All four methods operate on the CURRENT (deformed) particle positions,
+	// not the rest pose. `s` is clamped to [0, total_arc].
+	//
+	// `total_arc` is computed lazily once per call from current segment
+	// lengths; deformation under XPBD distance constraints keeps each segment
+	// within a few percent of `rest_segment_lengths[i]`, but the deformed sum
+	// is correct rather than approximate.
+	//
+	// `evaluate_at(s)` is Catmull-Rom-like piecewise linear interp between the
+	// two particles bracketing `s`. Linear (not cubic) because the rim XPBD
+	// + bending constraints already smooth the chain — over-fitting a cubic
+	// adds wiggle without changing physical fidelity.
+	//
+	// `basis_at(s)` returns columns (tangent, normal, binormal). The normal
+	// is parallel-transported from the first segment so the binormal
+	// rotates smoothly along the chain. Outward at angle θ in the rest
+	// convention = `cos(θ) × normal + sin(θ) × binormal`.
+	//
+	// `curvature_at(s)` returns `|d²r/ds²|` from a 3-point neighbour finite
+	// difference. `bend_axis_at(s)` returns the unit vector pointing from
+	// the middle particle toward the midpoint of its neighbours.
+	godot::Vector3 evaluate_at(float p_s) const;
+	godot::Basis basis_at(float p_s) const;
+	float curvature_at(float p_s) const;
+	godot::Vector3 bend_axis_at(float p_s) const;
+	float get_total_arc_length() const;
 
 protected:
 	static void _bind_methods();

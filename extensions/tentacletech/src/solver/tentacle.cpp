@@ -11,6 +11,7 @@
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 
+#include "../orifice/orifice.h"
 #include "../spline/spline_data_packer.h"
 
 using namespace godot;
@@ -260,9 +261,22 @@ void Tentacle::_apply_collision_reciprocals(float p_delta) {
 		if (inv_mass <= 0.0f) continue;
 		float eff_mass = 1.0f / inv_mass;
 
+		// Slice TT-S3 (§10.5) — suppressed slots have no scratch-array
+		// entry (the scratch-build loop in `_run_environment_probe` slides
+		// unsuppressed slots forward), so we walk EnvironmentContact in
+		// the original order, skip suppressed slots, and re-derive the
+		// scratch-array `slot` index from the running unsuppressed count.
+		// `friction_applied` is indexed by scratch position, not by
+		// EnvironmentContact position.
+		int compact_k = 0;
 		for (int k = 0; k < c.contact_count; k++) {
-			if (c.hit_object_id[k] == 0) continue;
-			int slot = (int)i * tentacletech::MAX_CONTACTS_PER_PARTICLE + k;
+			if (c.hit_suppressed[k]) continue;
+			if (c.hit_object_id[k] == 0) {
+				compact_k++; // still consumed a scratch slot (zeroed RID)
+				continue;
+			}
+			int slot = (int)i * tentacletech::MAX_CONTACTS_PER_PARTICLE + compact_k;
+			compact_k++;
 			Vector3 fa = friction_applied[slot];
 			if (fa.length_squared() < 1e-10f) continue;
 
@@ -331,6 +345,14 @@ void Tentacle::_run_environment_probe() {
 	// entries survive into the scratch-array build and reach the solver.
 	_apply_contact_persistence_to_probe_results();
 
+	// Slice TT-S3 (§10.5) — filter type-1 contacts whose hit body belongs
+	// to an orifice this tentacle has an active EI with. Runs BEFORE the
+	// scratch arrays below so suppressed slots never reach the solver's
+	// contact step (their `hit_depth` is zeroed; the `hit_suppressed` flag
+	// is preserved for the gizmo). NO-OP when `_active_ei_orifices` is
+	// empty — bulk of frames pay only the empty-vector check.
+	_apply_contact_suppression();
+
 	// Slice 4M: probe returns up to MAX_CONTACTS_PER_PARTICLE contacts per
 	// particle. Pack into 2N flat arrays for the solver, plus an N-byte
 	// count array (replaces slice 4D's `active` flag — count == 0 is
@@ -358,17 +380,27 @@ void Tentacle::_run_environment_probe() {
 			int base = i * tentacletech::MAX_CONTACTS_PER_PARTICLE;
 			if (i < (int)contacts.size()) {
 				const tentacletech::EnvironmentContact &c = contacts[i];
-				cc[i] = (uint8_t)c.contact_count;
-				for (int k = 0; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
-					if (k < c.contact_count) {
-						cp[base + k] = c.hit_point[k];
-						cn[base + k] = c.hit_normal[k];
-						cr[base + k] = (int64_t)c.hit_rid[k].get_id();
-					} else {
-						cp[base + k] = Vector3();
-						cn[base + k] = Vector3();
-						cr[base + k] = 0;
-					}
+				// Slice TT-S3 (§10.5) — slide unsuppressed slots forward
+				// so the solver sees a compact (count, points, normals,
+				// rids) tuple with no holes. Suppressed slots have already
+				// had their `hit_depth` zeroed and their `hit_suppressed`
+				// flag set in `_apply_contact_suppression`; here we
+				// translate that into the scratch-array layout the solver
+				// reads. The `hit_suppressed` flag stays available on the
+				// EnvironmentContact for the gizmo overlay regardless.
+				int out_k = 0;
+				for (int k = 0; k < c.contact_count; k++) {
+					if (c.hit_suppressed[k]) continue;
+					cp[base + out_k] = c.hit_point[k];
+					cn[base + out_k] = c.hit_normal[k];
+					cr[base + out_k] = (int64_t)c.hit_rid[k].get_id();
+					out_k++;
+				}
+				cc[i] = (uint8_t)out_k;
+				for (int k = out_k; k < tentacletech::MAX_CONTACTS_PER_PARTICLE; k++) {
+					cp[base + k] = Vector3();
+					cn[base + k] = Vector3();
+					cr[base + k] = 0;
 				}
 			} else {
 				cc[i] = 0;
@@ -1034,6 +1066,77 @@ void Tentacle::flush_external_position_deltas() {
 	solver->apply_external_position_deltas();
 }
 
+// -- Slice TT-S3 (§10.5) active-EI orifice registry -----------------------
+
+void Tentacle::register_active_ei_orifice(Orifice *p_orifice) {
+	if (p_orifice == nullptr) return;
+	for (size_t i = 0; i < _active_ei_orifices.size(); i++) {
+		if (_active_ei_orifices[i] == p_orifice) return; // idempotent
+	}
+	_active_ei_orifices.push_back(p_orifice);
+}
+
+void Tentacle::unregister_active_ei_orifice(Orifice *p_orifice) {
+	if (p_orifice == nullptr) return;
+	for (size_t i = 0; i < _active_ei_orifices.size(); i++) {
+		if (_active_ei_orifices[i] == p_orifice) {
+			// Swap-pop: order doesn't matter for the filter pass.
+			_active_ei_orifices[i] = _active_ei_orifices.back();
+			_active_ei_orifices.pop_back();
+			return;
+		}
+	}
+}
+
+int Tentacle::get_active_ei_orifice_count() const {
+	return (int)_active_ei_orifices.size();
+}
+
+void Tentacle::_apply_contact_suppression() {
+	// Slice TT-S3 (§10.5) — for every EnvironmentContact slot whose
+	// `hit_object_id` is in the suppression set of ANY orifice this
+	// tentacle has an active EI with, mark the slot suppressed and zero
+	// its `hit_depth`. The slot's `contact_count` is intentionally left
+	// alone — the solver projects on depth (and depth == 0 → no push),
+	// and the gizmo overlay needs to see the slot as "present but
+	// suppressed" to render the cyan X marker.
+	//
+	// Capsule path only: the slot's `hit_object_id` is treated as a
+	// capsule body. Proxy-path dispatch (body_field tet body) is
+	// orthogonal and gated on body_field B5; the proxy filter would
+	// live alongside this loop once it lands.
+	if (_active_ei_orifices.empty()) return;
+	auto &contacts = environment_probe.get_contacts_mut();
+	int n = (int)contacts.size();
+	if (n == 0) return;
+
+	for (int i = 0; i < n; i++) {
+		auto &c = contacts[i];
+		if (c.contact_count == 0) continue;
+		for (int k = 0; k < c.contact_count; k++) {
+			uint64_t oid = c.hit_object_id[k];
+			if (oid == 0) continue;
+			// Walk the (small) active-EI orifice set; first match wins.
+			for (size_t o = 0; o < _active_ei_orifices.size(); o++) {
+				Orifice *orf = _active_ei_orifices[o];
+				if (orf == nullptr) continue;
+				if (orf->is_object_id_suppressed(oid)) {
+					c.hit_suppressed[k] = true;
+					c.hit_depth[k] = 0.0f;
+					break;
+				}
+			}
+			// TODO §10.5 proxy path: when body_field B5 ships, dispatch
+			// here on `oid == <proxy tet body RID>` → look up the
+			// dominant skin-weighted bone of the contact face via
+			// `BodyField::get_face_dominant_bone(hit_point)` and check
+			// it against the orifice's suppressed-bone set (string or
+			// ID-resolved). For now the capsule path above covers every
+			// body in the scene since the proxy body isn't constructed.
+		}
+	}
+}
+
 // Slice 5C-C — chain-arc-length sampling helpers. `s` walks the chain
 // rest-length array to find the containing segment, then interpolates.
 // Both helpers clamp into the valid range so callers don't have to
@@ -1375,6 +1478,12 @@ Array Tentacle::get_environment_contacts_snapshot() const {
 			slot["hit_depth"] = c.hit_depth[k];
 			slot["hit_object_id"] = (int64_t)c.hit_object_id[k];
 			slot["hit_linear_velocity"] = c.hit_linear_velocity[k];
+			// Slice TT-S3 (§10.5) — suppressed slot flag for gizmo overlays
+			// + tests. Suppressed slots have `hit_depth == 0` already
+			// (zeroed by `_apply_contact_suppression`); the flag exists
+			// so consumers can distinguish "no penetration" from
+			// "penetration was suppressed by §10.5".
+			slot["hit_suppressed"] = c.hit_suppressed[k];
 			Vector3 fa;
 			if (friction_per_slot) {
 				fa = friction_applied[base + k];
@@ -2115,6 +2224,16 @@ void Tentacle::_bind_methods() {
 			&Tentacle::add_external_position_delta);
 	ClassDB::bind_method(D_METHOD("flush_external_position_deltas"),
 			&Tentacle::flush_external_position_deltas);
+
+	// Slice TT-S3 (§10.5) — active-EI orifice registry. Bound for tests
+	// + tooling; the runtime path is Orifice → Tentacle in C++ directly,
+	// no GDScript intermediary.
+	ClassDB::bind_method(D_METHOD("register_active_ei_orifice", "orifice"),
+			&Tentacle::register_active_ei_orifice);
+	ClassDB::bind_method(D_METHOD("unregister_active_ei_orifice", "orifice"),
+			&Tentacle::unregister_active_ei_orifice);
+	ClassDB::bind_method(D_METHOD("get_active_ei_orifice_count"),
+			&Tentacle::get_active_ei_orifice_count);
 	ClassDB::bind_method(D_METHOD("get_signed_girth_gradient_at_arc_length", "s"),
 			&Tentacle::get_signed_girth_gradient_at_arc_length);
 	ClassDB::bind_method(D_METHOD("get_tangent_at_arc_length", "s"),

@@ -67,6 +67,15 @@ struct EnvironmentContact {
 	uint64_t hit_object_id[MAX_CONTACTS_PER_PARTICLE] = {0, 0};
 	godot::RID hit_rid[MAX_CONTACTS_PER_PARTICLE];
 	godot::Vector3 hit_linear_velocity[MAX_CONTACTS_PER_PARTICLE];
+	// Slice TT-S3 (§10.5) — flagged true by the suppression filter when
+	// the slot's `hit_object_id` matches an Orifice in the tentacle's
+	// active-EI list whose `suppressed_object_ids` includes the body.
+	// The filter zeroes `hit_depth` for the same slot so the solver's
+	// contact step sees no contact; the flag exists separately so the
+	// gizmo overlay can draw a "would-have-been-a-contact" hint without
+	// resurrecting the suppressed slot. Reset to false in
+	// `EnvironmentProbe::probe`.
+	bool hit_suppressed[MAX_CONTACTS_PER_PARTICLE] = {false, false};
 };
 
 class EnvironmentProbe {

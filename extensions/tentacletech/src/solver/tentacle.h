@@ -110,6 +110,22 @@ public:
 	void add_external_position_delta(int p_particle_index, const godot::Vector3 &p_delta);
 	void flush_external_position_deltas();
 
+	// Slice TT-S3 (§10.5) — active-EI orifice registry. Orifice writes
+	// itself in when an EntryInteraction first activates with this
+	// tentacle, and removes itself when the EI retires (or on the
+	// orifice's destruction). Type-1 contact suppression iterates this
+	// set each tick to gather the union of suppressed Object IDs. Cap
+	// matches §6.2's multi-orifice spec: a tentacle in three orifices
+	// at once is the realistic upper bound.
+	//   `register_active_ei_orifice(o)` — idempotent; no-op if already
+	//      registered. Pushes to the back of a small vector.
+	//   `unregister_active_ei_orifice(o)` — idempotent; no-op if not
+	//      registered. Linear scan + swap-pop (set is tiny, no hash).
+	//   `get_active_ei_orifice_count()` — for tests + the gizmo overlay.
+	void register_active_ei_orifice(class Orifice *p_orifice);
+	void unregister_active_ei_orifice(class Orifice *p_orifice);
+	int get_active_ei_orifice_count() const;
+
 	// Slice 5C-C — chain-arc-length sampling helpers used by §6.3
 	// reaction-on-host-bone. `s` is intrinsic arc length along the chain
 	// in metres; we walk the segment rest lengths to locate the
@@ -599,6 +615,21 @@ private:
 	godot::PackedByteArray _in_contact_this_tick_snapshot;
 
 	void _run_environment_probe();
+	// Slice TT-S3 (§10.5) — type-1 contact suppression filter. Runs inside
+	// `_run_environment_probe` AFTER the persistence override and BEFORE
+	// the scratch arrays handed to the solver are built. For each
+	// EnvironmentContact slot, if any orifice in `_active_ei_orifices`
+	// has the slot's `hit_object_id` in its suppressed set, mark the slot
+	// `hit_suppressed = true` and zero `hit_depth` (the count stays
+	// positive so the gizmo can still draw the would-be contact).
+	// Downstream solver consumers skip slots with depth == 0 implicitly
+	// via the standard contact projection (depth ≤ 0 → no push).
+	void _apply_contact_suppression();
+	// Slice TT-S3 — small vector of orifices for which this tentacle has
+	// an active EntryInteraction. Set in `register_active_ei_orifice` /
+	// `unregister_active_ei_orifice` by the Orifice's EI lifecycle path.
+	// Tiny in practice (cap 3); a flat vector outperforms a hash here.
+	std::vector<class Orifice *> _active_ei_orifices;
 	// Slice 4S.2 — outer-tick boundary helpers (called from Tentacle::tick).
 	// Order: reset_friction_applied → reset_environment_contact_lambdas (4R)
 	// → _validate_and_reseed_persistence → apply_target_rate_limit → substep

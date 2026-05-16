@@ -66,6 +66,12 @@ const PRESSURE_HIGH_COLOR := Color(1.0, 0.3, 0.3, 0.95)
 # position (which is `neutral + plastic_offset`). Drawn only when
 # offset is non-zero so a steady orifice stays clean.
 const PLASTIC_OFFSET_COLOR := Color(1.0, 0.4, 1.0, 0.95)
+# Slice TT-S3 (§10.5) — cyan-magenta marker at each suppressed bone's
+# PhysicalBone3D origin; signals "this body is masked for this
+# orifice's EI tentacles". Distinct from the orange type-2 contact
+# color, the red-purple host-bone color, and the lime host-body color.
+const SUPPRESSED_BONE_COLOR := Color(0.4, 0.85, 1.0, 0.95)
+const SUPPRESSED_BONE_MARKER_SIZE := 0.018
 # Slice 5D §4P-A — when distance_anisotropic_mode is true and a rim
 # segment is in the stretch regime, tint shifts from rim-cyan toward
 # yellow as a visual cue. Computed via lerp at draw time; this is the
@@ -330,6 +336,28 @@ func update_from(p_orifice: Node3D) -> void:
 	if hbody.get("has_host_body", false):
 		var hb_pos: Vector3 = hbody.get("current_world_position", Vector3.ZERO)
 		_draw_cross(inv * hb_pos, HOST_BODY_MARKER_SIZE, HOST_BODY_COLOR)
+
+	# Slice TT-S3 (§10.5) — suppressed-bone markers. One small cyan-magenta
+	# cross at each PhysicalBone3D body whose Object ID is in this orifice's
+	# suppression set. Visualizes "these are the bones masked off for
+	# tentacles with an active EI on this orifice". Drawn unconditionally
+	# (active EIs or not) because the suppression set is authored on the
+	# orifice — the markers help the user verify the auto-baker / manual
+	# list landed the intended bones.
+	var suppressed_ids: PackedInt64Array = p_orifice.call(
+			&"get_suppressed_object_ids_snapshot")
+	if suppressed_ids.size() > 0:
+		for sid in suppressed_ids:
+			var obj := instance_from_id(sid)
+			if obj == null:
+				continue
+			if not obj is Node3D:
+				continue
+			var n3d: Node3D = obj
+			if not n3d.is_inside_tree():
+				continue
+			_draw_cross(inv * n3d.global_position,
+					SUPPRESSED_BONE_MARKER_SIZE, SUPPRESSED_BONE_COLOR)
 
 	_imesh.surface_end()
 

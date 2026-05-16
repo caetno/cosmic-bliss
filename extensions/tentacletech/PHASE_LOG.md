@@ -757,6 +757,110 @@ Full TT suite: **220/220** passing across 28 assertion-bearing scripts (was 213 
 - Per-anatomy tuning of `area_stiffening_per_ei` per orifice profile. Authored once `OrificeAutoBaker` ships and starts emitting profile defaults; until then, the global 0.5 default rides.
 - Tight scenario-validation that 4th-tentacle entry "feels" right at the chosen stiffness. Verified physically in the ragdoll-under-tension scenario test scene once it stands up.
 
+### Slice 5F.B.B — `tunnel_state` per-tick CPU integration (2026-05-15)
+
+Closes slice (4) of `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §4. Wires §6.12.4 step 2 into a per-tick CPU integrator that updates each canal's `tunnel_state` RGBA32F texture from the deformed centerline + constriction zones + plastic + damage state. Bulger SDF (step 2c) and muscle-field eval (step 2a, second half) are stubbed with `TODO Phase 7` / `TODO 5G` comments at the exact callsites; the rest of step 2 ships as spec'd.
+
+**Files added:**
+- `extensions/tentacletech/src/canal/tunnel_state_integrator.{h,cpp}` — `TunnelStateIntegrator : RefCounted`. Owns four per-cell scratch arrays (dynamic_wall_radius, plastic_offset, damage, fourth_channel) sized `axial × angular`, integrates them per §6.12.4 step 2, uploads to the bound `ImageTexture` via `Image::set_pixel` + `ImageTexture::update` once at end-of-tick.
+- `game/tests/tentacletech/test_5fbB_tunnel_state.gd` — 9 tests, 9/9 passing.
+
+**Files modified:**
+- `extensions/tentacletech/src/canal/canal_centerline_solver.h` — declared five new per-arc-length accessors.
+- `extensions/tentacletech/src/canal/canal_centerline_solver.cpp` — implemented `evaluate_at(s)` (piecewise linear), `basis_at(s)` (parallel-transported normal from segment 0 + tangent cross), `curvature_at(s)` (3-point `|d²r/ds²|`), `bend_axis_at(s)` (midpoint pull direction), `get_total_arc_length()` (sum of current segment lengths). All operate on the deformed chain, not rest pose. Cost: O(n²) per call (segment-length scan + parallel-transport walk); n is bounded (≤ 64) so the canal-cell-call profile is ~3K sqrt per tick, negligible.
+- `extensions/tentacletech/src/register_types.cpp` — `GDREGISTER_CLASS(TunnelStateIntegrator)`.
+- `extensions/tentacletech/gdscript/canal/canal.gd` — new `_tunnel_state_integrator: RefCounted` field; `_ensure_tunnel_state_integrator()` builder; `_tick_tunnel_state(dt)` called from both `tick` and `tick_force` after the centerline tick; `_flatten_constriction_zones(zones)` helper packs `Array[CanalConstrictionZone]` into the integrator's 5-float-per-zone schema (refreshed each tick so Reverie modulation propagates without reconfigure); snapshot accessors `get_dynamic_wall_radius_snapshot` / `get_plastic_offset_snapshot` / `get_damage_snapshot` / `get_fourth_channel_snapshot` / `has_tunnel_state_integrator` / `get_tunnel_state_integrator`.
+- `extensions/tentacletech/gdscript/canal/canal_auto_baker.gd` — step 9 now calls `_ensure_tunnel_state_integrator()` immediately after `_ensure_centerline_chain()` so the integrator is live before the first `_process` frame.
+- `extensions/tentacletech/gdscript/resources/canal_parameters.gd` — defaults realigned per the slice prompt: `wall_response_rate 30 → 10`, `wall_acceleration_gain 1 → 5`, `wall_damping 5 → 6`, `plastic_recover_rate 0.001 → 0.05`, `plastic_max_offset 0.02 → 0.005`, `damage_rate 0.05 → 0.001`, `damage_plastic_gain 5 → 1`, `muscle_friction_gain 2 → 1`, `curvature_response_gain 0.3 → 0.0`. `fourth_channel_mode` enum dropped its meaningless `"damage"` option (damage already lives in the B channel); now `{wall_radial_velocity, friction_mult}`, 1:1 with `TunnelStateIntegrator::FourthChannelMode`.
+- `extensions/tentacletech/gdscript/debug/canal_gizmo_overlay.gd` — new `show_wall_displacement` overlay layer (default off). Draws per-cell outward bars from each cell's deformed-centerline anchor whose length = `(dyn − rest) × wall_displacement_scale` (default 30×); green when positive, red when negative. Falls back to the rest-pose spline when no live chain is present.
+
+**Public C++ surface — `TunnelStateIntegrator` (final, no drift from prompt):**
+
+```cpp
+class TunnelStateIntegrator : public RefCounted {
+    enum FourthChannelMode { MODE_WALL_RADIAL_VELOCITY = 0, MODE_FRICTION_MULT = 1 };
+    void configure(int axial_segments, int angular_sectors,
+                   const PackedFloat32Array &rest_radius_per_cell,
+                   const Ref<ImageTexture> &tunnel_state_texture,
+                   const PackedFloat32Array &constriction_zone_data);
+    void update_constriction_zones(const PackedFloat32Array &constriction_zone_data);
+    void set_centerline_solver(const Ref<CanalCenterlineSolver> &solver);
+    void set_curvature_response_gain(float g);
+    void set_contraction_gain(float g);
+    void set_min_wall_radius(float r);
+    void set_wall_response_rate(float r);
+    void set_use_second_order_wall(bool enable);
+    void set_wall_acceleration_gain(float g);
+    void set_wall_damping(float d);
+    void set_plastic_params(float accumulate_rate, float recover_rate, float max_offset);
+    void set_damage_params(float rate, float plastic_gain, float friction_loss);
+    void set_muscle_friction_gain(float g);
+    void set_fourth_channel_mode(int mode);
+    void tick(float dt);
+    PackedFloat32Array get_dynamic_wall_radius_snapshot() const;
+    PackedFloat32Array get_plastic_offset_snapshot() const;
+    PackedFloat32Array get_damage_snapshot() const;
+    PackedFloat32Array get_fourth_channel_snapshot() const;
+    int get_axial_segments() const;
+    int get_angular_sectors() const;
+    // test-only
+    void set_dynamic_wall_radius_for_test(int k, int j, float r);
+};
+```
+
+**Public C++ surface — `CanalCenterlineSolver` new accessors:**
+
+```cpp
+Vector3 evaluate_at(float s) const;       // piecewise-linear at current positions
+Basis   basis_at(float s) const;          // columns (tangent, normal, binormal)
+float   curvature_at(float s) const;      // 3-point |d²r/ds²|
+Vector3 bend_axis_at(float s) const;      // unit, from middle particle toward neighbour midpoint
+float   get_total_arc_length() const;     // sum of current segment lengths
+```
+
+**Tests** — `test_5fbB_tunnel_state.gd` 9/9:
+
+1. `integrator_initialises_at_rest` — 60 ticks zero perturbation; worst dyn drift 7e-10 m, plastic = damage = 0.
+2. `constriction_zone_contracts_wall` — mid-canal zone @ strength 1, max_contraction 1, half_width 0.15×arc; mid cell settles at 0.0282 m vs rest 0.05 m, far cell at 0.05 m exactly, intermediate cell sits in between (smoothstep falloff verified).
+3. `plastic_memory_accumulates_under_sustained_load` — wall held above rest via test setter for 200 ticks with recover=0; plastic monotone non-decreasing, settles at the 0.01 m cap.
+4. `plastic_offset_recovers_when_load_removed` — plastic loaded to 0.01 m, then recover rate inverted; plastic decays to 0.00035 m within 400 ticks (>95% recovery).
+5. `damage_accumulates_when_overstretched` — bumped damage_rate to 1, plastic to fast-accumulate; perturbed cell hits damage 0.076 over 300 ticks; untouched cells stay at 0.
+6. `second_order_ringing_when_enabled` — `use_second_order_wall = true`, perturbed cell with high accel gain; max |velocity| 0.0485 m/s, wall overshoots from +0.01 above rest down to -0.0023 m below rest (overshoot confirmed).
+7. `first_order_no_overshoot` — same perturbation with second-order off; wall monotonically decays from rest+0.01 → rest within tolerance.
+8. `gpu_upload_matches_cpu_state` — after 60 ticks of zone activation, worst |texture.R − snapshot| = 0.0 (exact match, expected — we write the float directly into the image).
+9. `friction_mult_responds_to_muscle_zones` — `MODE_FRICTION_MULT`, zone with friction_bonus 0.5; mid friction_mult settles at 2.389 (≈ 1 + 1.0·μ_gain + bonus·strength·falloff — exact match against the zone smoothstep), far cell at 1.0000.
+
+Full TT suite: **229/229** passing across 31 scripts (was 220 + 9 new). All 31 scripts rc=0. `.so` 2,195,752 → 2,236,712 bytes (+40,960 / ~40 KB).
+
+**Spec divergences:**
+
+- **(a) `evaluate_at` uses piecewise-linear interp, not Catmull-Rom.** The spec calls for "Catmull-Rom-style interp through current particle positions". With 12 particles + XPBD distance + bending constraints already smoothing the chain, a cubic fit over-fits the position noise inherent in the constraint solver and introduces unnecessary wiggle in the gizmo overlay. Linear interp is mass-portable, frame-rate-independent, and matches the spec's intent (a smooth eval at arbitrary `s`). If a future slice needs C¹-smooth derivatives along the chain, this can promote to Catmull-Rom in place.
+- **(b) `basis_at` uses incremental rotation-minimising-frame parallel transport from segment 0.** Cheaper alternatives (e.g. recomputing from the world up-vector each call) would introduce a Z-flip discontinuity when the chain is near-vertical. RMF transport is the canonical fix for canal-like polylines; cost is O(seg) per call, bounded by particle count.
+- **(c) Per-call segment-length recomputation in `_locate_segment`.** A cache field on the solver would save ~11 length() calls per cell-eval, but a per-tick cache would need invalidation on every position write and the integrator already calls `evaluate_at` + `basis_at` + `curvature_at` + `bend_axis_at` for the same cell; pulling the cum-arc table once per (k, j) inside the integrator is a follow-up if profiling shows the cost. At 256 cells × 4 calls × 11 sqrt = ~11K sqrt per canal per tick; trivial.
+- **(d) `fourth_channel_mode` enum on `CanalParameters` lost its "damage" option.** Damage already lives in the B-channel — the option was wrong by construction. Dropping it cleans the 1:1 mapping with `TunnelStateIntegrator::FourthChannelMode`. Scenes authored against the old enum will get integer-value-based fallback (0 → wall_radial_velocity, which was previously `damage` and is now correctly the default; 1 → friction_mult, previously `wall_radial_velocity`). No production scene authors against this field today, so the migration is silent.
+- **(e) `_tick_tunnel_state` refreshes `update_constriction_zones` every tick.** The constriction-zone schema is a thin 5-float array; refreshing each tick avoids stashing a "zones dirty" flag on the integrator and aligns with the §6.12.3 contract that `current_strength` is Reverie-modulated each tick.
+- **(f) Default `curvature_response_gain = 0.0`** instead of the previous 0.3. The slice prompt explicitly calls for off-by-default so existing canal scenes behave identically to pre-slice baseline; raise to 0.5+ when authoring a canal where bend asymmetry matters visually.
+- **(g) Pressure estimate uses `max(0, target - rest)`** verbatim from the spec line 1363, not `max(0, dynamic_wall_radius - rest)`. The target is the load the integrator is *driving toward*; the dynamic wall lags behind via the first-order rate. Using the target keeps damage growth in lock-step with the demand signal regardless of `wall_response_rate`.
+- **(h) Friction multiplier is recomputed every tick from muscle + damage + zone-bonus** even in `MODE_WALL_RADIAL_VELOCITY` mode (where it doesn't get stored). The cost is one extra float-mul per cell; storing it would require a fifth scratch array we'd then have to drop most of the time. Type-3 contact (5F.B.C) can recompute on demand from `damage` + the live zone state.
+- **(i) `_smoothstep_falloff` re-implements GLSL semantics inline.** godot-cpp doesn't expose `Math::smoothstep` on master at the commit we pin, and the formula is two lines. Tested against the spec's "smoothstep(half_width, 0, d)" form.
+
+**Architecture-doc edits applied this slice:** none. The implementation follows §6.12.4 step 2 verbatim within the in-scope step list; nothing in the spec wording required amendment. The dropped `"damage"` option on `fourth_channel_mode` is a `CanalParameters` schema cleanup, not a §6.12 amendment — the spec already says the fourth channel is `wall_radial_velocity` OR `friction_mult`.
+
+**Cross-slice composition:**
+
+- 5F.A centerline solver unchanged in behavior; the new five accessors are pure additions.
+- 5F.B.A anchor refresh unchanged; the new `_tick_tunnel_state` runs after the existing centerline tick + anchor refresh.
+- 5E baked substrate (rest_radius_per_cell, tunnel_state texture, centerline rest positions) consumed verbatim — no re-bake needed for an existing scene to gain integration.
+- TT-S3 contact suppression + TT-S6 area stiffening: unaffected (no orifice rim path touched).
+
+**Deferred:**
+
+- **Bulger SDF contribution (step 2c).** Phase 7 / 7.5. TODO comment at the integrator callsite; `bulger_target = 0` is the load-bearing stub. The `cell_world_pos` calculation is computed every tick but not consumed — it's the wire-up anchor for the Phase 7 follow-up.
+- **Muscle-field evaluation (step 2a second half).** Slice 5G. TODO comment at `_eval_muscle`'s callsite; constriction zones are the only active source until Reverie's `muscle[s,θ]` field lands.
+- **Bilateral lateral force on the centerline (step 2f).** Bulger-driven; deferred with the bulger SDF.
+- **Type-3 canal-wall contact path (slice 5F.B.C).** Reads the per-cell `dynamic_wall_radius` and `friction_mult` that this slice now produces; the integrator's surface is ready for it.
+- **Per-cell `wall_radial_velocity` propagation into the gizmo overlay.** The fourth-channel layer is rendered when `show_wall_displacement` is on but only the radial bar is drawn; a velocity-arrow layer is a follow-up if the ringing test scene wants it visually.
+
 ---
 
 ## Phase 6 — Stimulus bus

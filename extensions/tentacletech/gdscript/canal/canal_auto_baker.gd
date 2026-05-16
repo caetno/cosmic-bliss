@@ -102,6 +102,12 @@ static func bake(
 	# Idempotent: a re-bake replaces the chain.
 	p_canal._ensure_centerline_chain()
 
+	# 5F.B.B — Build the per-tick `tunnel_state` CPU integrator. Same
+	# eager-in-baker pattern as the centerline chain so the gizmo
+	# overlay's wall-displacement layer reads non-empty snapshots from
+	# the first frame after bake completes. Idempotent.
+	p_canal._ensure_tunnel_state_integrator()
+
 	# Step 10 — per-vert (s, θ, rest_radius, rest_outward_normal) bake.
 	var vert_count := bake_canal_interior_verts(
 			p_mesh_instance, p_canal_id, spline)

@@ -81,37 +81,46 @@ extends Resource
 
 ## First-order lag rate (1/s) for `dynamic_wall_radius` toward the
 ## per-cell target. Clamped at runtime to `1/dt − ε` for integration
-## stability (§6.12.10).
-@export_range(0.1, 240.0) var wall_response_rate: float = 30.0
+## stability (§6.12.10). Default 10.0 — fast enough to follow the
+## target, slow enough that the stability clamp isn't load-bearing at
+## a 60 Hz tick.
+@export_range(0.1, 240.0) var wall_response_rate: float = 10.0
 
 ## Enables the second-order ringing dynamics in §6.12.4 step 2h.
 @export var use_second_order_wall: bool = false
 
 ## Acceleration gain for the second-order wall dynamics (when
-## `use_second_order_wall` is true).
-@export var wall_acceleration_gain: float = 1.0
+## `use_second_order_wall` is true). Default 5.0 — pairs with damping
+## 6.0 to land near critically-damped at the default response rate.
+@export var wall_acceleration_gain: float = 5.0
 
 ## Velocity damping for the second-order wall dynamics.
-@export var wall_damping: float = 5.0
+@export var wall_damping: float = 6.0
 
 ## Which signal occupies the 4th channel of the RGBA32F
-## `tunnel_state` texture: damage, wall_radial_velocity (for second-
-## order ringing), or friction_mult (per-cell μ multiplier).
-@export_enum("damage", "wall_radial_velocity", "friction_mult") \
+## `tunnel_state` texture: wall_radial_velocity (for second-order
+## ringing) or friction_mult (per-cell μ multiplier). Damage already
+## occupies the B channel; it never lives in the fourth slot. The
+## enum is integer-valued and maps onto
+## `TunnelStateIntegrator::FourthChannelMode`.
+@export_enum("wall_radial_velocity", "friction_mult") \
 		var fourth_channel_mode: int = 0
 
 # ─── Plastic memory (radial) ───────────────────────────────────────
 
 ## Per-second rate at which `plastic_offset` accumulates from current
-## stretch (§6.12.4 step 2i).
+## stretch (§6.12.4 step 2i). Default 0.05 matches the orifice rim
+## plastic params chosen at slice 4P-C / 5D.
 @export var plastic_accumulate_rate: float = 0.05
 
-## Per-second recovery rate for `plastic_offset` toward zero.
-@export var plastic_recover_rate: float = 0.001
+## Per-second recovery rate for `plastic_offset` toward zero. Default
+## 0.05 — memory-neutral at idle, matches the orifice convention.
+@export var plastic_recover_rate: float = 0.05
 
-## Hard cap on `plastic_offset`. Damaged cells get an effectively
-## larger cap via `damage_plastic_gain`.
-@export var plastic_max_offset: float = 0.02
+## Hard cap on `plastic_offset` (m). Damaged cells get an effectively
+## larger cap via `damage_plastic_gain`. Default 0.005 m matches the
+## orifice rim convention.
+@export var plastic_max_offset: float = 0.005
 
 # ─── Centerline particle chain (§6.12.1) ───────────────────────────
 
@@ -142,19 +151,21 @@ extends Resource
 # ─── Curvature → wall asymmetry ────────────────────────────────────
 
 ## Gain for the centerline-curvature-driven wall asymmetry term
-## (§6.12.4 step 2d). 0 disables; defaults to a visible-but-subtle
-## response.
-@export var curvature_response_gain: float = 0.3
+## (§6.12.4 step 2d). 0 = off (default); raise to 0.5+ when a visible
+## bend response is wanted. Off-by-default keeps existing scenes
+## bake-identical until a designer opts in.
+@export var curvature_response_gain: float = 0.0
 
 # ─── Damage ────────────────────────────────────────────────────────
 
 ## Per-second rate at which `damage` accumulates from pressure
-## (§6.12.4 step 2j).
-@export var damage_rate: float = 0.05
+## (§6.12.4 step 2j). Default 0.001 — small enough that an undamaged
+## canal can be pumped for minutes before damage becomes visible.
+@export var damage_rate: float = 0.001
 
 ## Multiplier on `plastic_max_offset` for cells with accumulated
 ## damage. Damaged tissue remodels with more permanent stretch.
-@export var damage_plastic_gain: float = 5.0
+@export var damage_plastic_gain: float = 1.0
 
 ## Subtractive friction loss per unit damage. Worn tissue is slipperier.
 @export var damage_friction_loss: float = 0.5
@@ -168,7 +179,8 @@ extends Resource
 @export var surface_vel_gain: float = 0.3
 
 ## Additive friction-multiplier bonus from per-cell muscle activation.
-@export var muscle_friction_gain: float = 2.0
+## Default 1.0 — a fully-activated muscle doubles the per-cell μ.
+@export var muscle_friction_gain: float = 1.0
 
 ## Per-canal constriction zones. Default-empty; runtime sums each
 ## zone's smoothstep falloff into the per-cell muscle field.

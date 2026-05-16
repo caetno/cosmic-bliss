@@ -41,10 +41,20 @@ extends Node3D
 ## bending-residual vectors at interior particles. Falls back to
 ## rest positions when `canal.has_centerline_chain()` is false.
 @export var show_centerline: bool = true
+## 5F.B.B — per-cell wall displacement (dynamic_wall_radius − rest).
+## Draws a dot at each cell's deformed-centerline world position + a
+## short outward line whose length is proportional to the radial
+## displacement (green for outward / red for inward). Falls back to a
+## silent no-op when no integrator is attached.
+@export var show_wall_displacement: bool = false
 @export var spline_sample_count: int = 64
 @export var cell_marker_size: float = 0.005
 @export var centerline_dot_size: float = 0.008
 @export var bending_residual_scale: float = 5.0
+## Visual gain on `dynamic_wall_radius − rest_radius`. Real radial
+## displacements at default tunables sit in the mm range; bumping
+## this to ~30 makes the displacement bars readable at a glance.
+@export var wall_displacement_scale: float = 30.0
 @export_range(1, 100, 1) var bake_validation_sample_every: int = 10
 
 const _COLOR_SPLINE := Color(0.0, 1.0, 1.0)        # cyan
@@ -54,6 +64,8 @@ const _COLOR_BAKE := Color(0.3, 0.5, 1.0)          # blue
 const _COLOR_BEND_RESIDUAL := Color(0.2, 1.0, 1.0) # cyan-bias (avoids the orange-yellow band)
 const _COLOR_STRETCH_REST := Color(0.0, 1.0, 0.4)  # green at rest length
 const _COLOR_STRETCH_MAX := Color(1.0, 0.2, 0.2)   # red at ≥110% rest length
+const _COLOR_WALL_OUTWARD := Color(0.0, 1.0, 0.4)  # green: dyn > rest
+const _COLOR_WALL_INWARD := Color(1.0, 0.2, 0.2)   # red: dyn < rest
 
 var _mesh_inst: MeshInstance3D
 var _im: ImmediateMesh
@@ -88,7 +100,9 @@ func _process(_delta: float) -> void:
 	# pays nothing.
 	var live_chain := show_centerline and canal.has_method("has_centerline_chain") \
 			and canal.has_centerline_chain()
-	if live_chain:
+	var live_walls := show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
+			and canal.has_tunnel_state_integrator()
+	if live_chain or live_walls:
 		_rebuild()
 		return
 	var sig := _state_signature()
@@ -160,6 +174,10 @@ func _rebuild() -> void:
 
 	if show_bake_validation and mesh_instance != null:
 		_draw_bake_validation(spline)
+
+	if show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
+			and canal.has_tunnel_state_integrator():
+		_draw_wall_displacement(spline)
 
 
 # ─── Primitives ────────────────────────────────────────────────────
@@ -340,4 +358,72 @@ func _draw_bake_validation(p_spline: RefCounted) -> void:
 			_im.surface_add_vertex(vert_world)
 			_im.surface_set_color(_COLOR_BAKE)
 			_im.surface_add_vertex(reconstructed)
+	_im.surface_end()
+
+
+# 5F.B.B — Per-cell wall displacement overlay. For each (k, j):
+#   * Anchor point = cell's world position at REST radius along the
+#     DEFORMED centerline (so the overlay tracks centerline bend).
+#   * Outward line of length `(dyn − rest) × wall_displacement_scale`,
+#     coloured green when positive (wall pushed outward) or red when
+#     negative (wall contracted inward).
+# Falls back to the rest-pose spline when no live centerline exists —
+# rare in practice (the integrator and chain ship together) but keeps
+# the path defensible if a future scene leaves the chain disabled.
+func _draw_wall_displacement(p_spline: RefCounted) -> void:
+	if canal == null:
+		return
+	var params: CanalParameters = canal.canal_parameters
+	if params == null:
+		return
+	var rest_radius: PackedFloat32Array = canal.get_baked_rest_radius_per_cell()
+	var dyn_radius: PackedFloat32Array = canal.get_dynamic_wall_radius_snapshot()
+	var axial: int = params.canal_axial_segments
+	var sectors: int = params.canal_angular_sectors
+	if rest_radius.size() != axial * sectors:
+		return
+	if dyn_radius.size() != axial * sectors:
+		return
+
+	var have_live_chain := canal.has_method("has_centerline_chain") \
+			and canal.has_centerline_chain()
+	var chain: RefCounted = canal.get_centerline_chain() if have_live_chain else null
+	var total_arc: float = 0.0
+	if chain != null:
+		total_arc = chain.get_total_arc_length()
+	var spline_arc: float = p_spline.get_arc_length()
+
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for k in axial:
+		var s_norm := float(k) / maxf(float(axial - 1), 1.0)
+		var origin: Vector3
+		var normal: Vector3
+		var binormal: Vector3
+		if chain != null and total_arc > 1e-9:
+			var s := s_norm * total_arc
+			origin = chain.evaluate_at(s)
+			var b: Basis = chain.basis_at(s)
+			# basis_at returns columns (tangent, normal, binormal) — match
+			# _project_onto_spline / _draw_cell_grid convention.
+			normal = b.get_column(1).normalized()
+			binormal = b.get_column(2).normalized()
+		else:
+			var s := s_norm * spline_arc
+			var t: float = p_spline.distance_to_parameter(s)
+			origin = p_spline.evaluate_position(t)
+			var frame: Dictionary = p_spline.evaluate_frame(t)
+			normal = (frame["normal"] as Vector3).normalized()
+			binormal = (frame["binormal"] as Vector3).normalized()
+		for j in sectors:
+			var theta := TAU * float(j) / float(sectors)
+			var outward := normal * cos(theta) + binormal * sin(theta)
+			var rest_r: float = rest_radius[k * sectors + j]
+			var dyn_r: float = dyn_radius[k * sectors + j]
+			var anchor := origin + outward * rest_r
+			var disp := (dyn_r - rest_r) * wall_displacement_scale
+			var col := _COLOR_WALL_OUTWARD if disp >= 0.0 else _COLOR_WALL_INWARD
+			_im.surface_set_color(col)
+			_im.surface_add_vertex(anchor)
+			_im.surface_set_color(col)
+			_im.surface_add_vertex(anchor + outward * disp)
 	_im.surface_end()

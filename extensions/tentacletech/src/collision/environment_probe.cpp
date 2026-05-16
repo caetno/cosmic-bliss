@@ -85,6 +85,7 @@ void EnvironmentProbe::probe(Node3D *p_world_node,
 			c.hit_object_id[k] = 0;
 			c.hit_rid[k] = RID();
 			c.hit_linear_velocity[k] = Vector3();
+			c.hit_suppressed[k] = false;
 		}
 
 		float radius = p_radius_base * (gs ? gs[i] : 1.0f);

@@ -85,6 +85,15 @@ var _distal_anchor_world: Vector3
 ## under `--script` invocation per the test gotcha in CLAUDE.md).
 var _centerline_chain: RefCounted = null
 
+## The 5F.B.B per-tick `tunnel_state` CPU integrator
+## (`TunnelStateIntegrator` from
+## `src/canal/tunnel_state_integrator.{h,cpp}`). Owns four per-cell
+## scratch arrays (dynamic_wall_radius, plastic_offset, damage,
+## fourth_channel) and uploads them to `_tunnel_state_texture` each
+## tick. Same RefCounted-by-name pattern as `_centerline_chain` for
+## the same parse-time reason.
+var _tunnel_state_integrator: RefCounted = null
+
 # ─── Runtime identity ──────────────────────────────────────────────
 
 ## Index of this canal in the hero's canal array. `CUSTOM0.r` on
@@ -142,6 +151,7 @@ func tick(p_delta: float) -> void:
 	_refresh_anchors_through_source()
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
+	_tick_tunnel_state(p_delta)
 
 
 ## Test-only entry point that bypasses `is_inactive()`. Used by
@@ -156,6 +166,51 @@ func tick_force(p_delta: float) -> void:
 	_refresh_anchors_through_source()
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
+	_tick_tunnel_state(p_delta)
+
+
+## Per-tick driver for the `TunnelStateIntegrator` slice 5F.B.B
+## attaches. Called from both `tick` (gated by `is_inactive()`) and
+## `tick_force` (test bypass). Refreshes the zone-strength snapshot
+## first so Reverie's per-tick modulation propagates without re-
+## configuring the integrator, then runs the per-cell integration.
+func _tick_tunnel_state(p_delta: float) -> void:
+	if _tunnel_state_integrator == null:
+		return
+	if canal_parameters != null:
+		_tunnel_state_integrator.update_constriction_zones(
+				_flatten_constriction_zones(canal_parameters.constriction_zones))
+	_tunnel_state_integrator.tick(p_delta)
+
+
+# Flatten the authored `Array[CanalConstrictionZone]` into a flat
+# PackedFloat32Array of 5-tuples (arc_length_s, half_width,
+# max_contraction, current_strength, friction_bonus) — the format the
+# C++ integrator expects. Cheap (Reverie scenes will have ≤ ~8 zones
+# per canal); allocating a fresh array each tick keeps the wire-up
+# simple and avoids stale-state bugs.
+func _flatten_constriction_zones(p_zones: Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	if p_zones == null:
+		return out
+	out.resize(p_zones.size() * 5)
+	for i in p_zones.size():
+		var z = p_zones[i]
+		if z == null:
+			# Holes are zero-strength zones; harmless but should warn
+			# loudly enough that an authoring mistake doesn't go silent.
+			out[i * 5 + 0] = 0.0
+			out[i * 5 + 1] = 0.0
+			out[i * 5 + 2] = 0.0
+			out[i * 5 + 3] = 0.0
+			out[i * 5 + 4] = 0.0
+			continue
+		out[i * 5 + 0] = z.arc_length_s
+		out[i * 5 + 1] = z.half_width
+		out[i * 5 + 2] = z.max_contraction
+		out[i * 5 + 3] = z.current_strength
+		out[i * 5 + 4] = z.friction_bonus
+	return out
 
 
 # ─── Per-tick anchor refresh (5F.B.A) ──────────────────────────────
@@ -320,3 +375,101 @@ func get_centerline_prev_positions_snapshot() -> PackedVector3Array:
 	if _centerline_chain == null:
 		return PackedVector3Array()
 	return _centerline_chain.get_prev_positions_snapshot()
+
+
+# ─── 5F.B.B — tunnel_state CPU integrator ──────────────────────────
+
+
+## Reports whether 5F.B.B has plugged in a tunnel-state integrator.
+## Mirrors `has_centerline_chain()`; gizmo + test fixtures gate on this
+## before drawing wall-displacement markers / asserting on snapshots.
+func has_tunnel_state_integrator() -> bool:
+	return _tunnel_state_integrator != null
+
+
+## Live `TunnelStateIntegrator` accessor — returns null if none has
+## been configured yet. Held by `Canal` so test fixtures can drive
+## test-only setters without re-routing through this node.
+func get_tunnel_state_integrator() -> RefCounted:
+	return _tunnel_state_integrator
+
+
+## Builds the `TunnelStateIntegrator` from the current baked substrate
+## (rest_radius_per_cell, tunnel_state texture, centerline solver) +
+## canal_parameters tunables. Idempotent: calling twice rebuilds the
+## integrator so a re-bake or parameter swap takes effect. Returns the
+## new integrator instance, or null when the class isn't registered
+## (extension not loaded) or when no rest_radius table has been baked.
+## Public so `CanalAutoBaker.bake()` can call it as the final substrate
+## step after `_ensure_centerline_chain()`.
+func _ensure_tunnel_state_integrator() -> RefCounted:
+	if canal_parameters == null:
+		return null
+	if _rest_radius_per_cell.is_empty():
+		return null
+	if _tunnel_state_texture == null:
+		return null
+	if not ClassDB.class_exists("TunnelStateIntegrator"):
+		push_error("Canal._ensure_tunnel_state_integrator: TunnelStateIntegrator "
+				+ "class not registered (tentacletech extension not loaded)")
+		return null
+	var integ: RefCounted = ClassDB.instantiate("TunnelStateIntegrator")
+	integ.configure(
+			canal_parameters.canal_axial_segments,
+			canal_parameters.canal_angular_sectors,
+			_rest_radius_per_cell,
+			_tunnel_state_texture,
+			_flatten_constriction_zones(canal_parameters.constriction_zones))
+	integ.set_centerline_solver(_centerline_chain)
+	integ.set_curvature_response_gain(canal_parameters.curvature_response_gain)
+	integ.set_contraction_gain(canal_parameters.contraction_gain)
+	integ.set_min_wall_radius(canal_parameters.min_wall_radius)
+	integ.set_wall_response_rate(canal_parameters.wall_response_rate)
+	integ.set_use_second_order_wall(canal_parameters.use_second_order_wall)
+	integ.set_wall_acceleration_gain(canal_parameters.wall_acceleration_gain)
+	integ.set_wall_damping(canal_parameters.wall_damping)
+	integ.set_plastic_params(
+			canal_parameters.plastic_accumulate_rate,
+			canal_parameters.plastic_recover_rate,
+			canal_parameters.plastic_max_offset)
+	integ.set_damage_params(
+			canal_parameters.damage_rate,
+			canal_parameters.damage_plastic_gain,
+			canal_parameters.damage_friction_loss)
+	integ.set_muscle_friction_gain(canal_parameters.muscle_friction_gain)
+	# `CanalParameters.fourth_channel_mode` now matches the integrator's
+	# enum 1:1 (the legacy "damage" option was dropped at slice 5F.B.B —
+	# damage already occupies the B channel). No remap needed.
+	integ.set_fourth_channel_mode(canal_parameters.fourth_channel_mode)
+	_tunnel_state_integrator = integ
+	return integ
+
+
+## Snapshot of per-cell `dynamic_wall_radius` (m). Indexed
+## `k * angular_sectors + j`. Empty when no integrator is allocated.
+func get_dynamic_wall_radius_snapshot() -> PackedFloat32Array:
+	if _tunnel_state_integrator == null:
+		return PackedFloat32Array()
+	return _tunnel_state_integrator.get_dynamic_wall_radius_snapshot()
+
+
+## Snapshot of per-cell `plastic_offset` (m). Same indexing as above.
+func get_plastic_offset_snapshot() -> PackedFloat32Array:
+	if _tunnel_state_integrator == null:
+		return PackedFloat32Array()
+	return _tunnel_state_integrator.get_plastic_offset_snapshot()
+
+
+## Snapshot of per-cell `damage` (Pa·s units, monotonically growing).
+func get_damage_snapshot() -> PackedFloat32Array:
+	if _tunnel_state_integrator == null:
+		return PackedFloat32Array()
+	return _tunnel_state_integrator.get_damage_snapshot()
+
+
+## Snapshot of the fourth-channel value (`wall_radial_velocity` when
+## `fourth_channel_mode == 0`, `friction_mult` when `== 1`).
+func get_fourth_channel_snapshot() -> PackedFloat32Array:
+	if _tunnel_state_integrator == null:
+		return PackedFloat32Array()
+	return _tunnel_state_integrator.get_fourth_channel_snapshot()
