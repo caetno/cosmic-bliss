@@ -257,6 +257,18 @@ public:
 	void set_strain_for_test(const StringName &p_bone_name, float p_strain);
 	void clear_body_strain();
 
+	// Pose-snapshot — iterates every registered POWERED MarionetteBone,
+	// reads `current_anatomical_pose()` (the inverse of the SPD forward
+	// composer), and writes the result back into `bone_targets` via
+	// `set_bone_target`. The headline RMB-release feature of the pose-
+	// capture scene: "the pose the ragdoll lands in becomes the new SPD
+	// hold target". KINEMATIC bones already track the skeleton (no SPD,
+	// nothing to capture); UNPOWERED bones produce zero torque so writing
+	// a target is meaningless until they re-engage. Skipping both
+	// preserves intent: the snapshot represents what the active muscle
+	// system is currently doing.
+	void snapshot_pose_to_targets();
+
 protected:
 	static void _bind_methods();
 

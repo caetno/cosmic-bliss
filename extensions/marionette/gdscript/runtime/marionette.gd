@@ -944,6 +944,20 @@ func get_pin_anchor_count() -> int:
 	return core.call(&"get_pin_anchor_count")
 
 
+## Captures the current physical pose into SPD targets for every powered
+## MarionetteBone. The headline RMB-release feature of the pose-capture
+## scene: "the pose the ragdoll lands in becomes the new SPD hold target".
+## Each bone's `current_anatomical_pose()` (inverse of the forward SPD
+## composer) is written back via `set_bone_target`. KINEMATIC bones (no
+## SPD) and UNPOWERED bones (zero torque until re-engaged) are skipped —
+## the snapshot captures only what active muscle is currently doing.
+func snapshot_pose_to_targets() -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"snapshot_pose_to_targets")
+
+
 # --- Body rhythm clock (Mar-I14 / P7.10) -----------------------------------
 # Single source of truth for cyclic-evaluator time. `MarionetteCore` (C++)
 # owns the integrator in `_physics_process`; this wrapper exposes get/set

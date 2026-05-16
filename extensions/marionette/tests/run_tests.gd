@@ -175,6 +175,11 @@ func _init() -> void:
 		_test_body_strain_positive_under_pin,
 		_test_body_strain_clamped_at_1,
 		_test_body_strain_dictionary_keys,
+		_test_pose_roundtrip_zero,
+		_test_pose_roundtrip_known_flex,
+		_test_pose_roundtrip_known_combo,
+		_test_pose_roundtrip_left_vs_right,
+		_test_snapshot_pose_to_targets_count,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -5050,3 +5055,189 @@ func _test_body_strain_dictionary_keys() -> bool:
 				"clear_body_strain did not empty dict: %s" % d_after_clear)
 	core.free()
 	return _ok("body_strain_dictionary_keys")
+
+
+# ---------- Pose-snapshot (current_anatomical_pose inverse) ----------------
+# Math-seam tests: round-trip AnatomicalPose.bone_local_rotation (forward) →
+# MarionetteBone.decompose_to_anatomical (inverse) and assert the inverse
+# returns the original Vector3 within epsilon. The forward path lives in
+# anatomical_pose.gd (GDScript); the inverse lives in marionette_bone.cpp.
+# Keeping the two on opposite languages catches any silent convention drift
+# between them (the failure mode the slice prompt called out).
+#
+# `current_anatomical_pose()` itself queries `get_global_transform()` which
+# needs a live Node3D tree; covered by the snapshot_count test below using
+# a freshly-instantiated bone (not-in-tree branch returns rest_offset via
+# the defensive early-return). Production callers (RMB-release in the
+# pose-capture scene) always run from a live scene, so no extra coverage
+# needed here.
+
+const _POSE_ROUNDTRIP_EPS: float = 1.0e-5
+
+
+func _make_pose_test_bone(entry: BoneEntry) -> MarionetteBone:
+	# Mirrors the forward path's view of an entry. The inverse reads the same
+	# fields off the bone (mirror_abd, archetype, is_left_side,
+	# rest_anatomical_offset, anatomical_basis) so chirality + rest-offset
+	# semantics stay symmetric between forward and inverse.
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	bone.archetype = int(entry.archetype)
+	bone.is_left_side = entry.is_left_side
+	bone.mirror_abd = entry.mirror_abd
+	bone.rest_anatomical_offset = entry.rest_anatomical_offset
+	bone.anatomical_basis = entry.anatomical_basis_in_bone_local()
+	return bone
+
+
+func _test_pose_roundtrip_zero() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("pose_roundtrip_zero", "MarionetteBone not registered")
+	# Default entry: rest_offset ZERO, identity basis, default archetype FIXED
+	# (not BALL/CLAVICLE) so no chirality flip. Identity quaternion in →
+	# Vector3.ZERO out.
+	var entry := BoneEntry.new()
+	var bone := _make_pose_test_bone(entry)
+	var out: Vector3 = bone.decompose_to_anatomical(Quaternion.IDENTITY)
+	bone.free()
+	if not _vec_near(out, Vector3.ZERO, _POSE_ROUNDTRIP_EPS):
+		return _fail("pose_roundtrip_zero", "identity → %s, expected ZERO" % out)
+	return _ok("pose_roundtrip_zero")
+
+
+func _test_pose_roundtrip_known_flex() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("pose_roundtrip_known_flex", "MarionetteBone not registered")
+	# Single-axis flex on a default entry. Forward → inverse round-trip.
+	# Hinge archetype (no sided med-rot flip) so left/right doesn't matter
+	# for this case; deliberately keeps the test orthogonal to chirality.
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.HINGE
+	var input := Vector3(0.5, 0.0, 0.0)
+	var q := AnatomicalPose.bone_local_rotation(entry, input.x, input.y, input.z)
+	var bone := _make_pose_test_bone(entry)
+	var out: Vector3 = bone.decompose_to_anatomical(q)
+	bone.free()
+	if not _vec_near(out, input, _POSE_ROUNDTRIP_EPS):
+		return _fail("pose_roundtrip_known_flex",
+				"flex round-trip: input=%s, out=%s" % [input, out])
+	return _ok("pose_roundtrip_known_flex")
+
+
+func _test_pose_roundtrip_known_combo() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("pose_roundtrip_known_combo", "MarionetteBone not registered")
+	# Three-axis combo. BALL archetype + LEFT side so the forward path skips
+	# the sided med-rot flip; chirality coverage is in the next test.
+	var entry := BoneEntry.new()
+	entry.archetype = BoneArchetype.Type.BALL
+	entry.is_left_side = true
+	var input := Vector3(0.3, -0.4, 0.2)
+	var q := AnatomicalPose.bone_local_rotation(entry, input.x, input.y, input.z)
+	var bone := _make_pose_test_bone(entry)
+	var out: Vector3 = bone.decompose_to_anatomical(q)
+	bone.free()
+	if not _vec_near(out, input, _POSE_ROUNDTRIP_EPS):
+		return _fail("pose_roundtrip_known_combo",
+				"combo round-trip: input=%s, out=%s" % [input, out])
+	return _ok("pose_roundtrip_known_combo")
+
+
+func _test_pose_roundtrip_left_vs_right() -> bool:
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("pose_roundtrip_left_vs_right", "MarionetteBone not registered")
+	# Chirality preservation: both sides store anatomical angles in the same
+	# positive convention. Forward → inverse on a BALL bone (which DOES
+	# sided-med-rot flip on the right) must return the SAME input Vector3
+	# regardless of side. If the inverse forgets to undo the chirality flip
+	# the right-side round-trip flips sign on Y (the discriminating axis).
+	var input := Vector3(0.25, -0.35, 0.15)
+
+	var entry_left := BoneEntry.new()
+	entry_left.archetype = BoneArchetype.Type.BALL
+	entry_left.is_left_side = true
+	var q_left := AnatomicalPose.bone_local_rotation(
+			entry_left, input.x, input.y, input.z)
+	var bone_left := _make_pose_test_bone(entry_left)
+	var out_left: Vector3 = bone_left.decompose_to_anatomical(q_left)
+	bone_left.free()
+
+	var entry_right := BoneEntry.new()
+	entry_right.archetype = BoneArchetype.Type.BALL
+	entry_right.is_left_side = false
+	var q_right := AnatomicalPose.bone_local_rotation(
+			entry_right, input.x, input.y, input.z)
+	var bone_right := _make_pose_test_bone(entry_right)
+	var out_right: Vector3 = bone_right.decompose_to_anatomical(q_right)
+	bone_right.free()
+
+	if not _vec_near(out_left, input, _POSE_ROUNDTRIP_EPS):
+		return _fail("pose_roundtrip_left_vs_right",
+				"left side: input=%s, out=%s" % [input, out_left])
+	if not _vec_near(out_right, input, _POSE_ROUNDTRIP_EPS):
+		return _fail("pose_roundtrip_left_vs_right",
+				"right side: input=%s, out=%s (chirality undo bug?)" % [input, out_right])
+	return _ok("pose_roundtrip_left_vs_right")
+
+
+func _test_snapshot_pose_to_targets_count() -> bool:
+	# API sanity: snapshot_pose_to_targets iterates registered POWERED bones
+	# and writes a target for each. Synthetic bones with unique
+	# rest_anatomical_offset values give the inverse a distinct, non-zero
+	# Vector3 to produce per bone (not-in-tree → rest_offset via the
+	# defensive branch), so "target was written" is detectable.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("snapshot_pose_to_targets_count", "MarionetteCore not registered")
+	if not ClassDB.class_exists("MarionetteBone"):
+		return _fail("snapshot_pose_to_targets_count", "MarionetteBone not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bones: Array = []
+	var names: Array[StringName] = [&"BoneA", &"BoneB", &"BoneC"]
+	var rests: Array[Vector3] = [
+		Vector3(0.10, 0.0, 0.0),
+		Vector3(0.0, -0.15, 0.0),
+		Vector3(0.05, 0.05, -0.20),
+	]
+	for i: int in range(names.size()):
+		var b: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+		b.current_state = MarionetteBone.STATE_POWERED
+		b.archetype = int(BoneArchetype.Type.HINGE)
+		b.is_left_side = true
+		b.mirror_abd = false
+		b.rest_anatomical_offset = rests[i]
+		b.anatomical_basis = Basis.IDENTITY
+		b.anatomical_name = names[i]
+		b.set_core(core)  # registers with core
+		bones.append(b)
+
+	# Sanity: bone targets start absent (sentinel ZERO).
+	for n: StringName in names:
+		var pre: Vector3 = core.call(&"get_bone_target", n)
+		if pre != Vector3.ZERO:
+			for bone_obj: Object in bones:
+				bone_obj.free()
+			core.free()
+			return _fail("snapshot_pose_to_targets_count",
+					"pre-snapshot target for %s was %s, expected ZERO" % [n, pre])
+
+	core.call(&"snapshot_pose_to_targets")
+
+	# Post-snapshot: each bone's target == its rest_anatomical_offset (orphan
+	# bones produce identity relative-quaternion → decompose returns
+	# rest_offset; or hit the not-in-tree early-return in current_anatomical_
+	# pose which returns rest_offset directly). Verifies (a) the iteration
+	# hit every POWERED bone and (b) the inverse + set_bone_target write
+	# happened.
+	for i: int in range(names.size()):
+		var got: Vector3 = core.call(&"get_bone_target", names[i])
+		if not _vec_near(got, rests[i], _POSE_ROUNDTRIP_EPS):
+			for bone_obj: Object in bones:
+				bone_obj.free()
+			core.free()
+			return _fail("snapshot_pose_to_targets_count",
+					"post-snapshot target for %s: got=%s, expected=%s" % [names[i], got, rests[i]])
+
+	for bone_obj: Object in bones:
+		bone_obj.free()
+	core.free()
+	return _ok("snapshot_pose_to_targets_count")
+

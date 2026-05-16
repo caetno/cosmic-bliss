@@ -137,6 +137,29 @@ public:
 			const Quaternion &p_current_rel_parent,
 			const Vector3 &p_anatomical_target) const;
 
+	// Slice (pose-snapshot) — inverse of `compose_target_bone_local`. Reads
+	// the bone's current world basis + its parent's world basis, builds the
+	// parent-local relative quaternion (the same quantity SPD compares against
+	// `compose_target_bone_local`'s output), and decomposes it into the
+	// canonical anatomical Vector3 (flex, medial rotation, abduction) in
+	// radians — positive-flex / positive-medial / positive-abduction
+	// convention, matching `set_bone_target`. The inverse undoes the
+	// forward composer's chirality flip + rest-offset subtraction so that
+	// `set_bone_target(name, current_anatomical_pose())` makes SPD hold the
+	// CURRENT pose (not snap back to rest).
+	//
+	// Safe to call from GDScript outside the integrator: it queries
+	// `get_global_transform()` once on `this` + parent, which is fine outside
+	// `_integrate_forces` (the snapshot-discipline rule applies INSIDE the
+	// integrator callback).
+	Vector3 current_anatomical_pose() const;
+
+	// Test seam — pure inverse of `compose_target_bone_local`. Lets unit
+	// tests round-trip forward→inverse without spinning up a live
+	// Node3D parent chain. `p_current_rel_parent` is the same input
+	// `_integrate_forces` reads (relative rotation, parent-local frame).
+	Vector3 decompose_to_anatomical(const Quaternion &p_current_rel_parent) const;
+
 	void _integrate_forces(PhysicsDirectBodyState3D *p_state) override;
 
 protected:

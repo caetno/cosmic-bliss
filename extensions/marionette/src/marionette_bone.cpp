@@ -232,6 +232,106 @@ float MarionetteBone::compute_tracking_error_radians(
 }
 
 
+// Inverse of `compose_target_bone_local`. Given a parent-local relative
+// quaternion (same quantity SPD compares against the forward composer's
+// output), recover the anatomical (flex, medial rotation, abduction) Vector3.
+//
+// Math: forward composes `q = Q(ax, α') * Q(ay, β_signed) * Q(az, γ_signed)`
+// where (ax, ay, az) are the columns of `anatomical_basis` and (α', β', γ')
+// are the rest-offset-subtracted inputs (β/γ then sign-flipped per
+// chirality). To invert:
+//   1. Transform Q into the canonical basis: `M_canon = B^T · R(Q) · B`.
+//      Since the forward composes around basis columns, `M_canon` is the
+//      pure `Rx(α') Ry(β_signed) Rz(γ_signed)` intrinsic-XYZ Euler
+//      composition. (See note in compose_target_bone_local.)
+//   2. Decompose `M_canon` as intrinsic XYZ Euler:
+//        β = asin(M[0][2])
+//        α = atan2(-M[1][2], M[2][2])  (when cos β ≠ 0)
+//        γ = atan2(-M[0][1], M[0][0])
+//      Gimbal-lock fallback at |sin β| ≈ 1: set α = 0 and
+//        γ = atan2(M[1][0], M[1][1]).
+//   3. Undo chirality flip on β / γ (sided medial-rotation for BALL/CLAVICLE
+//      right side; mirror_abd on γ).
+//   4. Add `rest_anatomical_offset` back to land in canonical anatomy
+//      (positive-flex / positive-medial / positive-abduction regardless of
+//      side — `set_bone_target`'s convention).
+//
+// Round-trip: `decompose_to_anatomical(compose_target_bone_local(V)) == V`
+// for any V inside ROM (no clamp inside the inverse — callers feeding
+// out-of-ROM quaternions get whatever angles Euler decomposition produces).
+Vector3 MarionetteBone::decompose_to_anatomical(const Quaternion &p_current_rel_parent) const {
+	// Step 1: rotate the relative quaternion's matrix into the canonical
+	// (ax→x, ay→y, az→z) frame. `anatomical_basis` columns are unit vectors
+	// post-calibration (orthonormal); the transposed basis is its inverse.
+	const Basis basis = anatomical_basis;
+	const Basis basis_t = basis.transposed();
+	const Basis r = Basis(p_current_rel_parent);
+	const Basis m = basis_t * r * basis;
+
+	// Step 2: intrinsic-XYZ Euler decomposition. Godot Basis indexing is
+	// [row][col]: m[i][j] = M[i][j] in the math above. Watch for the float
+	// clamp on the asin argument to defuse FP overshoot at ±1.
+	float alpha = 0.0f;
+	float beta = 0.0f;
+	float gamma = 0.0f;
+	const float m02 = CLAMP(m[0][2], -1.0f, 1.0f);
+	beta = Math::asin(m02);
+	if (Math::abs(m02) < 0.99999f) {
+		alpha = Math::atan2(-m[1][2], m[2][2]);
+		gamma = Math::atan2(-m[0][1], m[0][0]);
+	} else {
+		// Gimbal lock: β ≈ ±π/2. Set α = 0 and solve γ from the remaining
+		// element. (Locked-axis convention — α gets folded into γ.)
+		alpha = 0.0f;
+		gamma = Math::atan2(m[1][0], m[1][1]);
+	}
+
+	// Step 3: undo chirality. Mirror in the same direction the forward path
+	// flipped (negate β for sided med-rot, negate γ for mirror_abd).
+	const bool is_sided_med_rot = (archetype == 0 /*BALL*/ || archetype == 5 /*CLAVICLE*/);
+	if (is_sided_med_rot && !is_left_side) {
+		beta = -beta;
+	}
+	if (mirror_abd) {
+		gamma = -gamma;
+	}
+
+	// Step 4: re-add the rest offset to land in canonical anatomy.
+	return Vector3(
+			alpha + rest_anatomical_offset.x,
+			beta + rest_anatomical_offset.y,
+			gamma + rest_anatomical_offset.z);
+}
+
+// Live snapshot. Queries `get_global_transform()` on `this` + parent — safe
+// OUTSIDE `_integrate_forces` (the snapshot-discipline rule covers only the
+// integrator callback). Build the same parent-local relative quaternion the
+// SPD path constructs, then defer to `decompose_to_anatomical`.
+//
+// Defensive early-return when the bone is not inside the tree: Godot logs an
+// error from `get_global_transform()` in that case and returns identity. The
+// `extends SceneTree` test harness hits this since `_init` runs before
+// NOTIFICATION_ENTER_TREE fires (same constraint documented in the parent-
+// basis snapshot tests). Returning `rest_anatomical_offset` directly skips
+// the noisy error path and matches what the decomposition would produce from
+// identity quaternion + canonical basis.
+Vector3 MarionetteBone::current_anatomical_pose() const {
+	MarionetteBone *self = const_cast<MarionetteBone *>(this);
+	if (!self->is_inside_tree()) {
+		return rest_anatomical_offset;
+	}
+	const Transform3D this_world = self->get_global_transform();
+	Node3D *parent_node = self->get_parent_node_3d();
+	Basis parent_world_basis = this_world.basis;
+	if (parent_node != nullptr && parent_node->is_inside_tree()) {
+		parent_world_basis = parent_node->get_global_transform().basis;
+	}
+	const Quaternion current_rel_parent =
+			Quaternion(parent_world_basis.transposed() * this_world.basis);
+	return decompose_to_anatomical(current_rel_parent);
+}
+
+
 // Slice 3b — SPD torque path. Runs only for POWERED bones; KINEMATIC /
 // UNPOWERED early-return so Jolt's default integrator (or the simulator's
 // kinematic skeleton follower) takes over.
@@ -418,6 +518,11 @@ void MarionetteBone::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("compute_tracking_error_radians",
 								"current_rel_parent", "anatomical_target"),
 			&MarionetteBone::compute_tracking_error_radians);
+
+	ClassDB::bind_method(D_METHOD("current_anatomical_pose"),
+			&MarionetteBone::current_anatomical_pose);
+	ClassDB::bind_method(D_METHOD("decompose_to_anatomical", "current_rel_parent"),
+			&MarionetteBone::decompose_to_anatomical);
 
 	BIND_ENUM_CONSTANT(STATE_KINEMATIC);
 	BIND_ENUM_CONSTANT(STATE_POWERED);

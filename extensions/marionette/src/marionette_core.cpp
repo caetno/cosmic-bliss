@@ -539,6 +539,29 @@ void MarionetteCore::apply_pin_anchors() {
 	// only needs to read `bone_targets`.
 }
 
+void MarionetteCore::snapshot_pose_to_targets() {
+	// Pose-snapshot — single pass over registered bones. Powered-only
+	// filter matches the SPD active set: KINEMATIC bones don't drive SPD
+	// (their target is meaningless), UNPOWERED ones produce zero torque
+	// regardless of target until re-engaged. The bone exposes its
+	// anatomical name via `get_anatomical_name()` (cached at build_ragdoll
+	// to handle BoneMap rename paths) — same key `set_bone_target` /
+	// `get_bone_target` use.
+	for (MarionetteBone *bone : registered_bones) {
+		if (bone == nullptr) {
+			continue;
+		}
+		if (bone->get_current_state() != MarionetteBone::STATE_POWERED) {
+			continue;
+		}
+		const StringName name = bone->get_anatomical_name();
+		if (name == StringName()) {
+			continue;
+		}
+		set_bone_target(name, bone->current_anatomical_pose());
+	}
+}
+
 void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("hello"), &MarionetteCore::hello);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &MarionetteCore::tick);
@@ -655,6 +678,9 @@ void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("compute_pin_force", "bone_name", "bone_world_pos"),
 			&MarionetteCore::compute_pin_force);
 	ClassDB::bind_method(D_METHOD("apply_pin_anchors"), &MarionetteCore::apply_pin_anchors);
+
+	ClassDB::bind_method(D_METHOD("snapshot_pose_to_targets"),
+			&MarionetteCore::snapshot_pose_to_targets);
 
 	// Slice P10.7-min — body_strain publisher. Per-bone dictionary keyed
 	// by anatomical name; values in [0, 1]. The two test seams
