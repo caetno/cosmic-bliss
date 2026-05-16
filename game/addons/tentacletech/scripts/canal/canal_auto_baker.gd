@@ -108,6 +108,21 @@ static func bake(
 	# the first frame after bake completes. Idempotent.
 	p_canal._ensure_tunnel_state_integrator()
 
+	# Step 9b — Per-cross-section host-bone resolution for §6.12.12.
+	# Walks the spline at uniform arc-length, finds the nearest CP bone
+	# at each sample, walks parents past the CP prefix to the rigid host
+	# bone, and looks up that bone's PhysicalBone3D child + RID. Empty
+	# RID entries mark cross-sections with no resolvable host (degenerate
+	# authoring; the reaction pass skips them).
+	var host_bones := _resolve_host_bone_rids_per_section(spline, params, p_skeleton)
+	p_canal._set_baked_cross_section_host_bone_rids(
+			host_bones["rids"], host_bones["object_ids"])
+
+	# §6.12.12 — Build the per-substep canal-interior reaction pass.
+	# Eager-in-baker pattern so the gizmo + the first frame's tick see a
+	# fully-wired pass. Idempotent.
+	p_canal._ensure_reaction_pass()
+
 	# Step 10 — per-vert (s, θ, rest_radius, rest_outward_normal) bake.
 	var vert_count := bake_canal_interior_verts(
 			p_mesh_instance, p_canal_id, spline)
@@ -661,3 +676,131 @@ static func _project_onto_spline(p_spline: RefCounted, p_world: Vector3) -> Dict
 		"rest_radius": rest_radius,
 		"rest_basis": basis,
 	}
+
+
+# ─── Step 9b — Per-cross-section host-bone resolution (§6.12.12) ───
+
+## For each of the `canal_axial_segments` cross-sections, find:
+##   1. The nearest CP bone (`<spline_cp_bone_prefix>_*`) on the
+##      skeleton, by world-space distance to the spline sample at
+##      `s_norm = k / (axial - 1)`.
+##   2. Walk up the bone hierarchy until the first non-CP-prefixed bone
+##      — that's the rigid host parent (§6.12.2: CP bones are rigidly
+##      parented to one host bone each).
+##   3. Look up the `PhysicalBone3D` child of the skeleton whose
+##      `bone_name` matches that host bone; record its RID + Object ID.
+##
+## Returns `{ "rids": Array[RID], "object_ids": PackedInt64Array }`,
+## both sized `axial_segments`. Cross-sections with no resolvable
+## PhysicalBone3D get an empty RID + 0 Object ID. The reaction pass
+## silently skips those at tick time.
+static func _resolve_host_bone_rids_per_section(
+		p_spline: RefCounted,
+		p_params: CanalParameters,
+		p_skeleton: Skeleton3D) -> Dictionary:
+	var axial: int = p_params.canal_axial_segments
+	var rids: Array = []
+	rids.resize(axial)
+	var object_ids := PackedInt64Array()
+	object_ids.resize(axial)
+	for i in axial:
+		rids[i] = RID()
+		object_ids[i] = 0
+
+	if p_skeleton == null or p_spline == null:
+		return {"rids": rids, "object_ids": object_ids}
+
+	# Collect CP bone world positions for nearest-bone-by-arc lookup.
+	var prefix: String = String(p_params.spline_cp_bone_prefix)
+	if prefix.is_empty():
+		return {"rids": rids, "object_ids": object_ids}
+	var prefix_with_sep := prefix + "_"
+
+	var cp_bone_data: Array = []  # [{bone_id, world_pos, parent_bone_id}]
+	var skel_xform: Transform3D = p_skeleton.global_transform
+	for i in p_skeleton.get_bone_count():
+		var bone_name := p_skeleton.get_bone_name(i)
+		if not bone_name.begins_with(prefix_with_sep):
+			continue
+		var pose: Transform3D = p_skeleton.get_bone_global_pose(i)
+		cp_bone_data.append({
+			"bone_id": i,
+			"world_pos": skel_xform * pose.origin,
+			"name": bone_name,
+		})
+	if cp_bone_data.is_empty():
+		return {"rids": rids, "object_ids": object_ids}
+
+	# Build PhysicalBone3D lookup table: bone_name -> { rid, object_id }.
+	var bone_to_body: Dictionary = {}
+	for c in p_skeleton.get_child_count():
+		var child: Node = p_skeleton.get_child(c)
+		if child == null:
+			continue
+		if not child.is_class("PhysicalBone3D"):
+			continue
+		var body_bone_name: String = String(child.get("bone_name"))
+		if body_bone_name.is_empty():
+			# Some Godot versions expose `bone_name` via method, not property.
+			if child.has_method("get_bone_name"):
+				body_bone_name = String(child.call("get_bone_name"))
+		if body_bone_name.is_empty():
+			continue
+		if not child.has_method("get_rid"):
+			continue
+		var rid_v: Variant = child.call("get_rid")
+		if typeof(rid_v) != TYPE_RID:
+			continue
+		bone_to_body[body_bone_name] = {
+			"rid": rid_v,
+			"object_id": child.get_instance_id(),
+		}
+
+	if bone_to_body.is_empty():
+		return {"rids": rids, "object_ids": object_ids}
+
+	# Per cross-section: spline sample → nearest CP bone → walk up to
+	# first non-CP-prefixed ancestor → resolve PhysicalBone3D.
+	var arc: float = p_spline.get_arc_length()
+	for k in axial:
+		var s_norm := float(k) / maxf(float(axial - 1), 1.0)
+		var s := s_norm * arc
+		var t: float = p_spline.distance_to_parameter(s)
+		var sample: Vector3 = p_spline.evaluate_position(t)
+
+		var best_idx := -1
+		var best_d2 := INF
+		for i in cp_bone_data.size():
+			var d2: float = (cp_bone_data[i]["world_pos"] as Vector3).distance_squared_to(sample)
+			if d2 < best_d2:
+				best_d2 = d2
+				best_idx = i
+		if best_idx < 0:
+			continue
+
+		var cp_bone_id: int = cp_bone_data[best_idx]["bone_id"]
+		# Walk parents past the CP prefix.
+		var cursor := p_skeleton.get_bone_parent(cp_bone_id)
+		var host_bone_name := ""
+		while cursor >= 0:
+			var name := p_skeleton.get_bone_name(cursor)
+			if not name.begins_with(prefix_with_sep):
+				host_bone_name = name
+				break
+			cursor = p_skeleton.get_bone_parent(cursor)
+		# If the CP bone has no non-CP ancestor (degenerate), fall back to
+		# the skeleton root (bone 0) — better than leaving the cross-
+		# section unrouted in a single-chain skeleton.
+		if host_bone_name.is_empty() and p_skeleton.get_bone_count() > 0:
+			host_bone_name = p_skeleton.get_bone_name(0)
+
+		if host_bone_name.is_empty():
+			continue
+		if not bone_to_body.has(host_bone_name):
+			# Host bone resolved by name but has no PhysicalBone3D child.
+			# Leave the RID empty; reaction pass skips this section.
+			continue
+		var body_entry: Dictionary = bone_to_body[host_bone_name]
+		rids[k] = body_entry["rid"]
+		object_ids[k] = body_entry["object_id"]
+	return {"rids": rids, "object_ids": object_ids}

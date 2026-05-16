@@ -226,3 +226,25 @@ extends Resource
 ## anatomically-correct default, since canals are held by surrounding
 ## tissue). 1.0 → full -Y g at 9.81 m/s². Useful test knob.
 @export var centerline_gravity_scale: float = 0.0
+
+# ─── §6.12.12 canal-interior reaction pass ─────────────────────────
+
+## Wall-reaction stiffness in N per metre of wall displacement
+## (summed over θ samples per cross-section). Drives the §6.12.12
+## reaction pass: per cross-section `reaction = -k * Σ_θ (dyn − rest)
+## * outward_normal`, dispatched as a `body_apply_impulse` on the
+## cross-section's host bone. Default 100 N/m sits in the middle of
+## the spec's calibrated band; raise for stiffer canals that resist
+## radial deformation harder, lower for softer (more inflatable)
+## canals where pressure routes mostly into the bus rather than the
+## ragdoll.
+@export var wall_response_stiffness: float = 100.0
+
+## Number of proximal cross-sections excluded from the §6.12.12
+## reaction pass. Those cross-sections sit at the canal entry plane
+## and are already covered by the §6.3 rim-closure pass; double-
+## counting their impulse would dominate the entry-plane bone with
+## stacked forces. Default 1 matches the spec's "first cross-section"
+## guidance; raise to 2-3 if a particular orifice's rim closure
+## extends further into the canal than one cross-section's worth.
+@export_range(0, 8) var canal_reaction_rim_exclusion: int = 1

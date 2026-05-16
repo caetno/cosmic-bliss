@@ -99,6 +99,11 @@ public:
 	godot::PackedFloat32Array get_plastic_offset_snapshot() const;
 	godot::PackedFloat32Array get_damage_snapshot() const;
 	godot::PackedFloat32Array get_fourth_channel_snapshot() const;
+	// §6.12.12 — per-cell `dynamic_wall_radius − rest_radius_per_cell`.
+	// Convenience accessor consumed by `CanalReactionPass::tick` so the
+	// reaction pass doesn't have to allocate two snapshots and subtract.
+	godot::PackedFloat32Array get_wall_displacement_snapshot() const;
+	godot::PackedFloat32Array get_rest_radius_snapshot() const;
 	int get_axial_segments() const;
 	int get_angular_sectors() const;
 

@@ -94,6 +94,29 @@ var _centerline_chain: RefCounted = null
 ## the same parse-time reason.
 var _tunnel_state_integrator: RefCounted = null
 
+## The §6.12.12 per-substep canal-interior reaction pass
+## (`CanalReactionPass` from `src/canal/canal_reaction_pass.{h,cpp}`).
+## Reads `_tunnel_state_integrator`'s wall displacement per cross-
+## section, sums to per-cross-section wall reaction, routes to the
+## CP bone's rigid host-bone parent, dispatches `body_apply_impulse`
+## at the load-weighted centroid. Same RefCounted-by-name pattern as
+## the centerline chain + tunnel-state integrator for the same parse-
+## time reason.
+var _reaction_pass: RefCounted = null
+
+## Per-cross-section host-bone RIDs, sized `canal_axial_segments`.
+## Resolved at bake time by `CanalAutoBaker` step 9b — each cross-
+## section's CP bone's rigid-parent host bone, looked up via the
+## skeleton's PhysicalBone3D children. Empty RID = no resolvable
+## host bone; the reaction pass silently skips those sections.
+var _cross_section_host_bone_rids: Array = []
+
+## Parallel Object IDs for the host PhysicalBone3D nodes. Used by
+## tests + gizmo overlay so a fixture can inspect which host bone
+## absorbed each cross-section's reaction without re-doing the
+## skeleton lookup.
+var _cross_section_host_bone_object_ids: PackedInt64Array = PackedInt64Array()
+
 # ─── Runtime identity ──────────────────────────────────────────────
 
 ## Index of this canal in the hero's canal array. `CUSTOM0.r` on
@@ -181,6 +204,7 @@ func tick(p_delta: float) -> void:
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
 	_tick_tunnel_state(p_delta)
+	_tick_reaction_pass(p_delta)
 
 
 ## Test-only entry point that bypasses `is_inactive()`. Used by
@@ -196,6 +220,7 @@ func tick_force(p_delta: float) -> void:
 	_centerline_chain.set_anchors(_proximal_anchor_world, _distal_anchor_world)
 	_centerline_chain.tick(p_delta)
 	_tick_tunnel_state(p_delta)
+	_tick_reaction_pass(p_delta)
 
 
 ## Per-tick driver for the `TunnelStateIntegrator` slice 5F.B.B
@@ -502,3 +527,113 @@ func get_fourth_channel_snapshot() -> PackedFloat32Array:
 	if _tunnel_state_integrator == null:
 		return PackedFloat32Array()
 	return _tunnel_state_integrator.get_fourth_channel_snapshot()
+
+
+# ─── §6.12.12 — Canal-interior reaction pass ───────────────────────
+
+
+## Setter used by `CanalAutoBaker` step 9b after host-bone resolution.
+## Stores per-cross-section host-bone RIDs + parallel Object IDs.
+## Idempotent — calling again replaces both arrays in one go.
+func _set_baked_cross_section_host_bone_rids(
+		p_rids: Array, p_object_ids: PackedInt64Array) -> void:
+	_cross_section_host_bone_rids = p_rids
+	_cross_section_host_bone_object_ids = p_object_ids
+
+
+## Returns the resolved host-bone RID for cross-section `k`, or an
+## empty RID if `k` is out of range or unresolved.
+func get_cross_section_host_bone_rid(p_k: int) -> RID:
+	if p_k < 0 or p_k >= _cross_section_host_bone_rids.size():
+		return RID()
+	return _cross_section_host_bone_rids[p_k]
+
+
+## Snapshot of the per-cross-section host-bone RIDs. Empty RID
+## entries mark cross-sections with no resolvable PhysicalBone3D
+## (degenerate authoring; reaction pass skips them).
+func get_cross_section_host_bone_rids_snapshot() -> Array:
+	return _cross_section_host_bone_rids.duplicate()
+
+
+## Snapshot of the parallel Object IDs. Tests use this to assert
+## "cross-section k routes to bone X" without re-walking the skeleton.
+func get_cross_section_host_bone_object_ids_snapshot() -> PackedInt64Array:
+	return _cross_section_host_bone_object_ids.duplicate()
+
+
+## Reports whether §6.12.12 has plugged in a reaction pass.
+func has_reaction_pass() -> bool:
+	return _reaction_pass != null
+
+
+## Live `CanalReactionPass` accessor; null until `_ensure_reaction_pass`
+## runs (typically called by `CanalAutoBaker` after step 9b lays down
+## the host-bone RIDs).
+func get_reaction_pass() -> RefCounted:
+	return _reaction_pass
+
+
+## Builds the `CanalReactionPass` from the current baked substrate
+## (rest_radius_per_cell, host_bone_rids, centerline solver,
+## tunnel-state integrator) + canal_parameters tunables. Idempotent;
+## a re-bake replaces the pass.
+func _ensure_reaction_pass() -> RefCounted:
+	if canal_parameters == null:
+		return null
+	if _rest_radius_per_cell.is_empty():
+		return null
+	if _centerline_chain == null or _tunnel_state_integrator == null:
+		# The reaction pass reads displacement from the integrator and
+		# world-pose from the centerline; neither dependency optional.
+		return null
+	if not ClassDB.class_exists("CanalReactionPass"):
+		push_error("Canal._ensure_reaction_pass: CanalReactionPass class not registered "
+				+ "(tentacletech extension not loaded)")
+		return null
+	var pass_inst: RefCounted = ClassDB.instantiate("CanalReactionPass")
+	pass_inst.configure(
+			canal_parameters.canal_axial_segments,
+			canal_parameters.canal_angular_sectors,
+			_rest_radius_per_cell,
+			_cross_section_host_bone_rids,
+			canal_parameters.wall_response_stiffness,
+			canal_parameters.canal_reaction_rim_exclusion)
+	pass_inst.set_centerline_solver(_centerline_chain)
+	pass_inst.set_tunnel_state_integrator(_tunnel_state_integrator)
+	_reaction_pass = pass_inst
+	return pass_inst
+
+
+# Per-tick driver — called from both `tick` (gated by `is_inactive()`)
+# and `tick_force`. Silently no-ops when no pass has been allocated.
+func _tick_reaction_pass(p_delta: float) -> void:
+	if _reaction_pass == null:
+		return
+	_reaction_pass.tick(p_delta)
+
+
+## Snapshot of per-cross-section reaction vectors (N), sized
+## `canal_axial_segments`. Indices `< canal_reaction_rim_exclusion`
+## are always Vector3.ZERO (excluded). By-copy per §15.
+func get_last_reaction_per_section_snapshot() -> PackedVector3Array:
+	if _reaction_pass == null:
+		return PackedVector3Array()
+	return _reaction_pass.get_last_reaction_per_section_snapshot()
+
+
+## Snapshot of per-host-bone impulse vectors (N·s) applied this tick.
+## Sized to the number of unique bones that received an impulse.
+## Order matches `get_last_application_points_snapshot()`.
+func get_last_bone_impulse_snapshot() -> PackedVector3Array:
+	if _reaction_pass == null:
+		return PackedVector3Array()
+	return _reaction_pass.get_last_bone_impulse_snapshot()
+
+
+## Snapshot of the load-weighted centroid world-space points the
+## impulses were applied at. Same indexing as `get_last_bone_impulse_snapshot()`.
+func get_last_application_points_snapshot() -> PackedVector3Array:
+	if _reaction_pass == null:
+		return PackedVector3Array()
+	return _reaction_pass.get_last_application_points_snapshot()

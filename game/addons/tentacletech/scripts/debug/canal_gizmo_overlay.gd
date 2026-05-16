@@ -53,6 +53,13 @@ extends Node3D
 ## along contact normal. Silent no-op when tentacle is null.
 @export var show_wall_contacts: bool = false
 @export var tentacle_for_wall_contacts: Node3D
+## §6.12.12 — canal-interior reaction pass markers. For each cross-
+## section with non-zero reaction this frame, a magenta arrow at the
+## cross-section's world position along the reaction vector. For each
+## host bone that received an impulse, a cyan sphere at the load-
+## weighted application point + a cyan arrow showing the impulse
+## direction. Silent no-op when no reaction pass is attached.
+@export var show_reaction_pass: bool = false
 @export var spline_sample_count: int = 64
 @export var cell_marker_size: float = 0.005
 @export var centerline_dot_size: float = 0.008
@@ -77,6 +84,11 @@ const _COLOR_WALL_PUSH := Color(1.0, 0.2, 0.2)     # red: pre→post
 const _COLOR_WALL_NORMAL := Color(0.2, 1.0, 1.0)   # cyan: contact normal
 const _WALL_CONTACT_DOT_SIZE := 0.006
 const _WALL_NORMAL_LENGTH := 0.03
+const _COLOR_REACTION_SECTION := Color(1.0, 0.0, 1.0)   # magenta: per-section reaction
+const _COLOR_REACTION_BONE := Color(0.2, 1.0, 1.0)      # cyan: per-bone impulse + application
+const _REACTION_SECTION_SCALE := 50.0
+const _REACTION_BONE_SCALE := 100.0
+const _REACTION_APPLICATION_SIZE := 0.012
 
 var _mesh_inst: MeshInstance3D
 var _im: ImmediateMesh
@@ -115,7 +127,9 @@ func _process(_delta: float) -> void:
 			and canal.has_tunnel_state_integrator()
 	var live_contacts := show_wall_contacts and tentacle_for_wall_contacts != null \
 			and tentacle_for_wall_contacts.has_method("get_canal_wall_contacts_snapshot")
-	if live_chain or live_walls or live_contacts:
+	var live_reaction := show_reaction_pass and canal.has_method("has_reaction_pass") \
+			and canal.has_reaction_pass()
+	if live_chain or live_walls or live_contacts or live_reaction:
 		_rebuild()
 		return
 	var sig := _state_signature()
@@ -195,6 +209,10 @@ func _rebuild() -> void:
 	if show_wall_contacts and tentacle_for_wall_contacts != null \
 			and tentacle_for_wall_contacts.has_method("get_canal_wall_contacts_snapshot"):
 		_draw_wall_contacts()
+
+	if show_reaction_pass and canal.has_method("has_reaction_pass") \
+			and canal.has_reaction_pass():
+		_draw_reaction_pass(spline)
 
 
 # ─── Primitives ────────────────────────────────────────────────────
@@ -476,4 +494,67 @@ func _draw_wall_contacts() -> void:
 		_im.surface_add_vertex(post)
 		_im.surface_set_color(_COLOR_WALL_NORMAL)
 		_im.surface_add_vertex(post + n * _WALL_NORMAL_LENGTH)
+	_im.surface_end()
+
+
+# §6.12.12 — Reaction-pass visualisation.
+#   * Magenta arrow at each cross-section's deformed world position
+#     pointing along the per-section reaction vector
+#     (length = `reaction × _REACTION_SECTION_SCALE`). Skipped when the
+#     reaction magnitude is below the dispatch epsilon.
+#   * Cyan cross at each host-bone application point + a cyan arrow
+#     pointing along the bone impulse direction
+#     (length = `impulse × _REACTION_BONE_SCALE`).
+func _draw_reaction_pass(p_spline: RefCounted) -> void:
+	if canal == null:
+		return
+	var params: CanalParameters = canal.canal_parameters
+	if params == null:
+		return
+	var reactions: PackedVector3Array = canal.get_last_reaction_per_section_snapshot()
+	if reactions.is_empty():
+		return
+	var axial: int = params.canal_axial_segments
+	if reactions.size() != axial:
+		return
+
+	var have_live_chain := canal.has_method("has_centerline_chain") \
+			and canal.has_centerline_chain()
+	var chain: RefCounted = canal.get_centerline_chain() if have_live_chain else null
+	var total_arc: float = 0.0
+	if chain != null:
+		total_arc = chain.get_total_arc_length()
+	var spline_arc: float = p_spline.get_arc_length()
+
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for k in axial:
+		var r: Vector3 = reactions[k]
+		if r.length() < 1e-6:
+			continue
+		var s_norm := float(k) / maxf(float(axial - 1), 1.0)
+		var origin: Vector3
+		if chain != null and total_arc > 1e-9:
+			origin = chain.evaluate_at(s_norm * total_arc)
+		else:
+			var t: float = p_spline.distance_to_parameter(s_norm * spline_arc)
+			origin = p_spline.evaluate_position(t)
+		_im.surface_set_color(_COLOR_REACTION_SECTION)
+		_im.surface_add_vertex(origin)
+		_im.surface_set_color(_COLOR_REACTION_SECTION)
+		_im.surface_add_vertex(origin + r * _REACTION_SECTION_SCALE)
+	_im.surface_end()
+
+	var impulses: PackedVector3Array = canal.get_last_bone_impulse_snapshot()
+	var application_points: PackedVector3Array = canal.get_last_application_points_snapshot()
+	var bone_count: int = mini(impulses.size(), application_points.size())
+	for b in bone_count:
+		_draw_cross(application_points[b], _REACTION_APPLICATION_SIZE, _COLOR_REACTION_BONE)
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for b in bone_count:
+		var imp: Vector3 = impulses[b]
+		var ap: Vector3 = application_points[b]
+		_im.surface_set_color(_COLOR_REACTION_BONE)
+		_im.surface_add_vertex(ap)
+		_im.surface_set_color(_COLOR_REACTION_BONE)
+		_im.surface_add_vertex(ap + imp * _REACTION_BONE_SCALE)
 	_im.surface_end()

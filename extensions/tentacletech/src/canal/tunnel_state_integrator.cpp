@@ -391,6 +391,27 @@ PackedFloat32Array TunnelStateIntegrator::get_fourth_channel_snapshot() const {
 	return out;
 }
 
+PackedFloat32Array TunnelStateIntegrator::get_wall_displacement_snapshot() const {
+	PackedFloat32Array out;
+	const int n = static_cast<int>(dynamic_wall_radius.size());
+	out.resize(n);
+	for (int i = 0; i < n; ++i) {
+		const float rest = (i < (int)rest_radius.size()) ? rest_radius[i] : 0.0f;
+		out[i] = dynamic_wall_radius[i] - rest;
+	}
+	return out;
+}
+
+PackedFloat32Array TunnelStateIntegrator::get_rest_radius_snapshot() const {
+	PackedFloat32Array out;
+	const int n = static_cast<int>(rest_radius.size());
+	out.resize(n);
+	for (int i = 0; i < n; ++i) {
+		out[i] = rest_radius[i];
+	}
+	return out;
+}
+
 int TunnelStateIntegrator::get_axial_segments() const { return axial_segments; }
 int TunnelStateIntegrator::get_angular_sectors() const { return angular_sectors; }
 
@@ -559,6 +580,10 @@ void TunnelStateIntegrator::_bind_methods() {
 			&TunnelStateIntegrator::get_damage_snapshot);
 	ClassDB::bind_method(D_METHOD("get_fourth_channel_snapshot"),
 			&TunnelStateIntegrator::get_fourth_channel_snapshot);
+	ClassDB::bind_method(D_METHOD("get_wall_displacement_snapshot"),
+			&TunnelStateIntegrator::get_wall_displacement_snapshot);
+	ClassDB::bind_method(D_METHOD("get_rest_radius_snapshot"),
+			&TunnelStateIntegrator::get_rest_radius_snapshot);
 	ClassDB::bind_method(D_METHOD("get_axial_segments"),
 			&TunnelStateIntegrator::get_axial_segments);
 	ClassDB::bind_method(D_METHOD("get_angular_sectors"),

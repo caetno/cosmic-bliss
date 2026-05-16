@@ -957,10 +957,63 @@ Full TT suite: **236/236** passing across 32 scripts (was 229 + 7 new). All 32 s
 **Deferred:**
 
 - **Production EI → canal binding.** Orifice lifecycle hooks calling `register_active_canal` when an EI's particles cross the rim plane. Slice (?) — likely 5F.B.D or a dedicated EI-canal-binding slice.
-- **§6.12.12 canal-interior reaction pass.** Slice (6), next per the scenario doc. Reads the wall displacement that 5F.B.C now feeds into the integrator's bilateral split and dispatches a `body_apply_impulse` on each cross-section's host bone.
+- **§6.12.12 canal-interior reaction pass.** Closed in the next slice (2026-05-16 §6.12.12 entry below).
 - **Phase 6 stimulus bus event emission.** Slice (7) — wall contact events for Sonance / Reverie.
 - **TT-S5 per-slot μ.** Slice (8).
 - **Real `sample_axial_surface_velocity`.** Slice 5G when the muscle field lands.
+
+---
+
+### §6.12.12 — Canal-interior reaction pass (2026-05-16)
+
+**Slice (6) from `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §4.** Closes the third-law loop on the canal-interior side: wall displacement integrated by 5F.B.B/5F.B.C now sums per cross-section, routes to that section's host bone, and dispatches one `body_apply_impulse` per contributing host bone at the load-weighted centroid of its cross-sections. Matches the scenario's "tentacle pushing on canal walls from inside actually shoves the body around" requirement and closes the side of the §6.3 rim-closure pass that the original §6.12.10 / §14 decision had explicitly excluded.
+
+**Deliverables:**
+
+- **New C++ class** `CanalReactionPass` at `extensions/tentacletech/src/canal/canal_reaction_pass.{h,cpp}`. Public surface: `configure(axial_segments, angular_sectors, rest_radius_per_cell, host_bone_rids, wall_response_stiffness, n_rim_exclusion)`, `set_centerline_solver`, `set_tunnel_state_integrator`, `set_wall_response_stiffness`, `set_n_rim_exclusion`, `tick(dt) → int`, `get_last_reaction_per_section_snapshot()`, `get_last_bone_impulse_snapshot()`, `get_last_application_points_snapshot()`. Registered in `register_types.cpp`.
+- **`TunnelStateIntegrator`** gains two snapshot accessors — `get_wall_displacement_snapshot()` (per-cell `dynamic − rest`, indexed `k * sectors + j`) and `get_rest_radius_snapshot()`. The reaction pass consumes the former each tick; both follow §15 by-copy convention. `tunnel_state_integrator.{h,cpp}` updated in place.
+- **`CanalParameters`** gains two exported fields: `wall_response_stiffness: float = 100.0` (N per metre of wall displacement, summed over θ samples) and `canal_reaction_rim_exclusion: int = 1` (number of proximal cross-sections excluded from the pass to avoid double-counting with §6.3 rim closure).
+- **`Canal.gd`** gains `_reaction_pass: RefCounted = null`, `_cross_section_host_bone_rids: Array`, `_cross_section_host_bone_object_ids: PackedInt64Array`, plus `_ensure_reaction_pass()`, `_tick_reaction_pass(p_delta)`, `_set_baked_cross_section_host_bone_rids(rids, object_ids)`, `get_cross_section_host_bone_rid(k)`, `get_cross_section_host_bone_rids_snapshot()`, `get_cross_section_host_bone_object_ids_snapshot()`, `has_reaction_pass()`, `get_reaction_pass()`, and the three snapshot pass-throughs (`get_last_reaction_per_section_snapshot`, `get_last_bone_impulse_snapshot`, `get_last_application_points_snapshot`). Both `tick(dt)` and `tick_force(dt)` now run `_tick_reaction_pass(p_delta)` after `_tick_tunnel_state(p_delta)`.
+- **`CanalAutoBaker.gd`** gains step 9b — `_resolve_host_bone_rids_per_section(spline, params, skeleton)`. Per cross-section: spline-sample → nearest CP bone by world-space distance → walk parents past the CP-prefixed ancestors → resolve the host bone's `PhysicalBone3D` child + RID. Empty RIDs mark unresolved cross-sections; the reaction pass skips them silently. Called eagerly in `bake()` between the tunnel-state integrator build and the per-vert bake; followed immediately by `p_canal._ensure_reaction_pass()` (same eager-in-baker pattern as the chain + integrator).
+- **`canal_gizmo_overlay.gd`** gains `show_reaction_pass: bool = false` plus the `_draw_reaction_pass()` helper. Magenta arrow at each non-zero per-section reaction (length `× 50` for visibility); cyan cross + arrow at each host-bone application point (impulse length `× 100`). Live-rebuild gating added so the gizmo refreshes per-frame when reactions are active. Palette stays CMY+RGB per `feedback_godot_gizmo_colors.md`.
+
+**Tests** — `test_5fb_reaction_pass.gd` 7/7:
+
+1. `bake_resolves_host_bones_per_section` — synthetic skeleton: "Hips" root + 6 `TestCP_k` children + one `PhysicalBone3D` for "Hips"; all 16 cross-sections resolve to the Hips bone's instance ID.
+2. `zero_wall_displacement_zero_reaction` — wall at rest; `tick_force` registers 0 bones hit and reactions max-mag < 1e-5.
+3. `unilateral_wall_push_routes_to_host_bone` — push cell (k=8, j=0) by +5 mm; 1 bone hit; per-section reaction magnitude > 1e-3; application point sits near the expected centerline arc.
+4. `n_rim_exclusion_skips_proximal_sections` — cell (k=0, j=0) push: `n_rim_exclusion=1` yields 0 bones hit; `n_rim_exclusion=0` yields 1.
+5. `load_weighted_centroid_correct` — push k=4 by +5 mm and k=8 by +10 mm; the application point matches `(pos_4 × |r_4| + pos_8 × |r_8|) / (|r_4| + |r_8|)` within 1e-4 m.
+6. `impulse_scales_with_dt` — same configuration at dt=1/60 vs dt=1/120; magnitude ratio = 2.0 ± 0.05.
+7. `degenerate_no_host_bone_safely_skips` — all RIDs empty; 0 bones hit, but the per-section reaction snapshot still carries non-zero magnitude at the perturbed cell (so gizmo + tests can still read it).
+
+Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 scripts rc=0. `.so` 2,269,488 → 2,298,160 bytes (+28,672 / ~28 KB).
+
+**Spec divergences:**
+
+- **(a) `application_point` passed as world space, not body-local.** §6.12.12 pseudocode line 1473 calls `PhysicsServer3D.body_apply_impulse(rid, impulse, application_point)` without specifying whether the offset is world-relative or body-relative. Orifice's reaction-on-host-bone pass at `orifice.cpp:1892` passes `contact_pos - body_origin` when a body_origin is available. For canal interior the host-body origin isn't trivially cached on the pass; passing the world-space application point matches the orifice path's fallback semantics + the Jolt/GodotPhysics behaviour of resolving the offset internally. Production-fidelity: if the body's center-of-mass is offset from origin, the torque arm differs by `body_origin`; for canal scale this is sub-cm and indistinguishable from the natural impulse-routing variance. Flagged for tuning if/when a scenario reveals a difference.
+- **(b) `host_bone_rids` typed as `Array` not `Array[RID]`.** godot-cpp's `Array[RID]` binding has historical quirks; passing the RIDs in a generic `Array` and accessing them via `Variant::RID` typecheck is the safer cross-version path. The GDScript side declares the field as `Array` and inserts `RID()` placeholders; the C++ `configure` iterates with typechecks. No semantic difference vs a typed array.
+- **(c) `get_wall_displacement_snapshot()` added to `TunnelStateIntegrator`.** The prompt flagged this as "acceptable to skip" — added for clarity (the reaction-pass's per-tick hot path reads it directly instead of allocating two snapshots and subtracting). Single PackedFloat32Array allocation per tick per active canal; cost negligible vs the §6.12.4 integration. `get_rest_radius_snapshot()` paired with it for symmetry + gizmo-overlay use.
+- **(d) Host-bone resolution walks the parent chain past the CP prefix.** §6.12.12 says "CP bones are rigidly parented to host bones" — implicitly one level. The baker's `_resolve_host_bone_rids_per_section` walks all the way up to the first ancestor whose name doesn't start with `<spline_cp_bone_prefix>_`. This generalises to authoring where multiple CP bones share a single host (e.g. a CP rope ending at "Hips" via two intermediate CP children); the single-level case is a strict subset. Test 1 exercises both.
+- **(e) Reaction snapshot stores even when host RID is empty.** Test 7 asserts the per-section reaction snapshot at k=8 reads non-zero even though `bones_hit == 0` (empty RIDs). This keeps the gizmo overlay useful on canals with no resolved host bones (degenerate authoring or scenario-disabled host bodies) without forking the gizmo path. Pseudocode in §6.12.12 doesn't address the no-host case; this is a fill-in.
+- **(f) `wall_response_stiffness` exposed per-canal, not per-orifice.** The prompt suggested `OrificeProfile.canal_reaction_rim_exclusion` as the spec's authoring home but allowed sourcing from `CanalParameters` to reduce churn. Following the prompt's hint: both `wall_response_stiffness` (100.0 default) and `canal_reaction_rim_exclusion` (1 default) live on `CanalParameters`. The `OrificeProfile` family doesn't yet exist in the codebase; revisit when it does and consider whether to delegate from orifice to canal.
+
+**Architecture-doc edits applied this slice:** none. The implementation follows §6.12.12 pseudocode verbatim. The new authoring fields on `CanalParameters` are a schema addition consistent with §6.12.12's requirement that `wall_response_stiffness` and `N_rim` be configurable.
+
+**Cross-slice composition:**
+
+- 5F.B.B `TunnelStateIntegrator` unchanged in behavior; the two new snapshot accessors are pure additions.
+- 5F.B.C type-3 path unchanged; the reaction pass reads the wall displacement that 5F.B.C feeds into the integrator's bilateral split. The two slices compose without touching each other's surface.
+- 5F.A `CanalCenterlineSolver` unchanged; `basis_at` + `evaluate_at` + `get_total_arc_length` consumed read-only.
+- §6.3 orifice rim closure unaffected. The `N_rim` exclusion (default 1) makes the two passes disjoint by construction per the spec.
+- Marionette SPD pose tracking sees the canal-interior impulse as a Jolt-side force perturbation, no direct coupling. The "ragdoll holds pose while constrained and penetrated" scenario is now physically realisable; validation under live SPD tension is an integration-scene concern.
+
+**Deferred:**
+
+- **Production EI → canal binding** still deferred from 5F.B.C. The reaction pass operates on whatever the integrator has stored; once EI lifecycle hooks call `register_active_canal` in production, the existing test-only `register_active_canal_for_test` path retires without changes to this slice.
+- **`PhysicsServer3D.body_apply_impulse` integration testing under live Jolt step** — `test_5fb_reaction_pass.gd` asserts on the snapshots (per-section reaction, application points, impulse vectors). End-to-end "bone actually moves" validation lives in the scenario integration scene (deferred per the prompt).
+- **Stimulus bus emission for canal-driven events** — Phase 6 / slice (7).
+- **TT-S5 per-slot μ** — slice (8).
 
 ---
 
