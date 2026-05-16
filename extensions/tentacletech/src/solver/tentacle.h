@@ -126,6 +126,21 @@ public:
 	void unregister_active_ei_orifice(class Orifice *p_orifice);
 	int get_active_ei_orifice_count() const;
 
+	// Slice 5F.B.C — active-canal registry + type-3 wall projection.
+	// Per-canal entries hold a pointer to the GDScript `Canal` node
+	// (Node3D) and the proximal particle index past which the tentacle
+	// is "inside" the canal. The per-substep `_apply_canal_wall_contacts`
+	// pass walks this set, fetches each canal's centerline solver +
+	// tunnel-state integrator via GDScript `call()`, and projects
+	// participating particles against the wall. Production EI → canal
+	// binding lives in the follow-up slice; this surface is test-only
+	// today (drive via `Canal.register_active_canal_for_test`).
+	void register_active_canal(godot::Node3D *p_canal, int p_proximal_particle_idx);
+	void unregister_active_canal(godot::Node3D *p_canal);
+	int get_active_canal_count() const;
+	int get_last_canal_wall_contact_count() const;
+	godot::Array get_canal_wall_contacts_snapshot() const;
+
 	// Slice 5C-C — chain-arc-length sampling helpers used by §6.3
 	// reaction-on-host-bone. `s` is intrinsic arc length along the chain
 	// in metres; we walk the segment rest lengths to locate the
@@ -630,6 +645,23 @@ private:
 	// `unregister_active_ei_orifice` by the Orifice's EI lifecycle path.
 	// Tiny in practice (cap 3); a flat vector outperforms a hash here.
 	std::vector<class Orifice *> _active_ei_orifices;
+
+	// Slice 5F.B.C — active-canal registry. Tiny (≤3 canals).
+	struct ActiveCanal {
+		godot::Node3D *canal_node = nullptr;
+		int proximal_particle_idx = 0;
+	};
+	std::vector<ActiveCanal> _active_canals;
+	struct CanalWallContact {
+		int particle_index = -1;
+		godot::Vector3 contact_world_pos;
+		godot::Vector3 contact_normal;
+		godot::Vector3 pre_projection_world_pos;
+		uint64_t canal_object_id = 0;
+	};
+	std::vector<CanalWallContact> _last_canal_wall_contacts;
+
+	void _apply_canal_wall_contacts(float p_dt);
 	// Slice 4S.2 — outer-tick boundary helpers (called from Tentacle::tick).
 	// Order: reset_friction_applied → reset_environment_contact_lambdas (4R)
 	// → _validate_and_reseed_persistence → apply_target_rate_limit → substep

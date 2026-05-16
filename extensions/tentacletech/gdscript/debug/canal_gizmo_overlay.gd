@@ -47,6 +47,12 @@ extends Node3D
 ## displacement (green for outward / red for inward). Falls back to a
 ## silent no-op when no integrator is attached.
 @export var show_wall_displacement: bool = false
+## 5F.B.C — type-3 canal-wall contact markers. Pulls per-substep
+## contact log from `tentacle_for_wall_contacts.get_canal_wall_contacts_snapshot()`.
+## Magenta cross at projected wall point; red line pre→post; cyan stub
+## along contact normal. Silent no-op when tentacle is null.
+@export var show_wall_contacts: bool = false
+@export var tentacle_for_wall_contacts: Node3D
 @export var spline_sample_count: int = 64
 @export var cell_marker_size: float = 0.005
 @export var centerline_dot_size: float = 0.008
@@ -66,6 +72,11 @@ const _COLOR_STRETCH_REST := Color(0.0, 1.0, 0.4)  # green at rest length
 const _COLOR_STRETCH_MAX := Color(1.0, 0.2, 0.2)   # red at ≥110% rest length
 const _COLOR_WALL_OUTWARD := Color(0.0, 1.0, 0.4)  # green: dyn > rest
 const _COLOR_WALL_INWARD := Color(1.0, 0.2, 0.2)   # red: dyn < rest
+const _COLOR_WALL_CONTACT := Color(1.0, 0.0, 1.0)  # magenta: type-3 hit
+const _COLOR_WALL_PUSH := Color(1.0, 0.2, 0.2)     # red: pre→post
+const _COLOR_WALL_NORMAL := Color(0.2, 1.0, 1.0)   # cyan: contact normal
+const _WALL_CONTACT_DOT_SIZE := 0.006
+const _WALL_NORMAL_LENGTH := 0.03
 
 var _mesh_inst: MeshInstance3D
 var _im: ImmediateMesh
@@ -102,7 +113,9 @@ func _process(_delta: float) -> void:
 			and canal.has_centerline_chain()
 	var live_walls := show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
 			and canal.has_tunnel_state_integrator()
-	if live_chain or live_walls:
+	var live_contacts := show_wall_contacts and tentacle_for_wall_contacts != null \
+			and tentacle_for_wall_contacts.has_method("get_canal_wall_contacts_snapshot")
+	if live_chain or live_walls or live_contacts:
 		_rebuild()
 		return
 	var sig := _state_signature()
@@ -178,6 +191,10 @@ func _rebuild() -> void:
 	if show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
 			and canal.has_tunnel_state_integrator():
 		_draw_wall_displacement(spline)
+
+	if show_wall_contacts and tentacle_for_wall_contacts != null \
+			and tentacle_for_wall_contacts.has_method("get_canal_wall_contacts_snapshot"):
+		_draw_wall_contacts()
 
 
 # ─── Primitives ────────────────────────────────────────────────────
@@ -426,4 +443,37 @@ func _draw_wall_displacement(p_spline: RefCounted) -> void:
 			_im.surface_add_vertex(anchor)
 			_im.surface_set_color(col)
 			_im.surface_add_vertex(anchor + outward * disp)
+	_im.surface_end()
+
+
+# 5F.B.C — Per-substep type-3 canal-wall contact markers.
+#   * Magenta cross at the projected wall point.
+#   * Red line from particle pre→post projection (depenetration vector).
+#   * Cyan stub along the contact normal.
+func _draw_wall_contacts() -> void:
+	if tentacle_for_wall_contacts == null:
+		return
+	var contacts: Array = tentacle_for_wall_contacts.get_canal_wall_contacts_snapshot()
+	if contacts.is_empty():
+		return
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for c in contacts:
+		var pre: Vector3 = c.get("pre_projection_world_pos", Vector3.ZERO)
+		var post: Vector3 = c.get("contact_world_pos", Vector3.ZERO)
+		_im.surface_set_color(_COLOR_WALL_PUSH)
+		_im.surface_add_vertex(pre)
+		_im.surface_set_color(_COLOR_WALL_PUSH)
+		_im.surface_add_vertex(post)
+	_im.surface_end()
+	for c in contacts:
+		var post: Vector3 = c.get("contact_world_pos", Vector3.ZERO)
+		_draw_cross(post, _WALL_CONTACT_DOT_SIZE, _COLOR_WALL_CONTACT)
+	_im.surface_begin(Mesh.PRIMITIVE_LINES, _mat)
+	for c in contacts:
+		var post: Vector3 = c.get("contact_world_pos", Vector3.ZERO)
+		var n: Vector3 = c.get("contact_normal", Vector3.UP)
+		_im.surface_set_color(_COLOR_WALL_NORMAL)
+		_im.surface_add_vertex(post)
+		_im.surface_set_color(_COLOR_WALL_NORMAL)
+		_im.surface_add_vertex(post + n * _WALL_NORMAL_LENGTH)
 	_im.surface_end()

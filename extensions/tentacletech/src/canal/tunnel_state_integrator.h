@@ -107,6 +107,12 @@ public:
 	// effect on plastic/damage accumulation. Out-of-range index = no-op.
 	void set_dynamic_wall_radius_for_test(int p_k, int p_j, float p_r);
 
+	// Slice 5F.B.C — Type-3 canal-wall contact accessors.
+	float sample_dynamic_wall_radius(float p_s, float p_theta) const;
+	float sample_friction_mult(float p_s, float p_theta) const;
+	void set_external_wall_perturbation(int p_k, int p_j, float p_delta);
+	float sample_axial_surface_velocity(float p_s) const;
+
 protected:
 	static void _bind_methods();
 
@@ -119,6 +125,8 @@ private:
 	std::vector<float> rest_radius;
 	// Zone data flattened: 5 floats per zone.
 	std::vector<float> zones;
+	// 5F.B.C — per-tick external wall-perturbation accumulator.
+	std::vector<float> external_wall_perturbation;
 
 	// Resolution.
 	int axial_segments = 0;

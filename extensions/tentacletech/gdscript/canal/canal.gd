@@ -113,6 +113,12 @@ func get_canal_id() -> int:
 
 # ─── Hierarchical activation (§6.12.9) ─────────────────────────────
 
+## 5F.B.C — Test-only override. Set true to force `is_inactive()` false
+## so test fixtures can drive `tick()` (not `tick_force`) without first
+## wiring up an EntryInteraction. Production callers leave this false.
+@export var force_active_for_test: bool = false
+
+
 ## True iff no active EntryInteraction on either orifice AND no
 ## storage chain content AND no Reverie modulation. 5E always returns
 ## true (placeholder — no EI machinery wired yet, no Reverie writes,
@@ -122,11 +128,34 @@ func get_canal_id() -> int:
 ## the texture integration loop are skipped entirely; the shader
 ## reads the last-uploaded texture (= rest pose at scene init).
 func is_inactive() -> bool:
+	if force_active_for_test:
+		return false
 	# 5E placeholder. 5F replaces with:
 	#   return _active_entry_interactions.is_empty()
 	#       and _storage_chain.is_empty()
 	#       and _reverie_modulation_zero()
 	return true
+
+
+## 5F.B.C — Test-only helper that binds a tentacle to this canal with
+## the given proximal particle index. Production EI → canal binding
+## lives in the EI lifecycle hooks on `Orifice` (follow-up slice).
+func register_active_canal_for_test(p_tentacle: Node, p_proximal_particle_idx: int) -> void:
+	if p_tentacle == null:
+		return
+	if not p_tentacle.has_method("register_active_canal"):
+		push_error("Canal.register_active_canal_for_test: tentacle missing "
+				+ "register_active_canal — was the tentacletech extension loaded?")
+		return
+	p_tentacle.call("register_active_canal", self, p_proximal_particle_idx)
+
+
+func unregister_active_canal_for_test(p_tentacle: Node) -> void:
+	if p_tentacle == null:
+		return
+	if not p_tentacle.has_method("unregister_active_canal"):
+		return
+	p_tentacle.call("unregister_active_canal", self)
 
 
 # ─── Per-tick driver (5F.A wires the centerline chain) ─────────────

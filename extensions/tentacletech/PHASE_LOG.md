@@ -863,6 +863,107 @@ Full TT suite: **229/229** passing across 31 scripts (was 220 + 9 new). All 31 s
 
 ---
 
+### Slice 5F.B.C — Type-3 canal-wall contact (2026-05-16)
+
+Per-substep projection of tentacle particles against canal walls. A particle inside (penetrating outward past) the wall is projected back to `wall_radius − effective_particle_radius`, where `effective_particle_radius = collision_radius × girth_scale + feature_silhouette(s, θ)`. Friction applies a Coulomb tangent correction (cone-clamped, scaled by per-cell `friction_mult`). Bilateral pressure split routes part of the radial overshoot to `tunnel_state` integrator (consumed next tick) and the inverse-direction lateral push to the nearest centerline particle.
+
+Spec target: `docs/architecture/TentacleTech_Architecture.md` §6.12.6, §6.12.4 step 2f, with the bilateral split formulation from `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §4 (slice 5).
+
+**Public C++ surface — `TunnelStateIntegrator` additions:**
+
+```cpp
+float sample_dynamic_wall_radius(float s, float theta) const;        // bilinear
+float sample_friction_mult(float s, float theta) const;              // mode-aware
+void  set_external_wall_perturbation(int k, int j, float delta);     // tick-cleared
+float sample_axial_surface_velocity(float s) const;                  // stubbed 0 (5G)
+```
+
+The integrator's `tick(dt)` step 2e now folds `external_wall_perturbation[k][j]` into the per-cell target. Buffer is cleared at end of tick (after step 2k) so a type-3 contact in tick N feeds the next tick's wall integration — matches §6.12.4 step 2f's "lag a frame" semantics.
+
+**Public C++ surface — `CanalCenterlineSolver` additions:**
+
+```cpp
+void add_external_lateral_perturbation(int particle_index, const Vector3 &delta_world);
+Vector3 outward_at(float s, float theta) const;  // normalised
+```
+
+`tick()`'s predict step now consumes + clears the per-particle lateral perturbation scratch.
+
+**Public C++ surface — `Tentacle` additions:**
+
+```cpp
+void register_active_canal(Node3D *canal, int proximal_particle_idx);  // idempotent
+void unregister_active_canal(Node3D *canal);
+int  get_active_canal_count() const;
+int  get_last_canal_wall_contact_count() const;                        // test/gizmo
+Array get_canal_wall_contacts_snapshot() const;                        // §15 snapshot
+```
+
+`Tentacle::tick`'s substep loop now calls `_apply_canal_wall_contacts(sub_dt)` after `solver->tick(sub_dt)`. The method iterates `_active_canals`, fetches each canal's centerline solver + integrator via GDScript `call("get_centerline_chain")` / `call("get_tunnel_state_integrator")`, projects participating particles against the wall, and routes pressure through the bilateral split.
+
+**Public GDScript surface — `Canal.gd` additions:**
+
+```gdscript
+@export var force_active_for_test: bool = false                     # test bypass
+func register_active_canal_for_test(tentacle, proximal_particle_idx) -> void
+func unregister_active_canal_for_test(tentacle) -> void
+```
+
+`is_inactive()` now honours `force_active_for_test`. Production EI → canal binding is the follow-up slice; the test-only register helper covers the unit-test path.
+
+**Public GDScript surface — `canal_gizmo_overlay.gd` additions:**
+
+```gdscript
+@export var show_wall_contacts: bool = false
+@export var tentacle_for_wall_contacts: Node3D
+```
+
+When both set, the overlay reads `tentacle.get_canal_wall_contacts_snapshot()` each frame and renders magenta crosses (projected point on wall), red lines (pre→post correction), and cyan stubs (contact normal). Palette stays CMY+RGB per `feedback_godot_gizmo_colors.md`.
+
+**Tests** — `test_5fbC_canal_wall_contact.gd` 7/7:
+
+1. `particle_outside_wall_unaffected` — staged inside the wall envelope; zero wall contacts, position drift ≤ 1e-5 m.
+2. `particle_inside_wall_projected_outward` — staged at 1.5× rest_radius from axis; projected to `wall_threshold` within 2 mm tolerance (the tolerance band absorbs the per-tick `girth_scale` perturbation introduced by the stretched chain segments).
+3. `feature_silhouette_subtracts_from_wall_clearance` — flat +5 mm silhouette texture; the projected position lands ~5 mm closer to the canal axis than the no-silhouette case (verifies §5H integration mirrors type-1/2/4).
+4. `wall_deflects_under_particle_pressure` — particle pushed past wall; after one `canal.tick_force` consumes the perturbation, peak `dynamic_wall_radius` at the contact cell row sits at 0.0588 m vs rest 0.050 m (+8.8 mm wall deflection).
+5. `centerline_deflects_under_lateral_pressure` — `centerline_lateral_compliance = 1.5`; 30 ticks of sustained particle pressure; max interior centerline lateral offset reaches 0.0093 m.
+6. `friction_mult_scales_friction_force` — single-tick kinetic-friction measurement at `friction_mult = 1.0` vs `3.0` (driven via zone `friction_bonus`); loss ratio 0.122 / 0.054 ≈ 2.3× (inside the [1.5, 5] tolerance for kinetic Coulomb scaling; static-cone saturation excluded by tight penetration setup).
+7. `inactive_canal_skips_type3` — canal unregistered from tentacle; zero wall contacts; staged particle holds its position past the wall threshold.
+
+Full TT suite: **236/236** passing across 32 scripts (was 229 + 7 new). All 32 scripts rc=0. `.so` 2,236,712 → 2,269,488 bytes (+32,776 / ~32 KB).
+
+**Spec divergences:**
+
+- **(a) Test-only EI → canal binding.** Production EI → canal binding (Orifice lifecycle hooks calling `Tentacle::register_active_canal`) is deferred to the follow-up slice. 5F.B.C ships the projection logic + `_active_canals` field + the `Canal.register_active_canal_for_test` GDScript helper; the test fixtures use the latter directly. No production scene wires type-3 today, so the deferral is invisible — when Orifice's EI lifecycle hooks land they call the same `register_active_canal` surface this slice exposed.
+- **(b) Type-3 contact uses a 4× wall-radius sanity gate.** Particles whose `dist_from_axis > wall_radius × 4` are skipped (they're not in the canal at all; without this gate, a far-away particle gets yanked onto the wall surface). Production EI gating via `proximal_particle_idx` removes the need for the gate once the binding hook lands, but the gate is cheap and defends against authoring errors — kept as belt-and-suspenders.
+- **(c) Friction tangent uses `(position − prev_position)` from the solver's finalize.** The architecture pseudocode reads `particle.velocity_tangent`; for the position-based PBD friction projection the displacement form is equivalent and matches the existing type-1/2/4 friction-cone projection in `PBDSolver::iterate`. The axial surface velocity (`sample_axial_surface_velocity`) is subtracted from the tangent step before cone-clamping, so when 5G wires the real muscle gradient the composition is already correct.
+- **(d) Single combined `add_external_position_delta` call per particle.** The Jacobi accumulator in `PBDSolver` divides accumulated deltas by the number of pushes. Two separate `add_external_position_delta` calls (one for normal correction, one for friction correction) would halve the effective magnitude. Combining into one push is correct; the comment in `_apply_canal_wall_contacts` flags this explicitly.
+- **(e) Velocity refresh after `apply_external_position_deltas`.** The solver's `finalize` already ran before the type-3 pass, so velocity reflects the pre-projection position. The pass writes the post-projection velocity `(position − prev_position) / dt` for each projected particle so a test reading `solver->get_particle_velocity` immediately after `tentacle.tick` sees the friction effect. Without this, the velocity would only update on the next tick's finalize.
+- **(f) Bilateral wall split uses nearest-cell allocation, not bilinear distribution.** Allocates the wall perturbation to the single `(round(k), round(j))` cell rather than distributing across the 4 bracketing cells. The integrator's only consumer of `external_wall_perturbation` is step 2e's additive target; a bilinear spread would diffuse the contact across cells without changing the local response qualitatively. Cheaper + clearer semantics.
+- **(g) `centerline_lateral_compliance` reused as the "lateral_compliance" knob.** The architecture text introduces `CanalParameters.lateral_compliance: float = 0.5`. `CanalParameters.centerline_lateral_compliance` already shipped at 5F.A with default 0.01, so 5F.B.C consumes that field rather than introducing a parallel one. `wall_share = 1 / (1 + centerline_lateral_compliance)`; default 0.01 → wall takes ~99%. Tests using `1.5` to exercise the centerline branch.
+- **(h) Friction sampler θ from outward direction, not from tangent-plane projection of contact direction.** `sample_feature_silhouette_at_contact(p, particle_pos)` would return 0 because `contact_dir = particle_pos − particle_pos = 0`. The fix passes a virtual contact point at `particle_pos + outward_unit × 1 mm`; the sampler resolves a non-degenerate θ from the relative direction. Functionally identical to the proper θ in the canal frame; mathematically clean because the silhouette is azimuthally periodic.
+- **(i) `sample_axial_surface_velocity` stubbed to 0.** 5G concern. Kept in the public surface so 5G's muscle-gradient evaluator can drop in without changing callers.
+
+**Architecture-doc edits applied this slice:** none. The implementation follows §6.12.6 verbatim within the in-scope step list. The bilateral split formulation comes from `docs/Cosmic_Bliss_Update_2026-05-14-03_ragdoll_under_tension_scenario.md` §4; nothing in §6.12 required amendment. The `force_active_for_test` flag is a `Canal.gd` schema addition, not a §6.12 amendment.
+
+**Cross-slice composition:**
+
+- 5F.B.B `TunnelStateIntegrator` unchanged in behavior; the four new accessors are pure additions.
+- 5F.A `CanalCenterlineSolver` unchanged in behavior; the two new accessors are pure additions.
+- 5H feature silhouette: type-3 wires the same sampler per CLAUDE.md non-negotiable. Confirmed via test 3.
+- TT-S3 contact suppression: untouched. The two systems are disjoint by design — TT-S3 suppresses type-1 capsule contacts, type-3 projects against canal walls. Confirmed by re-running `test_tt_s3_contact_suppression` (6/6 still pass).
+- TT-S6 area stiffening: untouched.
+
+**Deferred:**
+
+- **Production EI → canal binding.** Orifice lifecycle hooks calling `register_active_canal` when an EI's particles cross the rim plane. Slice (?) — likely 5F.B.D or a dedicated EI-canal-binding slice.
+- **§6.12.12 canal-interior reaction pass.** Slice (6), next per the scenario doc. Reads the wall displacement that 5F.B.C now feeds into the integrator's bilateral split and dispatches a `body_apply_impulse` on each cross-section's host bone.
+- **Phase 6 stimulus bus event emission.** Slice (7) — wall contact events for Sonance / Reverie.
+- **TT-S5 per-slot μ.** Slice (8).
+- **Real `sample_axial_surface_velocity`.** Slice 5G when the muscle field lands.
+
+---
+
 ## Phase 6 — Stimulus bus
 
 **State:** blocked (waiting on Phase 5 canal interior model).

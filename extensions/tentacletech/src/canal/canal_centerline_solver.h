@@ -104,6 +104,11 @@ public:
 	godot::Vector3 bend_axis_at(float p_s) const;
 	float get_total_arc_length() const;
 
+	// 5F.B.C — Type-3 wall contact lateral push + outward sampling.
+	void add_external_lateral_perturbation(int p_particle_index,
+			const godot::Vector3 &p_delta_world);
+	godot::Vector3 outward_at(float p_s, float p_theta) const;
+
 protected:
 	static void _bind_methods();
 
@@ -119,6 +124,10 @@ private:
 	// inv_mass on the endpoints).
 	godot::Vector3 proximal_anchor = godot::Vector3(0.0f, 0.0f, 0.0f);
 	godot::Vector3 distal_anchor = godot::Vector3(0.0f, 0.0f, 0.0f);
+
+	// 5F.B.C — per-particle external lateral perturbation accumulator.
+	// Cleared at the start of each tick's predict (consumed once).
+	std::vector<godot::Vector3> external_lateral_perturbation;
 
 	// Tunables.
 	int iterations = 8;

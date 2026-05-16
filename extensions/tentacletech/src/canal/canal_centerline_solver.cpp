@@ -24,6 +24,7 @@ void CanalCenterlineSolver::configure(
 	positions.resize(n);
 	prev_positions.resize(n);
 	inv_mass.resize(n);
+	external_lateral_perturbation.assign(n, Vector3(0.0f, 0.0f, 0.0f));
 	const int im_count = p_inv_mass_per_particle.size();
 	for (int i = 0; i < n; ++i) {
 		positions[i] = p_rest_positions_world[i];
@@ -108,6 +109,8 @@ void CanalCenterlineSolver::tick(float p_dt) {
 	const float velocity_retain = 1.0f - damping;
 
 	// ─── Predict ─────────────────────────────────────────────────────
+	const bool have_lateral_push =
+			static_cast<int>(external_lateral_perturbation.size()) == n;
 	for (int i = 0; i < n; ++i) {
 		if (inv_mass[i] <= 0.0f) {
 			// Pinned by mass — leave at current (will be re-pinned to
@@ -116,6 +119,14 @@ void CanalCenterlineSolver::tick(float p_dt) {
 		}
 		const Vector3 v_implicit = positions[i] - prev_positions[i];
 		positions[i] = positions[i] + v_implicit * velocity_retain + gravity * dt2;
+		// 5F.B.C — apply (and consume) the external lateral perturbation.
+		if (have_lateral_push) {
+			positions[i] = positions[i] + external_lateral_perturbation[i];
+		}
+	}
+	if (have_lateral_push) {
+		std::fill(external_lateral_perturbation.begin(),
+				external_lateral_perturbation.end(), Vector3(0.0f, 0.0f, 0.0f));
 	}
 
 	// Anchor endpoints win even if inv_mass != 0 (defensive).
@@ -394,6 +405,26 @@ float CanalCenterlineSolver::curvature_at(float p_s) const {
 	return second.length() / (h * h);
 }
 
+void CanalCenterlineSolver::add_external_lateral_perturbation(int p_particle_index,
+		const Vector3 &p_delta_world) {
+	const int n = static_cast<int>(positions.size());
+	if (p_particle_index < 0 || p_particle_index >= n) return;
+	if (static_cast<int>(external_lateral_perturbation.size()) != n) {
+		external_lateral_perturbation.assign(n, Vector3(0.0f, 0.0f, 0.0f));
+	}
+	external_lateral_perturbation[p_particle_index] += p_delta_world;
+}
+
+Vector3 CanalCenterlineSolver::outward_at(float p_s, float p_theta) const {
+	const Basis b = basis_at(p_s);
+	const Vector3 normal = b.get_column(1);
+	const Vector3 binormal = b.get_column(2);
+	const Vector3 out = normal * std::cos(p_theta) + binormal * std::sin(p_theta);
+	const float l = out.length();
+	if (l < 1e-9f) return Vector3(1.0f, 0.0f, 0.0f);
+	return out / l;
+}
+
 Vector3 CanalCenterlineSolver::bend_axis_at(float p_s) const {
 	const int n = static_cast<int>(positions.size());
 	if (n < 3) {
@@ -450,4 +481,11 @@ void CanalCenterlineSolver::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("bend_axis_at", "s"), &CanalCenterlineSolver::bend_axis_at);
 	ClassDB::bind_method(D_METHOD("get_total_arc_length"),
 			&CanalCenterlineSolver::get_total_arc_length);
+
+	// 5F.B.C — type-3 lateral pressure intake + outward sample.
+	ClassDB::bind_method(D_METHOD("add_external_lateral_perturbation",
+								  "particle_index", "delta_world"),
+			&CanalCenterlineSolver::add_external_lateral_perturbation);
+	ClassDB::bind_method(D_METHOD("outward_at", "s", "theta"),
+			&CanalCenterlineSolver::outward_at);
 }

@@ -11,6 +11,8 @@
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 
+#include "../canal/canal_centerline_solver.h"
+#include "../canal/tunnel_state_integrator.h"
 #include "../orifice/orifice.h"
 #include "../spline/spline_data_packer.h"
 
@@ -205,6 +207,9 @@ void Tentacle::tick(float p_delta) {
 	for (int s = 0; s < sub_steps; s++) {
 		_run_environment_probe();
 		solver->tick(sub_dt);
+		// Slice 5F.B.C — type-3 canal-wall projection runs after the
+		// PBD substep so it sees the constraint-settled positions.
+		_apply_canal_wall_contacts(sub_dt);
 	}
 
 	// Slice 4S.2 — snapshot live contact state back into body-local-frame
@@ -1090,6 +1095,284 @@ void Tentacle::unregister_active_ei_orifice(Orifice *p_orifice) {
 
 int Tentacle::get_active_ei_orifice_count() const {
 	return (int)_active_ei_orifices.size();
+}
+
+// -- Slice 5F.B.C active-canal registry + type-3 wall projection ----------
+
+void Tentacle::register_active_canal(Node3D *p_canal, int p_proximal_particle_idx) {
+	if (p_canal == nullptr) return;
+	for (size_t i = 0; i < _active_canals.size(); i++) {
+		if (_active_canals[i].canal_node == p_canal) {
+			_active_canals[i].proximal_particle_idx = p_proximal_particle_idx;
+			return;
+		}
+	}
+	ActiveCanal entry;
+	entry.canal_node = p_canal;
+	entry.proximal_particle_idx = p_proximal_particle_idx;
+	_active_canals.push_back(entry);
+}
+
+void Tentacle::unregister_active_canal(Node3D *p_canal) {
+	if (p_canal == nullptr) return;
+	for (size_t i = 0; i < _active_canals.size(); i++) {
+		if (_active_canals[i].canal_node == p_canal) {
+			_active_canals[i] = _active_canals.back();
+			_active_canals.pop_back();
+			return;
+		}
+	}
+}
+
+int Tentacle::get_active_canal_count() const {
+	return (int)_active_canals.size();
+}
+
+int Tentacle::get_last_canal_wall_contact_count() const {
+	return (int)_last_canal_wall_contacts.size();
+}
+
+Array Tentacle::get_canal_wall_contacts_snapshot() const {
+	Array out;
+	out.resize((int)_last_canal_wall_contacts.size());
+	for (size_t i = 0; i < _last_canal_wall_contacts.size(); i++) {
+		const CanalWallContact &c = _last_canal_wall_contacts[i];
+		Dictionary d;
+		d["particle_index"] = c.particle_index;
+		d["contact_world_pos"] = c.contact_world_pos;
+		d["contact_normal"] = c.contact_normal;
+		d["pre_projection_world_pos"] = c.pre_projection_world_pos;
+		d["canal_object_id"] = (int64_t)c.canal_object_id;
+		out[(int)i] = d;
+	}
+	return out;
+}
+
+static int _nearest_centerline_particle(const PackedVector3Array &centerline_positions,
+		float p_s_target) {
+	const int m = centerline_positions.size();
+	if (m == 0) return -1;
+	if (m == 1) return 0;
+	float cum = 0.0f;
+	int best = 0;
+	float best_dist = std::abs(p_s_target);
+	for (int i = 1; i < m; i++) {
+		cum += (centerline_positions[i] - centerline_positions[i - 1]).length();
+		const float d = std::abs(p_s_target - cum);
+		if (d < best_dist) {
+			best_dist = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+static void _project_onto_centerline(const PackedVector3Array &centerline_positions,
+		const Vector3 &p_world, float &r_s, Vector3 &r_closest) {
+	const int m = centerline_positions.size();
+	r_s = 0.0f;
+	if (m == 0) { r_closest = p_world; return; }
+	if (m == 1) { r_closest = centerline_positions[0]; return; }
+	float cum = 0.0f;
+	float best_dist_sq = (centerline_positions[0] - p_world).length_squared();
+	float best_s = 0.0f;
+	Vector3 best_closest = centerline_positions[0];
+	for (int i = 0; i < m - 1; i++) {
+		const Vector3 a = centerline_positions[i];
+		const Vector3 b = centerline_positions[i + 1];
+		const Vector3 ab = b - a;
+		const float ab_len_sq = ab.length_squared();
+		float t = 0.0f;
+		if (ab_len_sq > 1e-12f) {
+			t = (p_world - a).dot(ab) / ab_len_sq;
+			if (t < 0.0f) t = 0.0f;
+			if (t > 1.0f) t = 1.0f;
+		}
+		const Vector3 closest = a + ab * t;
+		const float d_sq = (closest - p_world).length_squared();
+		if (d_sq < best_dist_sq) {
+			best_dist_sq = d_sq;
+			best_closest = closest;
+			best_s = cum + std::sqrt(ab_len_sq) * t;
+		}
+		cum += std::sqrt(ab_len_sq);
+	}
+	r_s = best_s;
+	r_closest = best_closest;
+}
+
+void Tentacle::_apply_canal_wall_contacts(float p_dt) {
+	_last_canal_wall_contacts.clear();
+	if (solver.is_null()) return;
+	if (_active_canals.empty()) return;
+	if (p_dt <= 0.0f) return;
+
+	const float coll_radius = particle_collision_radius;
+	const float base_mu = base_static_friction * (1.0f - tentacle_lubricity);
+	const float mu_k = base_mu * kinetic_friction_ratio;
+	const int n = solver->get_particle_count();
+
+	for (size_t c = 0; c < _active_canals.size(); c++) {
+		Node3D *canal_node = _active_canals[c].canal_node;
+		if (canal_node == nullptr) continue;
+		const int proximal_idx = _active_canals[c].proximal_particle_idx;
+		const uint64_t canal_oid = (uint64_t)canal_node->get_instance_id();
+
+		Variant chain_v = canal_node->call(StringName("get_centerline_chain"));
+		Variant integ_v = canal_node->call(StringName("get_tunnel_state_integrator"));
+		Object *chain_obj = chain_v.operator Object *();
+		Object *integ_obj = integ_v.operator Object *();
+		CanalCenterlineSolver *chain = Object::cast_to<CanalCenterlineSolver>(chain_obj);
+		TunnelStateIntegrator *integ = Object::cast_to<TunnelStateIntegrator>(integ_obj);
+		if (chain == nullptr || integ == nullptr) continue;
+
+		const PackedVector3Array centerline_positions = chain->get_positions_snapshot();
+		if (centerline_positions.size() < 2) continue;
+		const float total_arc = chain->get_total_arc_length();
+		if (total_arc < 1e-6f) continue;
+
+		float lateral_compliance = 0.01f;
+		{
+			Variant params_v = canal_node->get(StringName("canal_parameters"));
+			Object *params_obj = params_v.operator Object *();
+			if (params_obj != nullptr) {
+				Variant lc = params_obj->get(StringName("centerline_lateral_compliance"));
+				if (lc.get_type() == Variant::FLOAT) {
+					lateral_compliance = (float)lc;
+				}
+			}
+		}
+		const float wall_share = 1.0f / (1.0f + lateral_compliance);
+		const float centerline_share = 1.0f - wall_share;
+
+		const int integ_axial = integ->get_axial_segments();
+		const int integ_sectors = integ->get_angular_sectors();
+		if (integ_axial < 2 || integ_sectors < 2) continue;
+
+		const int particle_lo = (proximal_idx < 0) ? 0 : proximal_idx;
+		for (int p = particle_lo; p < n; p++) {
+			const float inv_mass = solver->get_particle_inv_mass(p);
+			if (inv_mass <= 0.0f) continue;
+			const Vector3 particle_pos = solver->get_particle_position(p);
+
+			float s_at_particle = 0.0f;
+			Vector3 closest_on_axis;
+			_project_onto_centerline(centerline_positions, particle_pos,
+					s_at_particle, closest_on_axis);
+			Vector3 radial = particle_pos - closest_on_axis;
+			float dist_from_axis = radial.length();
+			if (dist_from_axis < 1e-7f) {
+				const Basis b = chain->basis_at(s_at_particle);
+				radial = b.get_column(1);
+				dist_from_axis = radial.length();
+				if (dist_from_axis < 1e-7f) continue;
+			}
+			const Vector3 outward_unit = radial / dist_from_axis;
+
+			const Basis canal_basis = chain->basis_at(s_at_particle);
+			const Vector3 normal = canal_basis.get_column(1);
+			const Vector3 binormal = canal_basis.get_column(2);
+			const float ct = outward_unit.dot(normal);
+			const float st = outward_unit.dot(binormal);
+			const float theta = std::atan2(st, ct);
+
+			const float wall_radius = integ->sample_dynamic_wall_radius(
+					s_at_particle, theta);
+
+			const float smooth_girth = coll_radius * solver->get_particle_girth_scale(p);
+			const Vector3 virtual_contact = particle_pos + outward_unit * 0.001f;
+			const float feature_perturbation = sample_feature_silhouette_at_contact(
+					p, virtual_contact);
+			const float effective_particle_radius = smooth_girth + feature_perturbation;
+			const float wall_threshold = wall_radius - effective_particle_radius;
+
+			if (dist_from_axis <= wall_threshold) continue;
+			// Sanity gate: skip particles far outside the canal envelope
+			// — they're not in the canal, so a projection would yank
+			// them inappropriately. Production EI gating subsumes this
+			// once the binding hook lands.
+			if (dist_from_axis > wall_radius * 4.0f) continue;
+
+			const Vector3 pre_projection = particle_pos;
+			const Vector3 corrected_pos = closest_on_axis
+					+ outward_unit * wall_threshold;
+			const Vector3 correction = corrected_pos - particle_pos;
+
+			const Vector3 prev_pos = solver->get_particle_prev_position(p);
+			const Vector3 step_disp = particle_pos - prev_pos;
+			const Vector3 disp_along_normal = outward_unit
+					* step_disp.dot(outward_unit);
+			Vector3 disp_along_tangent = step_disp - disp_along_normal;
+			const float axial_vel = integ->sample_axial_surface_velocity(s_at_particle);
+			const Vector3 axial_tangent = canal_basis.get_column(0);
+			disp_along_tangent -= axial_tangent * (axial_vel * p_dt);
+
+			const float per_cell_mu_scale = integ->sample_friction_mult(
+					s_at_particle, theta);
+			const float mu_eff = mu_k * per_cell_mu_scale;
+			const float normal_correction_mag = correction.length();
+			const float tangent_mag = disp_along_tangent.length();
+			const float cone_cap = mu_eff * normal_correction_mag;
+			Vector3 friction_correction;
+			if (tangent_mag <= cone_cap) {
+				friction_correction = -disp_along_tangent;
+			} else if (tangent_mag > 1e-9f) {
+				friction_correction = -disp_along_tangent * (cone_cap / tangent_mag);
+			} else {
+				friction_correction = Vector3();
+			}
+
+			// Single combined push — Jacobi accumulator averages by push
+			// count, so two separate adds would halve the correction.
+			solver->add_external_position_delta(p, correction + friction_correction);
+
+			const float s_norm = s_at_particle / total_arc;
+			int k_cell = (int)std::round(s_norm * (float)(integ_axial - 1));
+			if (k_cell < 0) k_cell = 0;
+			if (k_cell > integ_axial - 1) k_cell = integ_axial - 1;
+			const float two_pi = static_cast<float>(2.0 * Math_PI);
+			float theta_norm = std::fmod(std::fmod(theta, two_pi) + two_pi, two_pi);
+			int j_cell = (int)std::round(theta_norm / two_pi * (float)integ_sectors);
+			j_cell = ((j_cell % integ_sectors) + integ_sectors) % integ_sectors;
+			const float radial_overshoot = dist_from_axis - wall_threshold;
+			const float wall_delta = wall_share * radial_overshoot;
+			integ->set_external_wall_perturbation(k_cell, j_cell, wall_delta);
+
+			const int cl_idx = _nearest_centerline_particle(
+					centerline_positions, s_at_particle);
+			if (cl_idx > 0 && cl_idx < centerline_positions.size() - 1) {
+				const Vector3 lateral_push = outward_unit
+						* (centerline_share * radial_overshoot);
+				chain->add_external_lateral_perturbation(cl_idx, lateral_push);
+			}
+
+			CanalWallContact log;
+			log.particle_index = p;
+			log.contact_world_pos = corrected_pos;
+			log.contact_normal = outward_unit;
+			log.pre_projection_world_pos = pre_projection;
+			log.canal_object_id = canal_oid;
+			_last_canal_wall_contacts.push_back(log);
+		}
+	}
+
+	solver->apply_external_position_deltas();
+
+	// Refresh velocity from post-projection (position, prev_position) so
+	// callers reading `get_particle_velocity` right after `tentacle.tick`
+	// see the friction effect immediately, not on the next tick.
+	if (p_dt > 0.0f && !_last_canal_wall_contacts.empty()) {
+		const float dt_inv = 1.0f / p_dt;
+		for (size_t i = 0; i < _last_canal_wall_contacts.size(); i++) {
+			const int p_idx = _last_canal_wall_contacts[i].particle_index;
+			if (p_idx < 0 || p_idx >= n) continue;
+			if (solver->get_particle_inv_mass(p_idx) <= 0.0f) continue;
+			const Vector3 new_pos = solver->get_particle_position(p_idx);
+			const Vector3 prev_pos = solver->get_particle_prev_position(p_idx);
+			solver->set_particle_velocity(p_idx,
+					(new_pos - prev_pos) * dt_inv);
+		}
+	}
 }
 
 void Tentacle::_apply_contact_suppression() {
@@ -2234,6 +2517,17 @@ void Tentacle::_bind_methods() {
 			&Tentacle::unregister_active_ei_orifice);
 	ClassDB::bind_method(D_METHOD("get_active_ei_orifice_count"),
 			&Tentacle::get_active_ei_orifice_count);
+	// Slice 5F.B.C — active-canal registry + type-3 wall contact snapshot.
+	ClassDB::bind_method(D_METHOD("register_active_canal", "canal", "proximal_particle_idx"),
+			&Tentacle::register_active_canal);
+	ClassDB::bind_method(D_METHOD("unregister_active_canal", "canal"),
+			&Tentacle::unregister_active_canal);
+	ClassDB::bind_method(D_METHOD("get_active_canal_count"),
+			&Tentacle::get_active_canal_count);
+	ClassDB::bind_method(D_METHOD("get_last_canal_wall_contact_count"),
+			&Tentacle::get_last_canal_wall_contact_count);
+	ClassDB::bind_method(D_METHOD("get_canal_wall_contacts_snapshot"),
+			&Tentacle::get_canal_wall_contacts_snapshot);
 	ClassDB::bind_method(D_METHOD("get_signed_girth_gradient_at_arc_length", "s"),
 			&Tentacle::get_signed_girth_gradient_at_arc_length);
 	ClassDB::bind_method(D_METHOD("get_tangent_at_arc_length", "s"),

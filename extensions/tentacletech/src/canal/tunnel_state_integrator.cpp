@@ -44,6 +44,8 @@ void TunnelStateIntegrator::configure(int p_axial_segments, int p_angular_sector
 	damage.assign(n_cells, 0.0f);
 	const float fourth_init = (fourth_channel_mode == MODE_FRICTION_MULT) ? 1.0f : 0.0f;
 	fourth_channel.assign(n_cells, fourth_init);
+	// 5F.B.C external perturbation accumulator. Cleared each tick.
+	external_wall_perturbation.assign(n_cells, 0.0f);
 
 	tunnel_state_texture = p_tunnel_state_texture;
 	if (tunnel_state_texture.is_valid()) {
@@ -169,6 +171,9 @@ void TunnelStateIntegrator::tick(float p_dt) {
 	if (static_cast<int>(dynamic_wall_radius.size()) != n_cells) {
 		return;
 	}
+	if (static_cast<int>(external_wall_perturbation.size()) != n_cells) {
+		external_wall_perturbation.assign(n_cells, 0.0f);
+	}
 
 	// Total arc length along the DEFORMED centerline. Used to map cell k →
 	// `s_k` for muscle + zone eval (matches the texture coord convention
@@ -245,6 +250,12 @@ void TunnelStateIntegrator::tick(float p_dt) {
 				target = min_wall_radius;
 			}
 			target += curvature_offset;
+			// 5F.B.C — fold in the external wall perturbation accumulated
+			// since the previous tick (type-3 canal-wall contacts feed
+			// here via `set_external_wall_perturbation`).
+			if (idx < (int)external_wall_perturbation.size()) {
+				target += external_wall_perturbation[idx];
+			}
 
 			// 2f. Bilateral split — bulger-driven; skipped in 5F.B.B.
 
@@ -321,6 +332,9 @@ void TunnelStateIntegrator::tick(float p_dt) {
 		}
 	}
 
+	// 5F.B.C — clear external perturbation now that step 2e consumed it.
+	std::fill(external_wall_perturbation.begin(), external_wall_perturbation.end(), 0.0f);
+
 	// ─── GPU upload ─────────────────────────────────────────────────
 	if (tunnel_state_image.is_valid() && tunnel_state_texture.is_valid()) {
 		for (int k = 0; k < axial_segments; ++k) {
@@ -390,6 +404,121 @@ void TunnelStateIntegrator::set_dynamic_wall_radius_for_test(int p_k, int p_j, f
 	dynamic_wall_radius[p_k * angular_sectors + p_j] = p_r;
 }
 
+// ─── 5F.B.C — Type-3 canal-wall contact accessors ────────────────────
+
+static inline void _bilinear_indices(float p_s, float p_theta,
+		int p_axial, int p_sectors, float p_total_arc,
+		int &r_k0, int &r_k1, int &r_j0, int &r_j1,
+		float &r_fk, float &r_fj) {
+	const float total = (p_total_arc > 1e-9f)
+			? p_total_arc
+			: static_cast<float>(p_axial - 1);
+	float s = p_s;
+	if (s < 0.0f) s = 0.0f;
+	if (s > total) s = total;
+	float s_norm = (total > 1e-9f) ? (s / total) : 0.0f;
+	float kf = s_norm * static_cast<float>(p_axial - 1);
+	int k0 = static_cast<int>(std::floor(kf));
+	if (k0 < 0) k0 = 0;
+	if (k0 > p_axial - 1) k0 = p_axial - 1;
+	int k1 = k0 + 1;
+	if (k1 > p_axial - 1) k1 = p_axial - 1;
+	r_fk = kf - static_cast<float>(k0);
+	if (r_fk < 0.0f) r_fk = 0.0f;
+	if (r_fk > 1.0f) r_fk = 1.0f;
+	r_k0 = k0;
+	r_k1 = k1;
+
+	const float two_pi = static_cast<float>(2.0 * Math_PI);
+	float theta = std::fmod(std::fmod(p_theta, two_pi) + two_pi, two_pi);
+	float jf = (theta / two_pi) * static_cast<float>(p_sectors);
+	int j0 = static_cast<int>(std::floor(jf));
+	int j1 = (j0 + 1) % p_sectors;
+	j0 = ((j0 % p_sectors) + p_sectors) % p_sectors;
+	r_fj = jf - std::floor(jf);
+	r_j0 = j0;
+	r_j1 = j1;
+}
+
+float TunnelStateIntegrator::sample_dynamic_wall_radius(float p_s, float p_theta) const {
+	if (axial_segments < 2 || angular_sectors < 2) return 0.0f;
+	float total_arc = static_cast<float>(axial_segments - 1);
+	if (centerline_solver.is_valid()) {
+		const float t = centerline_solver->get_total_arc_length();
+		if (t > 1e-9f) total_arc = t;
+	}
+	int k0, k1, j0, j1;
+	float fk, fj;
+	_bilinear_indices(p_s, p_theta, axial_segments, angular_sectors, total_arc,
+			k0, k1, j0, j1, fk, fj);
+	const float a = dynamic_wall_radius[k0 * angular_sectors + j0];
+	const float b = dynamic_wall_radius[k1 * angular_sectors + j0];
+	const float c = dynamic_wall_radius[k0 * angular_sectors + j1];
+	const float d = dynamic_wall_radius[k1 * angular_sectors + j1];
+	const float top = a + (b - a) * fk;
+	const float bot = c + (d - c) * fk;
+	return top + (bot - top) * fj;
+}
+
+float TunnelStateIntegrator::sample_friction_mult(float p_s, float p_theta) const {
+	if (axial_segments < 2 || angular_sectors < 2) return 1.0f;
+	float total_arc = static_cast<float>(axial_segments - 1);
+	if (centerline_solver.is_valid()) {
+		const float t = centerline_solver->get_total_arc_length();
+		if (t > 1e-9f) total_arc = t;
+	}
+	int k0, k1, j0, j1;
+	float fk, fj;
+	_bilinear_indices(p_s, p_theta, axial_segments, angular_sectors, total_arc,
+			k0, k1, j0, j1, fk, fj);
+
+	if (fourth_channel_mode == MODE_FRICTION_MULT) {
+		const float a = fourth_channel[k0 * angular_sectors + j0];
+		const float b = fourth_channel[k1 * angular_sectors + j0];
+		const float c = fourth_channel[k0 * angular_sectors + j1];
+		const float d = fourth_channel[k1 * angular_sectors + j1];
+		const float top = a + (b - a) * fk;
+		const float bot = c + (d - c) * fk;
+		float mult = top + (bot - top) * fj;
+		if (mult < 0.0f) mult = 0.0f;
+		return mult;
+	}
+	// MODE_WALL_RADIAL_VELOCITY: recompose from muscle + bonus - damage.
+	auto recompose_cell = [&](int k, int j) -> float {
+		const float s_norm = static_cast<float>(k)
+				/ std::max(1.0f, static_cast<float>(axial_segments - 1));
+		const float s_k = s_norm * total_arc;
+		const float muscle = _eval_muscle(s_k, j);
+		const float bonus = _eval_zone_friction_bonus(s_k, j);
+		const float dmg = damage[k * angular_sectors + j];
+		float m = 1.0f + muscle * muscle_friction_gain + bonus
+				- dmg * damage_friction_loss;
+		if (m < 0.0f) m = 0.0f;
+		return m;
+	};
+	const float a = recompose_cell(k0, j0);
+	const float b = recompose_cell(k1, j0);
+	const float c = recompose_cell(k0, j1);
+	const float d = recompose_cell(k1, j1);
+	const float top = a + (b - a) * fk;
+	const float bot = c + (d - c) * fk;
+	return top + (bot - top) * fj;
+}
+
+void TunnelStateIntegrator::set_external_wall_perturbation(int p_k, int p_j, float p_delta) {
+	if (axial_segments < 2 || angular_sectors < 2) return;
+	if (p_k < 0 || p_k >= axial_segments) return;
+	if (p_j < 0 || p_j >= angular_sectors) return;
+	const int idx = p_k * angular_sectors + p_j;
+	if (idx < 0 || idx >= (int)external_wall_perturbation.size()) return;
+	external_wall_perturbation[idx] += p_delta;
+}
+
+float TunnelStateIntegrator::sample_axial_surface_velocity(float p_s) const {
+	(void)p_s;
+	return 0.0f; // 5G concern
+}
+
 void TunnelStateIntegrator::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure", "axial_segments", "angular_sectors",
 								  "rest_radius_per_cell", "tunnel_state_texture",
@@ -436,6 +565,16 @@ void TunnelStateIntegrator::_bind_methods() {
 			&TunnelStateIntegrator::get_angular_sectors);
 	ClassDB::bind_method(D_METHOD("set_dynamic_wall_radius_for_test", "k", "j", "r"),
 			&TunnelStateIntegrator::set_dynamic_wall_radius_for_test);
+
+	// 5F.B.C — type-3 canal-wall contact accessors.
+	ClassDB::bind_method(D_METHOD("sample_dynamic_wall_radius", "s", "theta"),
+			&TunnelStateIntegrator::sample_dynamic_wall_radius);
+	ClassDB::bind_method(D_METHOD("sample_friction_mult", "s", "theta"),
+			&TunnelStateIntegrator::sample_friction_mult);
+	ClassDB::bind_method(D_METHOD("set_external_wall_perturbation", "k", "j", "delta"),
+			&TunnelStateIntegrator::set_external_wall_perturbation);
+	ClassDB::bind_method(D_METHOD("sample_axial_surface_velocity", "s"),
+			&TunnelStateIntegrator::sample_axial_surface_velocity);
 
 	BIND_ENUM_CONSTANT(MODE_WALL_RADIAL_VELOCITY);
 	BIND_ENUM_CONSTANT(MODE_FRICTION_MULT);
