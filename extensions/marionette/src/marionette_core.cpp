@@ -38,6 +38,13 @@ void MarionetteCore::_physics_process(double p_delta) {
 	// Frame-level snapshot per the audit doc; per-substep granularity is a
 	// follow-up if visible quality requires.
 	snapshot_parent_bases();
+
+	// Slice P10.2-min — dispatch hook. Runs AFTER the parent-basis snapshot
+	// per the slice prompt's ordering constraint. No-op body in this slice;
+	// the per-bone read happens inside MarionetteBone::_integrate_forces.
+	// Future composer (P10.1) plugs world-pos → anatomical conversion here.
+	apply_pin_anchors();
+
 	// Slice 6 — march effective strengths toward requested at
 	// 1.0 / strength_ramp_duration per second on increases; drops are
 	// already snapped at set-time.
@@ -359,6 +366,78 @@ void MarionetteCore::step_body_rhythm_phase(double p_delta) {
 	}
 }
 
+void MarionetteCore::add_pin_anchor(const StringName &p_bone_name, const Vector3 &p_world_pos, float p_weight) {
+	// Slice P10.2-min — one anchor per bone (re-add replaces). Negative
+	// weight makes the spring repel rather than pull — pathological but
+	// not catastrophic, so a warning instead of a clamp. Zero weight is
+	// legal: same as `remove_pin_anchor` in effect, but the entry stays
+	// resident so subsequent reads find it.
+	if (p_weight < 0.0f) {
+		UtilityFunctions::push_warning(
+				"MarionetteCore::add_pin_anchor: negative weight produces repulsion (got ", p_weight, ")");
+	}
+	PinAnchor anchor;
+	anchor.bone_name = p_bone_name;
+	anchor.world_pos = p_world_pos;
+	anchor.weight = p_weight;
+	pin_anchors[p_bone_name] = anchor;
+}
+
+void MarionetteCore::remove_pin_anchor(const StringName &p_bone_name) {
+	pin_anchors.erase(p_bone_name);
+}
+
+void MarionetteCore::clear_pin_anchors() {
+	pin_anchors.clear();
+}
+
+int MarionetteCore::get_pin_anchor_count() const {
+	return static_cast<int>(pin_anchors.size());
+}
+
+bool MarionetteCore::has_pin_anchor(const StringName &p_bone_name) const {
+	return pin_anchors.find(p_bone_name) != pin_anchors.end();
+}
+
+Vector3 MarionetteCore::get_pin_anchor_world_pos(const StringName &p_bone_name) const {
+	const HashMap<StringName, PinAnchor>::ConstIterator it = pin_anchors.find(p_bone_name);
+	if (it == pin_anchors.end()) {
+		return Vector3();
+	}
+	return it->value.world_pos;
+}
+
+float MarionetteCore::get_pin_anchor_weight(const StringName &p_bone_name) const {
+	const HashMap<StringName, PinAnchor>::ConstIterator it = pin_anchors.find(p_bone_name);
+	if (it == pin_anchors.end()) {
+		return 0.0f;
+	}
+	return it->value.weight;
+}
+
+Vector3 MarionetteCore::compute_pin_force(const StringName &p_bone_name, const Vector3 &p_bone_world_pos) const {
+	// Slice P10.2-min — pure derivation: `F = weight × (world_pos −
+	// bone_world_pos)`. Spring in world space, soft target. Returns zero
+	// when the bone has no pin so callers (the per-bone integrator) can
+	// unconditionally apply the result.
+	const HashMap<StringName, PinAnchor>::ConstIterator it = pin_anchors.find(p_bone_name);
+	if (it == pin_anchors.end()) {
+		return Vector3();
+	}
+	const PinAnchor &a = it->value;
+	return (a.world_pos - p_bone_world_pos) * a.weight;
+}
+
+void MarionetteCore::apply_pin_anchors() {
+	// Slice P10.2-min — intentional no-op. The per-bone read site is in
+	// `MarionetteBone::_integrate_forces` (reads `compute_pin_force` once
+	// per tick, applies as `apply_central_force`). This method exists as
+	// the dispatch hook the spec ordering requires (between parent-basis
+	// snapshot and SPD target dispatch). Full-composer slice (P10.1+)
+	// plugs world-pos → anatomical conversion here so the per-bone path
+	// only needs to read `bone_targets`.
+}
+
 void MarionetteCore::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("hello"), &MarionetteCore::hello);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &MarionetteCore::tick);
@@ -456,6 +535,25 @@ void MarionetteCore::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("body_rhythm_cycle_completed",
 			PropertyInfo(Variant::INT, "cycle_index")));
+
+	// Slice P10.2-min — PinAnchor primitive. The GDScript wrapper
+	// (Marionette.gd) forwards these through to its `_ensure_core()`
+	// instance; the per-bone read site is `MarionetteBone::_integrate_forces`.
+	ClassDB::bind_method(D_METHOD("add_pin_anchor", "bone_name", "world_pos", "weight"),
+			&MarionetteCore::add_pin_anchor);
+	ClassDB::bind_method(D_METHOD("remove_pin_anchor", "bone_name"),
+			&MarionetteCore::remove_pin_anchor);
+	ClassDB::bind_method(D_METHOD("clear_pin_anchors"), &MarionetteCore::clear_pin_anchors);
+	ClassDB::bind_method(D_METHOD("get_pin_anchor_count"), &MarionetteCore::get_pin_anchor_count);
+	ClassDB::bind_method(D_METHOD("has_pin_anchor", "bone_name"),
+			&MarionetteCore::has_pin_anchor);
+	ClassDB::bind_method(D_METHOD("get_pin_anchor_world_pos", "bone_name"),
+			&MarionetteCore::get_pin_anchor_world_pos);
+	ClassDB::bind_method(D_METHOD("get_pin_anchor_weight", "bone_name"),
+			&MarionetteCore::get_pin_anchor_weight);
+	ClassDB::bind_method(D_METHOD("compute_pin_force", "bone_name", "bone_world_pos"),
+			&MarionetteCore::compute_pin_force);
+	ClassDB::bind_method(D_METHOD("apply_pin_anchors"), &MarionetteCore::apply_pin_anchors);
 }
 
 } // namespace godot

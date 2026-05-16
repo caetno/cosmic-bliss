@@ -15,6 +15,18 @@ namespace godot {
 
 class MarionetteBone;
 
+// Slice P10.2-min — minimum-viable pin anchor primitive. Stores a per-bone
+// world-space pull target; consumed by `MarionetteBone::_integrate_forces`
+// as a soft world-space pull force (spring with stiffness = `weight`,
+// units N/m). One anchor per bone keyed by anatomical name — the full
+// composer (P10.1 / P10.3+) will read from this same map; this slice ships
+// only the data structure + dispatch hook, no IK.
+struct PinAnchor {
+	StringName bone_name;
+	Vector3 world_pos;
+	float weight = 100.0f;
+};
+
 // Phase 2.0 scaffold: proves the GDScript -> C++ bridge.
 // Phase 5 Slice 3a: per-bone anatomical target cache. `Marionette.gd`
 // forwards `set_bone_target(...)` once per change; slice 3b's
@@ -165,6 +177,46 @@ public:
 	// function of (frequency, current phase, delta).
 	void step_body_rhythm_phase(double p_delta);
 
+	// Slice P10.2-min — PinAnchor primitive. The full P10 composer (IK
+	// soup, posture priors, engagement pump) is deferred; this slice ships
+	// the ground-floor data structure + dispatch hook + per-bone read site
+	// so the ragdoll-under-tension scenario (05-14-03 §1) can wire wrist /
+	// ankle ties before the composer lands.
+	//
+	// One anchor per bone (keyed by anatomical name). Re-adding the same
+	// bone replaces the prior anchor's `world_pos` / `weight`. The
+	// blend-vs-overwrite question raised in the slice prompt is resolved
+	// in favor of "soft world-space pull force" — see
+	// `MarionetteBone::_integrate_forces` for the application site. Pins
+	// do NOT write into `bone_targets` (the anatomical-angle slot), since
+	// the world_pos → anatomical conversion needs IK (P10.1) which is out
+	// of slice scope. The pin's effect is a per-tick central force on the
+	// bone body: `F = weight × (world_pos − bone_world_pos)` — a Hookean
+	// spring in world space, soft target per architectural commitment #2.
+	void add_pin_anchor(const StringName &p_bone_name, const Vector3 &p_world_pos, float p_weight);
+	void remove_pin_anchor(const StringName &p_bone_name);
+	void clear_pin_anchors();
+	int get_pin_anchor_count() const;
+	bool has_pin_anchor(const StringName &p_bone_name) const;
+	Vector3 get_pin_anchor_world_pos(const StringName &p_bone_name) const;
+	float get_pin_anchor_weight(const StringName &p_bone_name) const;
+
+	// Test seam — pure-math derivation of the per-tick pull force given a
+	// bone's current world position + the stored anchor. Returns
+	// `weight × (world_pos − bone_world_pos)`. Identity behavior when the
+	// bone has no pin: returns Vector3() (zero). Bindable for tests that
+	// can't spin up a live physics tick.
+	Vector3 compute_pin_force(const StringName &p_bone_name, const Vector3 &p_bone_world_pos) const;
+
+	// Slice P10.2-min — dispatch hook, called from `_physics_process` after
+	// `snapshot_parent_bases` and before `step_strength_ramps`. No-op in
+	// this slice; the per-bone integrator reads the pin anchor map
+	// directly from `MarionetteBone::_integrate_forces`. The hook exists
+	// so the full composer (P10.1+) has a fixed seam to plug the
+	// world-pos → anatomical conversion into without churning the call
+	// site.
+	void apply_pin_anchors();
+
 protected:
 	static void _bind_methods();
 
@@ -202,6 +254,11 @@ private:
 	float body_rhythm_frequency = 0.4f; // Hz.
 	double body_rhythm_phase = 0.0;     // Radians, [0, TAU).
 	int64_t body_rhythm_cycle_index = 0;
+
+	// Slice P10.2-min — one anchor per bone (re-add replaces). Read once
+	// per physics tick from MarionetteBone's integrator; cheap HashMap
+	// lookup keyed by anatomical name (same key as `bone_targets`).
+	HashMap<StringName, PinAnchor> pin_anchors;
 };
 
 } // namespace godot

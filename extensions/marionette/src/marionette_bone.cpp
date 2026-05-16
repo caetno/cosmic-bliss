@@ -306,6 +306,23 @@ void MarionetteBone::_integrate_forces(PhysicsDirectBodyState3D *p_state) {
 			}
 		}
 	}
+
+	// Slice P10.2-min — pin anchor pull. Soft world-space spring:
+	// `F = weight × (world_pos − bone_world_pos)`. The bone's authoritative
+	// world position is `this_world.origin` (snapshotted at the top of this
+	// callback — no extra `get_global_transform()` read, satisfying the
+	// snapshot-discipline rule). `compute_pin_force` returns zero for bones
+	// without a pin, so the unconditional apply is cheap (one HashMap miss
+	// + a zero-magnitude force on Jolt). The pin coexists with SPD: SPD
+	// continues to drive anatomical angle; the pin biases the bone's
+	// translation toward `world_pos`. Soft target per Phase 10 commitment
+	// #2 (composer feeds SPD as soft targets, not hard constraints).
+	if (core_ptr != nullptr) {
+		const Vector3 pin_force = core_ptr->compute_pin_force(anatomical_name, this_world.origin);
+		if (pin_force != Vector3()) {
+			p_state->apply_central_force(pin_force);
+		}
+	}
 }
 
 void MarionetteBone::_bind_methods() {

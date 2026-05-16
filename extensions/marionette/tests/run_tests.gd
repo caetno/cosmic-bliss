@@ -165,6 +165,12 @@ func _init() -> void:
 		_test_marionette_core_body_rhythm_cycle_signal_fires_per_cycle,
 		_test_marionette_core_body_rhythm_frequency_change_does_not_snap_phase,
 		_test_marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles,
+		_test_pin_anchor_count_round_trip,
+		_test_pin_anchor_overwrite_on_re_add,
+		_test_pin_anchor_force_pulls_toward_world_pos,
+		_test_pin_anchor_weight_scales_force_linearly,
+		_test_clear_pin_anchors_releases,
+		_test_remove_pin_anchor_one_at_a_time,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -4692,3 +4698,181 @@ func _test_marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles() -> 
 		return _fail("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles",
 				"indices=%s, expected [1,2,3]" % str(_rhythm_signal_indices))
 	return _ok("marionette_core_body_rhythm_high_freq_low_fps_no_dropped_cycles")
+
+
+# ---------- PinAnchor primitive (Slice P10.2-min) -------------------------
+# These tests run directly against MarionetteCore (no live SceneTree, no
+# physics step) using `compute_pin_force` as the per-tick math seam. The
+# physical 5cm-convergence assertion the slice prompt mentioned would need
+# a live MarionetteBone + PhysicalBoneSimulator3D, which exceeds the
+# project's "test scenes need explicit confirmation" rule — flagged in
+# the slice report for a follow-up demo-scene slice.
+
+func _test_pin_anchor_count_round_trip() -> bool:
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("pin_anchor_count_round_trip", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	if int(core.call(&"get_pin_anchor_count")) != 0:
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "initial count != 0")
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(1.0, 0.0, 0.0), 100.0)
+	if int(core.call(&"get_pin_anchor_count")) != 1:
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "count != 1 after first add")
+	if not bool(core.call(&"has_pin_anchor", &"LeftWrist")):
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "has_pin_anchor(LeftWrist) returned false")
+	if bool(core.call(&"has_pin_anchor", &"RightWrist")):
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "has_pin_anchor(RightWrist) returned true unexpectedly")
+	core.call(&"add_pin_anchor", &"RightWrist", Vector3(-1.0, 0.0, 0.0), 50.0)
+	if int(core.call(&"get_pin_anchor_count")) != 2:
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "count != 2 after second add")
+	# Field round-trips.
+	var lw_pos: Vector3 = core.call(&"get_pin_anchor_world_pos", &"LeftWrist")
+	if lw_pos != Vector3(1.0, 0.0, 0.0):
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "LeftWrist world_pos round-trip: got %s" % lw_pos)
+	var rw_w: float = core.call(&"get_pin_anchor_weight", &"RightWrist")
+	if absf(rw_w - 50.0) > 1.0e-6:
+		core.free()
+		return _fail("pin_anchor_count_round_trip", "RightWrist weight round-trip: got %f" % rw_w)
+	core.free()
+	return _ok("pin_anchor_count_round_trip")
+
+
+func _test_pin_anchor_overwrite_on_re_add() -> bool:
+	# Per slice spec: one anchor per bone, re-adding replaces. This pins
+	# the "no duplicate anchors per bone" invariant.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("pin_anchor_overwrite_on_re_add", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(1.0, 0.0, 0.0), 100.0)
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(2.0, 3.0, 4.0), 25.0)
+	if int(core.call(&"get_pin_anchor_count")) != 1:
+		core.free()
+		return _fail("pin_anchor_overwrite_on_re_add", "count != 1 after re-add")
+	var pos: Vector3 = core.call(&"get_pin_anchor_world_pos", &"LeftWrist")
+	if pos != Vector3(2.0, 3.0, 4.0):
+		core.free()
+		return _fail("pin_anchor_overwrite_on_re_add", "world_pos not overwritten: got %s" % pos)
+	var w: float = core.call(&"get_pin_anchor_weight", &"LeftWrist")
+	if absf(w - 25.0) > 1.0e-6:
+		core.free()
+		return _fail("pin_anchor_overwrite_on_re_add", "weight not overwritten: got %f" % w)
+	core.free()
+	return _ok("pin_anchor_overwrite_on_re_add")
+
+
+func _test_pin_anchor_force_pulls_toward_world_pos() -> bool:
+	# `compute_pin_force` is the per-tick math seam — the bone's integrator
+	# calls it with its current world position and applies the result as a
+	# central force. The vector must point from the bone TOWARD the anchor
+	# (sign convention `(world_pos − bone_world_pos)`), not away.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("pin_anchor_force_pulls_toward_world_pos", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(1.0, 0.0, 0.0), 50.0)
+	# Bone at origin; anchor 1m to the +X side at weight 50 → F = (1, 0, 0) × 50.
+	var f: Vector3 = core.call(&"compute_pin_force", &"LeftWrist", Vector3.ZERO)
+	var expected := Vector3(50.0, 0.0, 0.0)
+	if not _vec_near(f, expected, 1.0e-6):
+		core.free()
+		return _fail("pin_anchor_force_pulls_toward_world_pos",
+				"force=%s, expected %s" % [f, expected])
+	# Bone past the anchor on +X (bone_world = (2,0,0)) → restoring force
+	# along −X with magnitude 50.
+	var f2: Vector3 = core.call(&"compute_pin_force", &"LeftWrist", Vector3(2.0, 0.0, 0.0))
+	var expected2 := Vector3(-50.0, 0.0, 0.0)
+	if not _vec_near(f2, expected2, 1.0e-6):
+		core.free()
+		return _fail("pin_anchor_force_pulls_toward_world_pos",
+				"past-anchor force=%s, expected %s" % [f2, expected2])
+	# Absent bone → zero force (sentinel, lets the per-bone integrator
+	# unconditionally apply).
+	var f3: Vector3 = core.call(&"compute_pin_force", &"RightWrist", Vector3.ZERO)
+	if f3 != Vector3.ZERO:
+		core.free()
+		return _fail("pin_anchor_force_pulls_toward_world_pos",
+				"absent-bone force=%s, expected ZERO" % f3)
+	core.free()
+	return _ok("pin_anchor_force_pulls_toward_world_pos")
+
+
+func _test_pin_anchor_weight_scales_force_linearly() -> bool:
+	# Weight is the spring stiffness (N/m). Force at fixed position error
+	# must scale linearly with weight. Pins the "weight=10 vs weight=100
+	# convergence rate differs accordingly" requirement at the math seam —
+	# rate ratio in a physical sim follows the force ratio at fixed error.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("pin_anchor_weight_scales_force_linearly", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bone_pos := Vector3.ZERO
+	var anchor_pos := Vector3(1.0, 0.0, 0.0)
+	core.call(&"add_pin_anchor", &"LeftWrist", anchor_pos, 10.0)
+	var f_low: Vector3 = core.call(&"compute_pin_force", &"LeftWrist", bone_pos)
+	core.call(&"add_pin_anchor", &"LeftWrist", anchor_pos, 100.0)
+	var f_high: Vector3 = core.call(&"compute_pin_force", &"LeftWrist", bone_pos)
+	core.free()
+	if absf(f_low.length() - 10.0) > 1.0e-6:
+		return _fail("pin_anchor_weight_scales_force_linearly",
+				"low-weight magnitude=%f, expected 10" % f_low.length())
+	if absf(f_high.length() - 100.0) > 1.0e-6:
+		return _fail("pin_anchor_weight_scales_force_linearly",
+				"high-weight magnitude=%f, expected 100" % f_high.length())
+	if absf(f_high.length() / f_low.length() - 10.0) > 1.0e-6:
+		return _fail("pin_anchor_weight_scales_force_linearly",
+				"ratio=%f, expected 10" % (f_high.length() / f_low.length()))
+	return _ok("pin_anchor_weight_scales_force_linearly")
+
+
+func _test_clear_pin_anchors_releases() -> bool:
+	# After clear_pin_anchors, the per-bone read site must see zero force
+	# (sentinel) — the bone "returns to neutral SPD behavior."
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("clear_pin_anchors_releases", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(1.0, 0.0, 0.0), 100.0)
+	core.call(&"add_pin_anchor", &"RightWrist", Vector3(-1.0, 0.0, 0.0), 100.0)
+	core.call(&"clear_pin_anchors")
+	if int(core.call(&"get_pin_anchor_count")) != 0:
+		core.free()
+		return _fail("clear_pin_anchors_releases", "count != 0 after clear")
+	if bool(core.call(&"has_pin_anchor", &"LeftWrist")):
+		core.free()
+		return _fail("clear_pin_anchors_releases", "LeftWrist still present after clear")
+	var f: Vector3 = core.call(&"compute_pin_force", &"LeftWrist", Vector3.ZERO)
+	if f != Vector3.ZERO:
+		core.free()
+		return _fail("clear_pin_anchors_releases", "force=%s after clear, expected ZERO" % f)
+	core.free()
+	return _ok("clear_pin_anchors_releases")
+
+
+func _test_remove_pin_anchor_one_at_a_time() -> bool:
+	# `remove_pin_anchor` drops a single entry; siblings survive. Out-of-
+	# set removes are a no-op (defensive — the GDScript wrapper forwards
+	# every name from gameplay without filtering).
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("remove_pin_anchor_one_at_a_time", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	core.call(&"add_pin_anchor", &"LeftWrist", Vector3(1.0, 0.0, 0.0), 100.0)
+	core.call(&"add_pin_anchor", &"RightWrist", Vector3(-1.0, 0.0, 0.0), 100.0)
+	core.call(&"remove_pin_anchor", &"LeftWrist")
+	if int(core.call(&"get_pin_anchor_count")) != 1:
+		core.free()
+		return _fail("remove_pin_anchor_one_at_a_time", "count != 1 after one remove")
+	if bool(core.call(&"has_pin_anchor", &"LeftWrist")):
+		core.free()
+		return _fail("remove_pin_anchor_one_at_a_time", "LeftWrist still present after remove")
+	if not bool(core.call(&"has_pin_anchor", &"RightWrist")):
+		core.free()
+		return _fail("remove_pin_anchor_one_at_a_time", "RightWrist removed unexpectedly")
+	# Out-of-set remove is a no-op.
+	core.call(&"remove_pin_anchor", &"LeftAnkle")
+	if int(core.call(&"get_pin_anchor_count")) != 1:
+		core.free()
+		return _fail("remove_pin_anchor_one_at_a_time", "out-of-set remove perturbed count")
+	core.free()
+	return _ok("remove_pin_anchor_one_at_a_time")

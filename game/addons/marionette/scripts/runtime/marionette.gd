@@ -900,6 +900,103 @@ func get_hip_nudge_strength_threshold() -> float:
 	return core.call(&"get_hip_nudge_strength_threshold")
 
 
+# --- PinAnchor primitive (Slice P10.2-min) --------------------------------
+# Hard pin: one anchor per bone (re-add replaces). Implemented as a soft
+# world-space spring pull (`F = weight × (world_pos − bone_world_pos)`) on
+# the bone body inside `MarionetteBone::_integrate_forces`. SPD continues
+# to drive anatomical angle; the pin biases translation. The fuller P10
+# composer (IK soup, posture priors, engagement pump) will revisit the
+# blend-vs-overwrite question — until then this primitive is sufficient
+# for the wrist / ankle ties in 05-14-03 §1.
+
+## Adds (or replaces) a world-space pin anchor on `bone`. `weight` is the
+## spring stiffness in N/m: default 100 gives a stiff pull, smaller values
+## let SPD recovery dominate. Bone name uses the canonical anatomical key
+## (the same key `set_bone_target` uses).
+func add_pin_anchor(bone: StringName, world_pos: Vector3, weight: float = 100.0) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"add_pin_anchor", bone, world_pos, weight)
+
+
+## Removes the pin anchor on `bone` (if any). No-op when absent.
+func remove_pin_anchor(bone: StringName) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"remove_pin_anchor", bone)
+
+
+## Removes every pin anchor. Used at scene teardown / overlay swap.
+func clear_pin_anchors() -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"clear_pin_anchors")
+
+
+## Returns the number of active pin anchors. Useful for tests / inspectors.
+func get_pin_anchor_count() -> int:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0
+	return core.call(&"get_pin_anchor_count")
+
+
+# --- Body rhythm clock (Mar-I14 / P7.10) -----------------------------------
+# Single source of truth for cyclic-evaluator time. `MarionetteCore` (C++)
+# owns the integrator in `_physics_process`; this wrapper exposes get/set
+# forwarders and re-emits the per-cycle signal to GDScript consumers.
+# Reverie writes `body_rhythm_frequency` from arousal; TT `RhythmSyncedProbe`
+# reads `body_rhythm_phase`. Phase is INTEGRATED — frequency changes do not
+# snap the phase. See CLAUDE.md §14, Marionette_plan.md §P7.10.
+
+## Emitted once per cycle completion (when `body_rhythm_phase` wraps past
+## TAU). `cycle_index` is monotonic across the session. Re-emitted from the
+## C++ MarionetteCore signal of the same name.
+signal body_rhythm_cycle_completed(cycle_index: int)
+
+
+## Sets the body rhythm frequency in Hz. Negative values clamp to 0 in C++
+## (with a logged warning). Reverie's arousal-axis output writes here.
+func set_body_rhythm_frequency(hz: float) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"set_body_rhythm_frequency", hz)
+
+
+func get_body_rhythm_frequency() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0.4
+	return core.call(&"get_body_rhythm_frequency")
+
+
+## Returns the current body rhythm phase in radians, [0, TAU). Consumers
+## (cyclic evaluator, traveling-wave evaluator, TT `RhythmSyncedProbe`)
+## read this as their time argument. Float on the GDScript side — the C++
+## storage is `double` to avoid drift over long sessions; the cast is
+## acceptable for the cyclic-evaluator step where ~1 ULP at this magnitude
+## is well below visible motion threshold.
+func get_body_rhythm_phase() -> float:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0.0
+	return core.call(&"get_body_rhythm_phase")
+
+
+## Monotonic cycle counter, mirrors the value emitted in
+## `body_rhythm_cycle_completed`. Useful for "every N cycles" gating without
+## hooking the signal.
+func get_body_rhythm_cycle_index() -> int:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0
+	return core.call(&"get_body_rhythm_cycle_index")
+
+
 # Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns
 # null (with a one-shot warning) when the GDExtension hasn't loaded the
 # class — keeps tooling that calls set_bone_target() safe in pre-build
@@ -918,7 +1015,19 @@ func _ensure_core() -> Object:
 		var node: Node = _core
 		node.name = String(_CORE_NAME)
 		add_child(node)
+	# Mar-I14 — re-emit the C++ rhythm cycle signal on this Marionette
+	# instance so GDScript consumers can `connect` without reaching into
+	# the hidden core child. Novel pattern for this file (no prior
+	# C++→GDScript signal forwarders exist); matches the
+	# scene-tree-visible API surface of the other forwarders above.
+	if _core.has_signal(&"body_rhythm_cycle_completed"):
+		_core.connect(&"body_rhythm_cycle_completed",
+				Callable(self, "_on_core_body_rhythm_cycle_completed"))
 	return _core
+
+
+func _on_core_body_rhythm_cycle_completed(cycle_index: int) -> void:
+	body_rhythm_cycle_completed.emit(cycle_index)
 
 
 # --- internals ---

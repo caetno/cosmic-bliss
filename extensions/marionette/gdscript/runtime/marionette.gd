@@ -900,6 +900,50 @@ func get_hip_nudge_strength_threshold() -> float:
 	return core.call(&"get_hip_nudge_strength_threshold")
 
 
+# --- PinAnchor primitive (Slice P10.2-min) --------------------------------
+# Hard pin: one anchor per bone (re-add replaces). Implemented as a soft
+# world-space spring pull (`F = weight × (world_pos − bone_world_pos)`) on
+# the bone body inside `MarionetteBone::_integrate_forces`. SPD continues
+# to drive anatomical angle; the pin biases translation. The fuller P10
+# composer (IK soup, posture priors, engagement pump) will revisit the
+# blend-vs-overwrite question — until then this primitive is sufficient
+# for the wrist / ankle ties in 05-14-03 §1.
+
+## Adds (or replaces) a world-space pin anchor on `bone`. `weight` is the
+## spring stiffness in N/m: default 100 gives a stiff pull, smaller values
+## let SPD recovery dominate. Bone name uses the canonical anatomical key
+## (the same key `set_bone_target` uses).
+func add_pin_anchor(bone: StringName, world_pos: Vector3, weight: float = 100.0) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"add_pin_anchor", bone, world_pos, weight)
+
+
+## Removes the pin anchor on `bone` (if any). No-op when absent.
+func remove_pin_anchor(bone: StringName) -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"remove_pin_anchor", bone)
+
+
+## Removes every pin anchor. Used at scene teardown / overlay swap.
+func clear_pin_anchors() -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"clear_pin_anchors")
+
+
+## Returns the number of active pin anchors. Useful for tests / inspectors.
+func get_pin_anchor_count() -> int:
+	var core: Object = _ensure_core()
+	if core == null:
+		return 0
+	return core.call(&"get_pin_anchor_count")
+
+
 # --- Body rhythm clock (Mar-I14 / P7.10) -----------------------------------
 # Single source of truth for cyclic-evaluator time. `MarionetteCore` (C++)
 # owns the integrator in `_physics_process`; this wrapper exposes get/set
