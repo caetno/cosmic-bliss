@@ -19,14 +19,15 @@ extends Node3D
 #   - Wheel    : zoom.
 #
 # Pose-capture conversion path:
-#   The inverse of `AnatomicalPose.bone_local_rotation()` (an intrinsic
-#   X→Y→Z Euler in the anatomical-basis frame) is not exposed in GDScript
-#   today. Per the slice brief: degraded fallback ships now. Pose capture
-#   currently calls `set_bone_target(name, Vector3.ZERO)` for every bone,
-#   which clears overrides back to the rest pose (still useful for testing
-#   that pose-target overrides DO survive when set). True capture-from-current
-#   awaits a `MarionetteBone::current_anatomical_pose()` binding — flagged in
-#   the report.
+#   `Marionette.snapshot_pose_to_targets()` runs the inverse of
+#   `AnatomicalPose.bone_local_rotation()` per-bone (intrinsic X→Y→Z Euler
+#   decomposition in the anatomical-basis frame) and writes the result into
+#   the SPD target slot for every POWERED bone. Order on RMB-release is
+#   snapshot-THEN-clear-pin: the snapshot runs while the hard pin is still
+#   active so the captured pose includes the pin's contribution (i.e., the
+#   pose the user dragged to); the pin clears one beat later, and SPD then
+#   fights to hold that exact pose with no drift between snapshot and pin
+#   removal.
 
 const _CAMERA_TARGET_FALLBACK: Vector3 = Vector3(0.0, 1.0, 0.0)
 const _ORBIT_DIST_DEFAULT: float = 3.0
@@ -250,10 +251,17 @@ func _begin_rmb(screen_pos: Vector2) -> void:
 func _end_rmb() -> void:
 	if _rmb_state.is_empty():
 		return
+	# Snapshot-THEN-clear-pin order is deliberate. The snapshot reads each
+	# bone's current world pose (via MarionetteBone::current_anatomical_pose);
+	# running it WHILE the hard pin still holds means the captured Vector3
+	# reflects "where the pin had this bone", which is what the user dragged
+	# to. Clearing the pin afterward hands control immediately to SPD, which
+	# now has the just-captured pose as its hold target — no drift window
+	# between snapshot and pin removal.
+	_capture_whole_body_pose()
 	var bone: MarionetteBone = _rmb_state.get("bone")
 	if is_instance_valid(bone):
 		_marionette.remove_pin_anchor(_anatomical_name_for(bone))
-	_capture_whole_body_pose()
 	_rmb_state.clear()
 
 
@@ -273,30 +281,19 @@ func _update_pin_for_state(state: Dictionary, weight: float) -> void:
 	_marionette.add_pin_anchor(_anatomical_name_for(bone), target_world, weight)
 
 
-# ---------- Pose capture (DEGRADED — see header) ----------
+# ---------- Pose capture ----------
 
-# Whole-body pose capture. Per the slice brief: the inverse anatomical
-# conversion (bone-local quaternion → flex/rot/abd) is not exposed in
-# GDScript. Ship the degraded variant — `set_bone_target(Vector3.ZERO)`
-# for every dynamic bone — so the user can confirm `set_bone_target`
-# overrides ARE getting through (and supervisor decides whether to add
-# the binding in a follow-up).
+# Whole-body pose capture. Delegates to MarionetteCore (via the
+# `Marionette.snapshot_pose_to_targets()` forwarder) which iterates every
+# registered POWERED bone, runs `current_anatomical_pose()` on each (inverse
+# of the SPD forward composer), and writes the result into the per-bone
+# target slot. Single C++ call replaces the prior per-bone GDScript loop.
+# KINEMATIC + UNPOWERED bones skipped by the core (their targets are
+# meaningless until they re-engage).
 func _capture_whole_body_pose() -> void:
-	if _marionette == null or _simulator == null:
+	if _marionette == null:
 		return
-	for child: Node in _simulator.get_children():
-		if not (child is MarionetteBone):
-			continue
-		var bone: MarionetteBone = child
-		var name: StringName = _anatomical_name_for(bone)
-		if name == StringName():
-			continue
-		# TODO(P10.next): replace with real capture via
-		# MarionetteBone::current_anatomical_pose() once that binding exists.
-		# Today: zero anatomical = "rest" target for the bone (matches the
-		# convention in AnatomicalPose.bone_local_rotation where input is
-		# already rest-offset-subtracted).
-		_marionette.set_bone_target(name, Vector3.ZERO)
+	_marionette.snapshot_pose_to_targets()
 
 
 # ---------- Reset / drop ----------
