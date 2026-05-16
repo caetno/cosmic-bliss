@@ -35,6 +35,8 @@ func _run() -> void:
 		"test_surface_tag_defaults",
 		# §17.1 — BodySurfaceField core (cotan-Laplacian + Cholesky + sphere test).
 		"test_surface_field_sphere_radial",
+		# §17.2 — real heat-method geodesic distance.
+		"test_surface_field_sphere_geodesic",
 	]:
 		var result: bool = await call(test_name)
 		if result:
@@ -976,6 +978,126 @@ func test_surface_field_sphere_radial() -> bool:
 
 	print("[PASS] test_surface_field_sphere_radial (raw_n=%d, welded_n=%d, w[0]=%f, w[antipode]=%f, ratio=%f)" % [
 		n, n_welded, weights[0], weights[antipode], weights[antipode] / weights[0]])
+	field.free()
+	return true
+
+
+# --- §17.2 — heat-method geodesic distance ----------------------------
+
+func test_surface_field_sphere_geodesic() -> bool:
+	const BodySurfaceFieldScript := preload("res://addons/body_field/runtime/body_surface_field.gd")
+
+	# Build a smoother sphere than §17.1's so the geodesic estimate is
+	# closer to the true π·radius. 16 segments × 8 rings ≈ 130 verts
+	# pre-weld, ≈ 100 post-weld; coarse-mesh heat-method error is
+	# bounded ~5-15%, so we'll accept antipode distance > 2.5 (against
+	# the true value π·1.0 = 3.14).
+	var sphere: SphereMesh = SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 16
+	sphere.rings = 8
+	var arrays: Array = sphere.surface_get_arrays(0)
+	if arrays.is_empty():
+		print("[FAIL] test_surface_field_sphere_geodesic: empty surface arrays")
+		return false
+
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+
+	var amesh: ArrayMesh = ArrayMesh.new()
+	var a2: Array = []
+	a2.resize(Mesh.ARRAY_MAX)
+	a2[Mesh.ARRAY_VERTEX] = verts
+	a2[Mesh.ARRAY_INDEX] = indices
+	amesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+
+	var field: Node3D = BodySurfaceFieldScript.new()
+	field.source_mesh = amesh
+	field._ensure_factor()
+	if field.factor == null:
+		print("[FAIL] test_surface_field_sphere_geodesic: factor build returned null")
+		field.free()
+		return false
+	if field.factor.chol_kind != &"dense_ll":
+		print("[FAIL] test_surface_field_sphere_geodesic: heat factor kind = %s (expected dense_ll)" % field.factor.chol_kind)
+		field.free()
+		return false
+	if field.factor.chol_poisson_kind != &"dense_ll":
+		print("[FAIL] test_surface_field_sphere_geodesic: Poisson factor kind = %s (expected dense_ll)" % field.factor.chol_poisson_kind)
+		field.free()
+		return false
+
+	var welded_verts: PackedVector3Array = field.get_source_vertices()
+	var n: int = welded_verts.size()
+
+	# Seed at welded vertex 0; the welded sphere's vert 0 is at the
+	# "north pole" because SphereMesh emits pole verts first and they
+	# all weld to the same position.
+	var seeds: PackedInt32Array = PackedInt32Array([0])
+	var phi: PackedFloat32Array = field.diffuse_geodesic(seeds)
+	if phi.size() != n:
+		print("[FAIL] test_surface_field_sphere_geodesic: phi size %d != n %d" % [phi.size(), n])
+		field.free()
+		return false
+
+	# Antipode = farthest vert from seed by 3D distance (on a unit
+	# sphere this is also the great-circle-farthest vert).
+	var antipode: int = -1
+	var d_max: float = -1.0
+	for i in range(n):
+		var d: float = welded_verts[0].distance_to(welded_verts[i])
+		if d > d_max:
+			d_max = d
+			antipode = i
+	if antipode < 0:
+		print("[FAIL] test_surface_field_sphere_geodesic: failed to find antipode")
+		field.free()
+		return false
+
+	# 1. All finite.
+	for i in range(n):
+		if not is_finite(phi[i]):
+			print("[FAIL] test_surface_field_sphere_geodesic: non-finite phi[%d]=%f" % [i, phi[i]])
+			field.free()
+			return false
+
+	# 2. Min is at the seed (after the shift), close to zero.
+	if phi[0] > 1.0e-4:
+		print("[FAIL] test_surface_field_sphere_geodesic: phi[0]=%f != 0 after shift" % phi[0])
+		field.free()
+		return false
+
+	# 3. Antipode distance is close to π on a unit sphere. Coarse-mesh
+	# heat-method error allows ~15%; require > 2.5 (true 3.14).
+	if phi[antipode] < 2.5:
+		print("[FAIL] test_surface_field_sphere_geodesic: phi[antipode=%d]=%f < 2.5 (expected ≈ π)" % [antipode, phi[antipode]])
+		field.free()
+		return false
+	if phi[antipode] > 4.0:
+		print("[FAIL] test_surface_field_sphere_geodesic: phi[antipode=%d]=%f > 4.0 (expected ≈ π)" % [antipode, phi[antipode]])
+		field.free()
+		return false
+
+	# 4. Antipode is the max — monotonicity proxy. (Strict per-pair
+	# monotonicity would also work but is sensitive to mesh layout;
+	# checking the global max-at-antipode catches gross errors.)
+	var max_idx: int = 0
+	var max_val: float = phi[0]
+	for i in range(n):
+		if phi[i] > max_val:
+			max_val = phi[i]
+			max_idx = i
+	if max_idx != antipode:
+		# Tolerate near-tie: max within 5% of antipode.
+		if phi[antipode] < 0.95 * max_val:
+			print("[FAIL] test_surface_field_sphere_geodesic: max at vert %d (%f) not antipode %d (%f)" % [
+				max_idx, max_val, antipode, phi[antipode]])
+			field.free()
+			return false
+
+	print("[PASS] test_surface_field_sphere_geodesic (n=%d, phi[antipode=%d]=%f, true_pi=%f, max_at=%d, max=%f)" % [
+		n, antipode, phi[antipode], PI, max_idx, max_val])
 	field.free()
 	return true
 

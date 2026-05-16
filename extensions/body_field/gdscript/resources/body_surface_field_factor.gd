@@ -23,7 +23,7 @@ extends Resource
 ## different `t` requires invalidating this resource.
 @export var heat_t: float = 0.0
 
-## Cholesky factor kind:
+## Heat-step Cholesky factor (`M + t·L`) kind:
 ##   "dense_ll" — `l_chol` holds the lower-triangular n*n factor.
 ##   "stub"     — factorization failed; consumers should `push_warning`
 ##                and either skip the diffuse step or fall back to b.
@@ -33,9 +33,19 @@ extends Resource
 ## when `chol_kind == "dense_ll"`; empty for stub kind.
 @export var l_chol: PackedFloat32Array = PackedFloat32Array()
 
+## §17.2 Poisson-step factor (`L + ε·M`). The cotan-Laplacian `L` is
+## rank-deficient (constant functions in its null space); `ε·M`
+## Tikhonov-regularises it. Built alongside the heat factor in
+## `BodySurfaceField._ensure_factor()`; consumed by `diffuse_geodesic`.
+@export var poisson_epsilon: float = 0.0
+@export var chol_poisson_kind: StringName = &"none"
+@export var l_chol_poisson: PackedFloat32Array = PackedFloat32Array()
+
 
 func to_solver_dict() -> Dictionary:
 	# Adapter for CholeskySolver.solve / diffuse, which want a dict.
+	# Returns the HEAT-step factor. Use `to_poisson_solver_dict` for
+	# the Poisson factor.
 	return {
 		"kind": chol_kind,
 		"n_verts": n_verts,
@@ -43,7 +53,21 @@ func to_solver_dict() -> Dictionary:
 	}
 
 
+func to_poisson_solver_dict() -> Dictionary:
+	return {
+		"kind": chol_poisson_kind,
+		"n_verts": n_verts,
+		"L_chol": l_chol_poisson,
+	}
+
+
 func from_solver_dict(d: Dictionary) -> void:
 	chol_kind = StringName(d.get("kind", "stub"))
 	n_verts = d.get("n_verts", 0)
 	l_chol = d.get("L_chol", PackedFloat32Array())
+
+
+func from_poisson_solver_dict(d: Dictionary) -> void:
+	chol_poisson_kind = StringName(d.get("kind", "stub"))
+	# n_verts must agree with the heat factor — caller ensures.
+	l_chol_poisson = d.get("L_chol", PackedFloat32Array())

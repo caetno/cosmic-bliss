@@ -174,3 +174,118 @@ static func fingerprint(vertices: PackedVector3Array, indices: PackedInt32Array)
 	ctx.update(indices.to_byte_array())
 	ctx.update(vertices.to_byte_array())
 	return ctx.finish().hex_encode()
+
+
+## Face gradients of a per-vertex scalar field `u`. Returns one Vector3
+## per triangle in the order they appear in `indices`. The classic
+## piecewise-linear formula on a triangle (i, j, k):
+##
+##   ∇u|_T = (1 / 2A) · Σ_v u_v · (N × edge_opposite_v)
+##
+## where `N` is the unit face normal and `edge_opposite_v` is the edge
+## vector NOT touching v (oriented so the right-hand rule with N matches
+## the in-plane gradient direction). Per Crane et al §3 eq 5; used by
+## the heat-method geodesic-distance pipeline (§17.2).
+static func compute_face_gradients(
+		vertices: PackedVector3Array,
+		indices: PackedInt32Array,
+		u: PackedFloat32Array
+		) -> PackedVector3Array:
+	var n_tris: int = indices.size() / 3
+	var grads: PackedVector3Array = PackedVector3Array()
+	grads.resize(n_tris)
+	for t in range(n_tris):
+		var ia: int = indices[t * 3 + 0]
+		var ib: int = indices[t * 3 + 1]
+		var ic: int = indices[t * 3 + 2]
+		var pa: Vector3 = vertices[ia]
+		var pb: Vector3 = vertices[ib]
+		var pc: Vector3 = vertices[ic]
+		var ab: Vector3 = pb - pa
+		var ac: Vector3 = pc - pa
+		var cross_v: Vector3 = ab.cross(ac)
+		var two_area: float = cross_v.length()
+		if two_area < _EPS_AREA:
+			grads[t] = Vector3.ZERO
+			continue
+		var N: Vector3 = cross_v / two_area    # unit normal
+		# Edge OPPOSITE each vertex (the edge NOT incident to v),
+		# oriented consistently CCW around the face normal.
+		# Triangle CCW order (a, b, c):
+		#   edge opp. a = c - b  (goes from b to c)
+		#   edge opp. b = a - c  (goes from c to a)
+		#   edge opp. c = b - a  (goes from a to b)
+		var e_opp_a: Vector3 = pc - pb
+		var e_opp_b: Vector3 = pa - pc
+		var e_opp_c: Vector3 = pb - pa
+		var g: Vector3 = (
+			u[ia] * N.cross(e_opp_a)
+			+ u[ib] * N.cross(e_opp_b)
+			+ u[ic] * N.cross(e_opp_c)
+		) / two_area
+		grads[t] = g
+	return grads
+
+
+## Per-vertex divergence of a per-face vector field `face_X`. Crane et
+## al §3 eq 4:
+##
+##   (∇·X)_i = 0.5 · Σ_{T ∋ i} (cot θ_1 · (e_1 · X_T) + cot θ_2 · (e_2 · X_T))
+##
+## where, for triangle T = (i, a, b), `e_1 = a - i` and `e_2 = b - i`
+## are the two edges of T adjacent to i; `θ_1` is the angle opposite
+## `e_1` (at b) and `θ_2` is the angle opposite `e_2` (at a).
+##
+## Used as the right-hand side of the Poisson solve in the heat-method
+## geodesic-distance pipeline (§17.2). Returns `PackedFloat32Array` of
+## length n_verts.
+static func compute_vertex_divergence(
+		vertices: PackedVector3Array,
+		indices: PackedInt32Array,
+		face_X: PackedVector3Array
+		) -> PackedFloat32Array:
+	var n: int = vertices.size()
+	var div: PackedFloat32Array = PackedFloat32Array()
+	div.resize(n)
+	for i in range(n):
+		div[i] = 0.0
+	var n_tris: int = indices.size() / 3
+	for t in range(n_tris):
+		var ia: int = indices[t * 3 + 0]
+		var ib: int = indices[t * 3 + 1]
+		var ic: int = indices[t * 3 + 2]
+		var pa: Vector3 = vertices[ia]
+		var pb: Vector3 = vertices[ib]
+		var pc: Vector3 = vertices[ic]
+		var X: Vector3 = face_X[t]
+		var two_area: float = (pb - pa).cross(pc - pa).length()
+		if two_area < _EPS_AREA:
+			continue
+		# Cotangents at each corner — same identity as in build():
+		# cot(angle at v) = (edge_v1 · edge_v2) / two_area.
+		var cot_a: float = (pb - pa).dot(pc - pa) / two_area
+		var cot_b: float = (pa - pb).dot(pc - pb) / two_area
+		var cot_c: float = (pa - pc).dot(pb - pc) / two_area
+
+		# Vertex ia: triangle = (ia, ib, ic).
+		#   e_1 = ib - ia (adjacent edge to next vertex); opposite angle is at ic = cot_c
+		#   e_2 = ic - ia                              ; opposite angle is at ib = cot_b
+		var e1_a: Vector3 = pb - pa
+		var e2_a: Vector3 = pc - pa
+		div[ia] += 0.5 * (cot_c * e1_a.dot(X) + cot_b * e2_a.dot(X))
+
+		# Vertex ib: triangle = (ib, ic, ia).
+		#   e_1 = ic - ib ; opposite angle at ia = cot_a
+		#   e_2 = ia - ib ; opposite angle at ic = cot_c
+		var e1_b: Vector3 = pc - pb
+		var e2_b: Vector3 = pa - pb
+		div[ib] += 0.5 * (cot_a * e1_b.dot(X) + cot_c * e2_b.dot(X))
+
+		# Vertex ic: triangle = (ic, ia, ib).
+		#   e_1 = ia - ic ; opposite angle at ib = cot_b
+		#   e_2 = ib - ic ; opposite angle at ia = cot_a
+		var e1_c: Vector3 = pa - pc
+		var e2_c: Vector3 = pb - pc
+		div[ic] += 0.5 * (cot_b * e1_c.dot(X) + cot_a * e2_c.dot(X))
+
+	return div

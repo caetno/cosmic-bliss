@@ -107,3 +107,43 @@ Sibling slice family inside body_field per `docs/marionette/Marionette_plan.md` 
 - Marionette §16 — soft-region cluster geodesic blend: fill `SurfaceSoftRegionAttachment.bake()`, swap Euclidean SDF for geodesic-on-mesh derivation.
 - §17.2 — concrete heat-method geodesic-distance pipeline (replacing the v1 Euclidean placeholder in `diffuse_geodesic`).
 - Sparse Cholesky port if kasumi body mesh size pushes the dense factor's ~100 MB up to ~hundreds of MB.
+
+---
+
+### §17.2 — Heat-method geodesic distance (Crane et al. 2013 §3)
+
+Replaces the §17.1 Euclidean placeholder in `BodySurfaceField.diffuse_geodesic` with the real Crane heat method: heat-diffuse a delta at the seed, take the unit gradient of the result (pointing away from the seed), solve a Poisson equation against its divergence, shift so the seed sits at distance 0. The result is per-vertex geodesic distance on the surface — what TT §10.4 and Marionette §16 actually need for falloff authoring.
+
+**Shipped files (modified):**
+- `extensions/body_field/gdscript/runtime/cotan_laplacian.gd` — `compute_face_gradients` (Crane §3 eq 5: piecewise-linear gradient `∇u|_T = Σ u_v · (N × edge_opposite_v) / 2A`) and `compute_vertex_divergence` (Crane §3 eq 4: cotan-weighted edge-vs-X dots summed over incident triangles).
+- `extensions/body_field/gdscript/runtime/cholesky_solver.gd` — refactored into `factorize_spd(A, n)` (low-level in-place LL^T) + `factorize_heat(L, mass, t)` (`A = M + t·L`) + `factorize_poisson(L, mass, ε)` (`A = L + ε·M`). `factorize(...)` kept as a backwards-compat alias for §17.1 callers.
+- `extensions/body_field/gdscript/resources/body_surface_field_factor.gd` — added `chol_poisson_kind`, `l_chol_poisson`, `poisson_epsilon`, plus `to_poisson_solver_dict` / `from_poisson_solver_dict` helpers. §17.1's `chol_kind`/`l_chol`/`heat_t` semantics unchanged.
+- `extensions/body_field/gdscript/runtime/body_surface_field.gd` — `_ensure_factor` now builds BOTH factors (heat + Poisson) from the same cotan-Laplacian; new `poisson_epsilon` export (default 1e-4); `diffuse_geodesic` replaced with the heat-method recipe; cache-hit check now requires both factor kinds present.
+- `extensions/body_field/tests/run_tests.gd` — new `test_surface_field_sphere_geodesic` (16×8 sphere; antipode geodesic distance must be in `[2.5, 4.0]` against the true value `π·radius = π·1 ≈ 3.14`).
+- `tools/test_body_field.sh` — **removed**, folded into the unified `tools/test.sh body_field` runner that landed in `b52c533` (top-level commit).
+
+**Decisions:**
+
+1. **Heat-method timestep `t` and Poisson regulariser `ε`.** Inherited from §17.1's `heat_t = mean_edge_length²` (Crane §3.2 rule-of-thumb). New `poisson_epsilon = 1e-4` default — small enough that the post-solve shift (`φ -= min φ`) keeps within `O(ε)` of the true Poisson solution; large enough to dominate the cotan-Laplacian's constant-function null space numerically. Both are exposed as `@export` on `BodySurfaceField` for hero-specific overrides if needed.
+
+2. **Sign convention.** Our `L` is positive-semi-definite (cotan-Laplacian stored as `L = D - W`, opposite of Crane's `L_C = W - D`). Crane writes the Poisson equation as `L_C φ = ∇·X` with his negative-semi-def `L_C`; in our convention this becomes `L φ = -∇·X`. The Poisson solve passes `-div(X)` as the RHS — load-bearing sign flip, called out in the `diffuse_geodesic` body comments to save the next maintainer the same derivation.
+
+3. **Why dense Cholesky for the Poisson factor too.** Same n²-memory tradeoff as §17.1's heat factor. Building both factors in one `_ensure_factor` call costs a second `factorize_spd` pass on n*n floats — measured cheap for the test sphere (n≈100) and acceptable for kasumi-class meshes (n≈5k). Sparse is the v1.5+ refinement when a consumer's mesh size forces it.
+
+4. **`diffuse_geodesic` is the consumer-facing API; the heat-method machinery is hidden.** Consumers (TT §10.4, Marionette §16) call `field.diffuse_geodesic([seed_idx])` and get back a per-vertex distance array. The choice of heat-method-vs-other-geodesic-algorithm is `BodySurfaceField`'s concern — consumers don't see it. Lets v1.5+ swap to a fast-marching method or exact polyhedral geodesics without a consumer API change.
+
+5. **`diffuse_geodesic` cache-hit semantics tightened.** §17.1's cache check was `chol_kind != "none"`; §17.2 promotes it to `chol_kind != "none" AND chol_poisson_kind != "none"`. Old §17.1-built saved factors (if any) will refactor on first `_ensure_factor` call — Poisson factor wasn't there to load.
+
+**Test results:**
+- `test_surface_field_sphere_geodesic` PASSES: n=130 verts (16×8 sphere mesh), `phi[antipode] = 3.0956` against true value `π = 3.1416` — **1.5% error** on this coarse mesh. Antipode is the global max (monotonic structure preserved). Seed sits at 0 after shift.
+- All 12 previous tests still pass.
+- `./tools/test.sh body_field` is now the canonical invocation. `tools/test_body_field.sh` removed.
+
+**Coordination:**
+- **TT §10.4 (rim authoring migration)** — unblocked. `SurfaceOrificeRimAttachment.bake()` can now use `field.diffuse_geodesic([rim_centroid_vertex])` for the rim-vs-body weight falloff. Authoring contract: TT-side concrete impl picks the seed vertex from the rim mesh's centroid projection onto the body mesh.
+- **Marionette §16 (soft-region geodesic blend)** — unblocked. `SurfaceSoftRegionAttachment.bake()` can compose `diffuse_geodesic([volume_primitive_center_vertex])` with the existing volume primitive to produce the cluster_blend field.
+- **§17.5 (jiggle migration)** — still uses `diffuse` (one-step heat-kernel falloff is the natural jiggle falloff), not `diffuse_geodesic`. Unchanged by §17.2.
+
+**Next:**
+- Consumer-side migration slices open per the coordination notes above.
+- §17.3 if a consumer wants extra-accurate geodesic distance — currently 1.5% error on the sphere is well within the precision any falloff authoring needs.

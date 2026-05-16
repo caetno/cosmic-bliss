@@ -20,40 +20,20 @@ class_name CholeskySolver
 const _CHOL_EPS: float = 1.0e-12
 
 
-## Factorize `A = M + t·L`. Returns an opaque dict the caller passes to
-## `solve(...)` and `diffuse(...)`. Returns `{"kind": "stub"}` on
-## non-SPD input (degenerate mesh, NaNs) — `solve(stub, b)` returns `b`
-## unchanged and pushes a warning. Callers should treat stub-kind as a
-## failure signal in tests.
-static func factorize(
-		L: PackedFloat32Array,
-		mass_diag: PackedFloat32Array,
-		t: float
-		) -> Dictionary:
-	var n: int = mass_diag.size()
-	if n <= 0 or L.size() != n * n:
-		push_error("CholeskySolver.factorize: bad dims (n=%d, |L|=%d)" % [n, L.size()])
-		return {"kind": "stub", "n_verts": n}
-
-	# Build A = M + t·L in a fresh dense buffer.
-	var A: PackedFloat32Array = PackedFloat32Array()
-	A.resize(n * n)
-	for i in range(n):
-		for j in range(n):
-			A[i * n + j] = t * L[i * n + j]
-		A[i * n + i] += mass_diag[i]
-
-	# In-place LLᵀ Cholesky. Lower-triangular result overwrites A.
-	# Standard Cholesky-Banachiewicz algorithm; symmetric input
-	# means we only read/write lower triangle plus the diagonal.
+## In-place LLᵀ Cholesky on a dense SPD matrix `A` (row-major n*n).
+## Mutates `A` in place — caller passes a buffer they're done with;
+## the lower triangle of `A` becomes the Cholesky factor on return.
+## Returns true on success; pushes a warning + returns false on
+## non-SPD input (degenerate mesh, NaNs, undamped Laplacian null
+## space).
+static func _llt_in_place(A: PackedFloat32Array, n: int) -> bool:
 	for j in range(n):
-		# Diagonal entry j.
 		var s: float = A[j * n + j]
 		for k in range(j):
 			s -= A[j * n + k] * A[j * n + k]
 		if s <= _CHOL_EPS:
-			push_warning("CholeskySolver.factorize: non-SPD at row %d (s=%f); returning stub" % [j, s])
-			return {"kind": "stub", "n_verts": n}
+			push_warning("CholeskySolver._llt_in_place: non-SPD at row %d (s=%f)" % [j, s])
+			return false
 		var d: float = sqrt(s)
 		A[j * n + j] = d
 		# Below-diagonal column j.
@@ -62,17 +42,75 @@ static func factorize(
 			for k in range(j):
 				v -= A[i * n + k] * A[j * n + k]
 			A[i * n + j] = v / d
-		# Zero out above-diagonal column j (cleanliness — we never
-		# read it during solve, but keeping it zero makes debugging
-		# easier).
+		# Zero out above-diagonal column j (cleanliness — never
+		# read during solve, but keeps debugging dumps tidy).
 		for i in range(j):
 			A[i * n + j] = 0.0
+	return true
 
-	return {
-		"kind": "dense_ll",
-		"n_verts": n,
-		"L_chol": A,
-	}
+
+## Factorize a dense SPD matrix `A` (row-major). Heat / Poisson
+## builders below call this after assembling their respective `A`.
+static func factorize_spd(A: PackedFloat32Array, n: int) -> Dictionary:
+	if A.size() != n * n or n <= 0:
+		push_error("CholeskySolver.factorize_spd: bad dims (n=%d, |A|=%d)" % [n, A.size()])
+		return {"kind": "stub", "n_verts": n}
+	if not _llt_in_place(A, n):
+		return {"kind": "stub", "n_verts": n}
+	return {"kind": "dense_ll", "n_verts": n, "L_chol": A}
+
+
+## Factorize `A = M + t·L` for the heat-method backward-Euler step.
+## `L` is the positive-semi-definite cotan-Laplacian; the addition of
+## `M` regularises the constant-function null space.
+static func factorize_heat(
+		L: PackedFloat32Array,
+		mass_diag: PackedFloat32Array,
+		t: float
+		) -> Dictionary:
+	var n: int = mass_diag.size()
+	if L.size() != n * n or n <= 0:
+		push_error("CholeskySolver.factorize_heat: bad dims (n=%d, |L|=%d)" % [n, L.size()])
+		return {"kind": "stub", "n_verts": n}
+	var A: PackedFloat32Array = PackedFloat32Array()
+	A.resize(n * n)
+	for i in range(n):
+		for j in range(n):
+			A[i * n + j] = t * L[i * n + j]
+		A[i * n + i] += mass_diag[i]
+	return factorize_spd(A, n)
+
+
+## Factorize `A = L + ε·M` for the heat-method Poisson step (§17.2).
+## `L` alone is rank-deficient (constant functions); the Tikhonov
+## regulariser `ε·M` lifts the null space without perturbing the
+## solution by more than `O(ε)` so the post-solve shift (`φ -= min φ`)
+## stays valid.
+static func factorize_poisson(
+		L: PackedFloat32Array,
+		mass_diag: PackedFloat32Array,
+		epsilon: float
+		) -> Dictionary:
+	var n: int = mass_diag.size()
+	if L.size() != n * n or n <= 0:
+		push_error("CholeskySolver.factorize_poisson: bad dims (n=%d, |L|=%d)" % [n, L.size()])
+		return {"kind": "stub", "n_verts": n}
+	var A: PackedFloat32Array = PackedFloat32Array()
+	A.resize(n * n)
+	for i in range(n):
+		for j in range(n):
+			A[i * n + j] = L[i * n + j]
+		A[i * n + i] += epsilon * mass_diag[i]
+	return factorize_spd(A, n)
+
+
+## Backwards-compat alias for §17.1 callers — `factorize` == heat factor.
+static func factorize(
+		L: PackedFloat32Array,
+		mass_diag: PackedFloat32Array,
+		t: float
+		) -> Dictionary:
+	return factorize_heat(L, mass_diag, t)
 
 
 ## Solve `(L_chol · L_cholᵀ) x = b` via forward + backward substitution.
