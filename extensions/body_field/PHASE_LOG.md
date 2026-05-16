@@ -147,3 +147,38 @@ Replaces the §17.1 Euclidean placeholder in `BodySurfaceField.diffuse_geodesic`
 **Next:**
 - Consumer-side migration slices open per the coordination notes above.
 - §17.3 if a consumer wants extra-accurate geodesic distance — currently 1.5% error on the sphere is well within the precision any falloff authoring needs.
+
+---
+
+### §17.5 — SurfaceJiggleAttachment.bake() (first consumer migration)
+
+First concrete `SurfaceAttachment` subclass — fills the §17.1 stub for `SurfaceJiggleAttachment` with real bake math. This is the body_field side of the Marionette `Marionette_plan.md` §15 amendment (2026-05-07-02) that retires Blender-authored jiggle bones in favour of Godot-side attachment resources.
+
+**Shipped files (modified):**
+- `extensions/body_field/gdscript/resources/surface_jiggle_attachment.gd` — concrete `bake()`. Resource exports: `seed_position: Vector3` (body-mesh local), `falloff_radius_m: float = 0.10`, `falloff_curve: FalloffCurve` (LINEAR / SMOOTHSTEP / GAUSSIAN, default SMOOTHSTEP). Bake: find nearest welded vertex to seed_position → `field.diffuse_geodesic([seed_idx])` → per-vertex `t = clamp(d/radius, 0, 1)` → shape by falloff curve. Output peak=1.0 at seed, zero past radius.
+- `extensions/body_field/tests/run_tests.gd` — `test_surface_jiggle_attachment_falloff`: unit sphere with attachment at north pole, radius 0.5; asserts peak=1.0 at seed, zero at antipode (geodesic ≈ π = 6.3× radius), all finite/non-negative, zero past radius, monotonic with geodesic distance.
+
+**Decisions:**
+
+1. **Geodesic falloff via `diffuse_geodesic`, not heat-kernel directly.** The §17.2 heat-method geodesic distance is the natural input — its 1.5% accuracy on a 130-vert sphere is well within visible-quality for jiggle falloff. Heat-kernel diffusion would also work (and is even cheaper — one solve instead of three), but the falloff shape is then implicit in `heat_t` which couples to the field's other consumers. Geodesic + explicit `falloff_radius_m` gives the artist a tunable they can read off the body mesh in metres.
+
+2. **Resource holds `seed_position: Vector3`, not a child Node3D's transform.** Keeps the §17.1 base class shape (SurfaceAttachment extends Resource) intact — no need to introduce a Node3D wrapper just for transform-based authoring. Authoring ergonomics: user reads the position off the body mesh viewport (temporary marker or scripted helper) and types it into the inspector. Future §17.6 may add a Node3D-driven placement helper if the read-off-viewport step proves clunky in practice; for now the Resource-only shape is simpler.
+
+3. **Three falloff curves shipped: LINEAR / SMOOTHSTEP / GAUSSIAN.** Default SMOOTHSTEP because C¹ at both ends gives natural-looking jiggle envelopes. GAUSSIAN with k=4 gives `w(t=1) ≈ 0.018` — effectively zero at the radius, smooth interior. LINEAR for artists who want a hard-edged falloff.
+
+4. **No physics in this slice.** The Marionette-side SPD particle + render-mesh additive offset stays in Marionette's lap. body_field ships only the bake (per-vertex weight); consumer reads `baked_weights` at runtime.
+
+5. **`SurfaceAttachment.weight_mode = ADDITIVE` is correct for jiggle.** Inherited default; baked weights add to the host bone's existing skin weights via Marionette's existing render-mesh additive-offset path. REPLACE mode is for rim/cluster authoring (TT §10.4, Marionette §16).
+
+**Test results:**
+- `test_surface_jiggle_attachment_falloff` PASSES: n=130 verts, w[seed]=1.0, w[antipode]=0.0, monotonic in geodesic distance, zero past radius. 14/14 tests overall.
+
+**Coordination:**
+- **Marionette §15 amendment** — fully unblocked. Inbox brief dropped: consumption pattern (one translation-only SPD particle per attachment, anchored to host_bone, render-mesh additive offset = `baked_weights × particle_displacement`); migration plan for kasumi (breast L+R + glutes L+R + belly).
+- **Kasumi hero scene migration** — Marionette + scene-edit territory. body_field ships ready; Marionette opens the slice. Requires user permission per the test-scene-edit rule.
+- **Hard-optional preserved**: body_field-absent heroes (or body_field-present heroes with empty `attachments`) keep the Blender-skeleton jiggle path bit-for-bit.
+
+**Next consumer slices (other extensions, not body_field's responsibility):**
+- Marionette §15 amendment runtime — consume `SurfaceJiggleAttachment.baked_weights` in the render-mesh additive-offset path.
+- TT §10.4 — `SurfaceOrificeRimAttachment.bake()` (rim authoring; body_field-side concrete impl analogous to this slice).
+- Marionette §16 — `SurfaceSoftRegionAttachment.bake()` (soft-region geodesic blend).

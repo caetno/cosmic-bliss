@@ -37,6 +37,8 @@ func _run() -> void:
 		"test_surface_field_sphere_radial",
 		# §17.2 — real heat-method geodesic distance.
 		"test_surface_field_sphere_geodesic",
+		# §17.5 — concrete SurfaceJiggleAttachment.bake().
+		"test_surface_jiggle_attachment_falloff",
 	]:
 		var result: bool = await call(test_name)
 		if result:
@@ -1098,6 +1100,124 @@ func test_surface_field_sphere_geodesic() -> bool:
 
 	print("[PASS] test_surface_field_sphere_geodesic (n=%d, phi[antipode=%d]=%f, true_pi=%f, max_at=%d, max=%f)" % [
 		n, antipode, phi[antipode], PI, max_idx, max_val])
+	field.free()
+	return true
+
+
+# --- §17.5 — SurfaceJiggleAttachment.bake() ---------------------------
+
+func test_surface_jiggle_attachment_falloff() -> bool:
+	const BodySurfaceFieldScript := preload("res://addons/body_field/runtime/body_surface_field.gd")
+	const SurfaceJiggleAttachmentScript := preload("res://addons/body_field/resources/surface_jiggle_attachment.gd")
+
+	# Build a smooth sphere — same setup as the §17.2 geodesic test so
+	# the per-vertex falloff inherits the same 1.5% geodesic accuracy.
+	var sphere: SphereMesh = SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 16
+	sphere.rings = 8
+	var arrays: Array = sphere.surface_get_arrays(0)
+	var amesh: ArrayMesh = ArrayMesh.new()
+	var a2: Array = []
+	a2.resize(Mesh.ARRAY_MAX)
+	a2[Mesh.ARRAY_VERTEX] = arrays[Mesh.ARRAY_VERTEX]
+	a2[Mesh.ARRAY_INDEX] = arrays[Mesh.ARRAY_INDEX]
+	amesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+
+	var field: Node3D = BodySurfaceFieldScript.new()
+	field.source_mesh = amesh
+	field._ensure_factor()
+	if field.factor == null or field.factor.chol_kind != &"dense_ll" or field.factor.chol_poisson_kind != &"dense_ll":
+		print("[FAIL] test_surface_jiggle_attachment_falloff: factor build failed")
+		field.free()
+		return false
+
+	var welded_verts: PackedVector3Array = field.get_source_vertices()
+	var n: int = welded_verts.size()
+
+	# Author a jiggle attachment at the north pole. Welded vertex 0 IS
+	# the north pole (SphereMesh emits pole verts first and they weld
+	# to the same position).
+	var att: SurfaceAttachment = SurfaceJiggleAttachmentScript.new()
+	att.attachment_name = &"test_jiggle"
+	att.host_bone = &"Chest"
+	att.seed_position = Vector3(0.0, 1.0, 0.0)   # north pole on unit sphere
+	att.falloff_radius_m = 0.5
+	att.falloff_curve = SurfaceJiggleAttachmentScript.FalloffCurve.SMOOTHSTEP
+
+	var weights: PackedFloat32Array = att.bake(field)
+	if weights.size() != n:
+		print("[FAIL] test_surface_jiggle_attachment_falloff: bake returned %d, expected %d" % [weights.size(), n])
+		field.free()
+		return false
+
+	# --- Geodesic distance from the seed, for cross-checking the falloff curve.
+	var phi: PackedFloat32Array = field.diffuse_geodesic(PackedInt32Array([0]))
+
+	# 1. Peak at the seed, weight ≈ 1.0.
+	if weights[0] < 0.95 or weights[0] > 1.01:
+		print("[FAIL] test_surface_jiggle_attachment_falloff: weights[seed]=%f (expected ≈ 1.0)" % weights[0])
+		field.free()
+		return false
+
+	# 2. Antipode (geodesic distance ≈ π = 3.14, well past radius 0.5)
+	#    must be zero.
+	var antipode: int = -1
+	var d_max: float = -1.0
+	for i in range(n):
+		var d: float = welded_verts[0].distance_to(welded_verts[i])
+		if d > d_max:
+			d_max = d
+			antipode = i
+	if antipode < 0 or weights[antipode] > 1.0e-4:
+		print("[FAIL] test_surface_jiggle_attachment_falloff: weights[antipode=%d]=%f (expected ≈ 0)" % [antipode, weights[antipode]])
+		field.free()
+		return false
+
+	# 3. All finite, non-negative.
+	for i in range(n):
+		if not is_finite(weights[i]):
+			print("[FAIL] test_surface_jiggle_attachment_falloff: non-finite weights[%d]=%f" % [i, weights[i]])
+			field.free()
+			return false
+		if weights[i] < -1.0e-6:
+			print("[FAIL] test_surface_jiggle_attachment_falloff: negative weights[%d]=%f" % [i, weights[i]])
+			field.free()
+			return false
+
+	# 4. Past the radius, weight is zero. Inside the radius, weight > 0.
+	for i in range(n):
+		if phi[i] > att.falloff_radius_m + 1.0e-3 and weights[i] > 1.0e-4:
+			print("[FAIL] test_surface_jiggle_attachment_falloff: weight at phi=%f > radius=%f is %f (should be 0)" % [phi[i], att.falloff_radius_m, weights[i]])
+			field.free()
+			return false
+		if phi[i] < att.falloff_radius_m * 0.5 and weights[i] < 1.0e-3:
+			print("[FAIL] test_surface_jiggle_attachment_falloff: weight at phi=%f < half-radius is essentially zero (%f)" % [phi[i], weights[i]])
+			field.free()
+			return false
+
+	# 5. Monotone w.r.t. geodesic distance (within numerical tolerance).
+	#    Sort vertex indices by phi; weights should be non-increasing
+	#    in the sorted order.
+	var sorted_idx: Array = []
+	sorted_idx.resize(n)
+	for i in range(n):
+		sorted_idx[i] = i
+	sorted_idx.sort_custom(func(a, b): return phi[a] < phi[b])
+	var prev_w: float = INF
+	for i in range(n):
+		var idx: int = sorted_idx[i]
+		# Allow a tiny tolerance for numerical noise from the heat
+		# method's piecewise-linear gradient field.
+		if weights[idx] > prev_w + 1.0e-3:
+			print("[FAIL] test_surface_jiggle_attachment_falloff: non-monotone — phi sorted, weight at #%d = %f > previous %f" % [i, weights[idx], prev_w])
+			field.free()
+			return false
+		prev_w = weights[idx]
+
+	print("[PASS] test_surface_jiggle_attachment_falloff (n=%d, w[seed]=%f, w[antipode]=%f, radius=%f)" % [
+		n, weights[0], weights[antipode], att.falloff_radius_m])
 	field.free()
 	return true
 

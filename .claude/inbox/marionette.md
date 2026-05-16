@@ -64,3 +64,81 @@ If the `PhysicalBoneSimulator3D` accessor for "give me the per-bone
 PhysicalBone3D" looks different from `get_simulation_bone(bi)` above,
 adjust and surface back.
 
+### 2026-05-16 body_field
+
+**§17.5 — `SurfaceJiggleAttachment` is consumable.** `bake()` is now
+concrete; the resource produces per-vertex weights from a seed position
++ falloff radius via the §17.2 heat-method geodesic distance. This
+unblocks the Marionette §15 amendment from `Marionette_plan.md` §15
+(2026-05-07-02) — the migration from Blender skeleton jiggle bones to
+Godot-side surface attachments.
+
+**Authoring contract (locked):**
+
+```
+# game/addons/body_field/resources/surface_jiggle_attachment.gd
+class_name SurfaceJiggleAttachment extends SurfaceAttachment
+
+@export var seed_position: Vector3            # body-mesh local space
+@export var host_bone: StringName             # inherited from base
+@export var falloff_radius_m: float = 0.10    # geodesic, in metres
+@export var falloff_curve: FalloffCurve = SMOOTHSTEP    # LINEAR | SMOOTHSTEP | GAUSSIAN
+@export var weight_mode: WeightMode = ADDITIVE    # inherited; ADDITIVE for jiggle
+
+# After field.bake_all_attachments() runs:
+@export var baked_weights: PackedFloat32Array    # length = field.n_verts
+```
+
+User authors a `SurfaceJiggleAttachment` resource, adds it to a
+`BodySurfaceField.attachments` slot, hits the `trigger_bake` inspector
+toggle (or runs the baker EditorScript). Per-vertex weight is shaped by
+a smoothstep (default) curve over normalized geodesic distance from the
+seed — peak 1.0 at seed, zero past `falloff_radius_m`.
+
+**Marionette-side consumption pattern (what §15-amendment needs to build):**
+
+1. **One translation-only SPD particle per `SurfaceJiggleAttachment`.**
+   Same translation-only SPD physics as the existing kasumi breast
+   jiggle (per `feedback_marionette_jiggle_state` memory + §15 spec).
+   No new physics, just relocated anchor.
+2. **Particle anchored to `host_bone`'s pose.** Each substep, the
+   particle's rest position = `skeleton.global_transform * skeleton.get_bone_global_pose(host_bone_idx) * attachment.seed_position_local`. (Or equivalent — Marionette already does this for the existing breast jiggle.)
+3. **Per-vertex render-mesh additive offset.** At render-update time,
+   for each vertex `i`: `vertex_offset[i] += baked_weights[i] * (particle_world_pos - particle_rest_pos)`. The render-mesh additive-offset path already exists for §15 jiggle (the path Marionette §15 amendment marks as STAYS LIVE as the no-body_field fallback).
+4. **Discovery: walk `BodySurfaceField.attachments`.** When body_field
+   is present and contains `SurfaceJiggleAttachment` resources, those
+   become the canonical jiggle source. The Blender-skeleton jiggle
+   path stays live for body_field-absent heroes (hard-optional
+   invariant).
+
+**Hard-optional preserved:** body_field-absent heroes use the existing
+Blender-bone jiggle path bit-for-bit. body_field-present heroes with no
+`SurfaceJiggleAttachment` resources also fall back to the Blender path
+(empty `attachments` list — no per-vertex offset). Only when BOTH a
+`BodyField` node AND `SurfaceJiggleAttachment` resources exist does the
+new path activate. Marionette §15 amendment 2026-05-07-02 documents
+this layering.
+
+**Numerics:** the geodesic falloff is exact to ~1.5% on a coarse
+130-vert sphere (§17.2 test). On kasumi's body mesh the error will be
+similar or better — well within visible-quality threshold for jiggle.
+
+**Migration (not blocking your work, but the value lands at kasumi-scene migration time):**
+
+- Kasumi breast jiggle: replace skeleton-side bones with two
+  `SurfaceJiggleAttachment` resources (L + R), seed positions read off
+  the body mesh, host bone = `Chest` (or whichever bone Marionette §15
+  uses today). The §15 acceptance test ("slap and detach, ≥ 0.6 s
+  wobble") should pass identically because the physics is unchanged —
+  only the weight derivation moves from Blender-paint to surface-field-
+  bake.
+- Glute jiggle: previously impossible because kasumi has no glute bones
+  in Blender. Add two `SurfaceJiggleAttachment` resources, host bone =
+  `Hips`, seed positions on the glutes.
+- Belly jiggle: same pattern, host bone = `Spine`, one attachment.
+
+Kasumi-scene migration requires editing the kasumi hero scene + Marionette
+consumption code, both of which are Marionette's territory (body_field
+ships only the bake math + resource definition). Body_field doesn't open
+that slice; surfaces it as ready.
+
