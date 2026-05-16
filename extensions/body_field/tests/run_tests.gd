@@ -27,6 +27,12 @@ func _run() -> void:
 		"test_flesh_data_v2_rejected",
 		"test_flesh_data_v3_weight_normalization",
 		"test_kinematic_targets_lbs",
+		# B3 — collision-layer registration + receive_external_impulse + surface tags.
+		"test_outer_face_extraction",
+		"test_collision_layer_registration",
+		"test_receive_external_impulse_split",
+		"test_receive_external_impulse_empty_table_noop",
+		"test_surface_tag_defaults",
 	]:
 		var result: bool = await call(test_name)
 		if result:
@@ -477,6 +483,374 @@ func test_kinematic_targets_lbs() -> bool:
 	if not ok:
 		return false
 	print("[PASS] test_kinematic_targets_lbs")
+	return true
+
+
+# --- B3 tests -----------------------------------------------------------
+
+func test_outer_face_extraction() -> bool:
+	# Build a 2-tet mesh that shares one face. The shared face becomes
+	# interior; all 6 other faces (3 per tet) are outer → 6 outer faces.
+	#
+	# Verts:
+	#   0 (0,0,0)  1 (1,0,0)  2 (0,1,0)  3 (0,0,1)   — tet A
+	#   4 (1,1,1)                                     — tet B's 4th vert
+	# Tet A = (0,1,2,3)
+	# Tet B = (1,2,3,4) — shares the face {1,2,3} with tet A.
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+
+	var d: Resource = FleshDataScript.new()
+	d.n_tet_verts = 5
+	d.n_tet_cells = 2
+	d.n_render_verts = 0
+	d.tet_verts = PackedFloat32Array([
+		0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0,
+		0.0, 0.0, 1.0,
+		1.0, 1.0, 1.0,
+	])
+	d.tet_cells = PackedInt32Array([0, 1, 2, 3, 1, 2, 3, 4])
+
+	d._extract_outer_faces()
+
+	if d.n_outer_faces != 6:
+		print("[FAIL] test_outer_face_extraction: n_outer_faces = %d (expected 6)" % d.n_outer_faces)
+		return false
+	if d.outer_faces.size() != 18:
+		print("[FAIL] test_outer_face_extraction: outer_faces.size() = %d (expected 18)" % d.outer_faces.size())
+		return false
+
+	# Orientation check: every outer face's normal must point AWAY from
+	# the centroid of the 5 vertices (loose proxy for "outward" — works
+	# for this convex-ish hull).
+	var centroid := Vector3.ZERO
+	for v in range(5):
+		centroid += Vector3(d.tet_verts[v * 3 + 0], d.tet_verts[v * 3 + 1], d.tet_verts[v * 3 + 2])
+	centroid /= 5.0
+	for fi in range(d.n_outer_faces):
+		var a: int = d.outer_faces[fi * 3 + 0]
+		var b: int = d.outer_faces[fi * 3 + 1]
+		var c: int = d.outer_faces[fi * 3 + 2]
+		var pa := Vector3(d.tet_verts[a * 3 + 0], d.tet_verts[a * 3 + 1], d.tet_verts[a * 3 + 2])
+		var pb := Vector3(d.tet_verts[b * 3 + 0], d.tet_verts[b * 3 + 1], d.tet_verts[b * 3 + 2])
+		var pc := Vector3(d.tet_verts[c * 3 + 0], d.tet_verts[c * 3 + 1], d.tet_verts[c * 3 + 2])
+		var nrm: Vector3 = (pb - pa).cross(pc - pa)
+		var face_centroid := (pa + pb + pc) / 3.0
+		var outward := face_centroid - centroid
+		if nrm.dot(outward) <= 0.0:
+			print("[FAIL] test_outer_face_extraction: face %d (%d,%d,%d) not outward-oriented" % [fi, a, b, c])
+			return false
+
+	# Interior face {1,2,3} must NOT appear as an outer face.
+	for fi in range(d.n_outer_faces):
+		var a: int = d.outer_faces[fi * 3 + 0]
+		var b: int = d.outer_faces[fi * 3 + 1]
+		var c: int = d.outer_faces[fi * 3 + 2]
+		var s := [a, b, c]
+		s.sort()
+		if s == [1, 2, 3]:
+			print("[FAIL] test_outer_face_extraction: interior face {1,2,3} leaked as outer")
+			return false
+
+	print("[PASS] test_outer_face_extraction")
+	return true
+
+
+func test_collision_layer_registration() -> bool:
+	# Synthetic BodyField + 2-tet mesh with shared face. _ready() should
+	# add a TetProxyBody on LAYER_BODY_PROXY with a populated
+	# ConcavePolygonShape3D + body_field_owner WeakRef meta.
+	const BodyFieldScript := preload("res://addons/body_field/runtime/body_field.gd")
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+	const LayersScript := preload("res://addons/body_field/runtime/collision_layers.gd")
+
+	var d: Resource = FleshDataScript.new()
+	d.n_tet_verts = 5
+	d.n_tet_cells = 2
+	d.n_render_verts = 0
+	d.tet_verts = PackedFloat32Array([
+		0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0,
+		0.0, 0.0, 1.0,
+		1.0, 1.0, 1.0,
+	])
+	d.tet_cells = PackedInt32Array([0, 1, 2, 3, 1, 2, 3, 4])
+	# 4-bone padded skin data (5 verts × 4 slots).
+	d.tet_skin_indices = PackedInt32Array()
+	d.tet_skin_indices.resize(20)
+	d.tet_skin_weights = PackedFloat32Array()
+	d.tet_skin_weights.resize(20)
+	for v in range(5):
+		# Vert v: bone 0 weight 1.0
+		d.tet_skin_indices[v * 4 + 0] = 0
+		d.tet_skin_weights[v * 4 + 0] = 1.0
+	d._extract_outer_faces()
+
+	var skel := Skeleton3D.new()
+	skel.add_bone("b0")
+	var root := Node3D.new()
+	get_root().add_child(root)
+	root.add_child(skel)
+
+	# Inject a local RD so _init_compute() doesn't try the global path.
+	var local_rd := RenderingServer.create_local_rendering_device()
+	var bf: Node3D = BodyFieldScript.new()
+	bf.flesh_data = d
+	bf.skeleton = skel
+	bf._set_rendering_device_for_test(local_rd)
+	root.add_child(bf)
+
+	# Find TetProxyBody.
+	var proxy: Node = bf.get_node_or_null("TetProxyBody")
+	if proxy == null:
+		print("[FAIL] test_collision_layer_registration: TetProxyBody child missing")
+		root.queue_free()
+		return false
+	if not (proxy is AnimatableBody3D):
+		print("[FAIL] test_collision_layer_registration: TetProxyBody is not AnimatableBody3D")
+		root.queue_free()
+		return false
+	var ab: AnimatableBody3D = proxy
+	if ab.collision_layer != LayersScript.LAYER_BODY_PROXY:
+		print("[FAIL] test_collision_layer_registration: collision_layer = %d (expected %d)" % [
+			ab.collision_layer, LayersScript.LAYER_BODY_PROXY])
+		root.queue_free()
+		return false
+	if ab.collision_mask != 0:
+		print("[FAIL] test_collision_layer_registration: collision_mask = %d (expected 0)" % ab.collision_mask)
+		root.queue_free()
+		return false
+
+	# CollisionShape3D child with non-null ConcavePolygonShape3D.
+	var cs: CollisionShape3D = null
+	for child in ab.get_children():
+		if child is CollisionShape3D:
+			cs = child
+			break
+	if cs == null:
+		print("[FAIL] test_collision_layer_registration: TetProxyBody has no CollisionShape3D child")
+		root.queue_free()
+		return false
+	if not (cs.shape is ConcavePolygonShape3D):
+		print("[FAIL] test_collision_layer_registration: shape is not ConcavePolygonShape3D")
+		root.queue_free()
+		return false
+	var shp: ConcavePolygonShape3D = cs.shape
+	# 6 outer faces × 3 verts = 18 entries.
+	if shp.get_faces().size() != 18:
+		print("[FAIL] test_collision_layer_registration: shape.get_faces().size() = %d (expected 18)" % shp.get_faces().size())
+		root.queue_free()
+		return false
+
+	# Meta check.
+	if not ab.has_meta(&"body_field_owner"):
+		print("[FAIL] test_collision_layer_registration: missing body_field_owner meta")
+		root.queue_free()
+		return false
+	var wr = ab.get_meta(&"body_field_owner")
+	if not (wr is WeakRef):
+		print("[FAIL] test_collision_layer_registration: body_field_owner is not a WeakRef")
+		root.queue_free()
+		return false
+	if wr.get_ref() != bf:
+		print("[FAIL] test_collision_layer_registration: WeakRef does not point to BodyField")
+		root.queue_free()
+		return false
+
+	# Teardown.
+	bf.get_parent().remove_child(bf)
+	bf.free()
+	root.queue_free()
+	print("[PASS] test_collision_layer_registration")
+	return true
+
+
+func test_receive_external_impulse_split() -> bool:
+	# 1-tet mesh; nearest tet vert has weights (0.6, 0.4, 0, 0) on bones
+	# (3, 7, 0, 0). Inject a recorder Callable; assert two records with
+	# magnitudes 6.0 and 4.0 to the right RIDs.
+	const BodyFieldScript := preload("res://addons/body_field/runtime/body_field.gd")
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+
+	var d: Resource = FleshDataScript.new()
+	d.n_tet_verts = 4
+	d.n_tet_cells = 1
+	d.n_render_verts = 0
+	# 4 tet verts forming one tet at the origin region. Vert 0 sits at
+	# the world point we'll probe; vert 0's weights are the (3, 7)
+	# 0.6/0.4 split — receive_external_impulse must pick vert 0.
+	d.tet_verts = PackedFloat32Array([
+		5.0, 0.0, 0.0,    # vert 0 — target
+		0.0, 5.0, 0.0,    # vert 1 — far
+		0.0, 0.0, 5.0,    # vert 2 — far
+		-5.0, 0.0, 0.0,   # vert 3 — far
+	])
+	d.tet_cells = PackedInt32Array([0, 1, 2, 3])
+	d.tet_skin_indices = PackedInt32Array([
+		3, 7, 0, 0,   # vert 0 — the interesting one
+		0, 0, 0, 0,   # vert 1
+		0, 0, 0, 0,   # vert 2
+		0, 0, 0, 0,   # vert 3
+	])
+	d.tet_skin_weights = PackedFloat32Array([
+		0.6, 0.4, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0, 0.0,
+	])
+	d._extract_outer_faces()
+
+	# Bare BodyField — no skeleton, no _ready() side-effects we care about.
+	# We test the public method surface, not _init_compute() (which would
+	# need a Skeleton3D + RD). Setting flesh_data directly is the test path.
+	var bf: Node3D = BodyFieldScript.new()
+	bf.flesh_data = d
+
+	# Two throwaway RIDs from PhysicsServer3D for bones 3 and 7. Other
+	# slots stay invalid (RID()).
+	var rid3 := PhysicsServer3D.body_create()
+	var rid7 := PhysicsServer3D.body_create()
+	var rids: Array[RID] = []
+	rids.resize(8)
+	for i in range(8):
+		rids[i] = RID()
+	rids[3] = rid3
+	rids[7] = rid7
+	bf.set_bone_body_rids(rids)
+
+	# Recorder Callable. Capture calls in a list the test can inspect.
+	var records: Array = []
+	bf._apply_impulse_to_bone = func(rid: RID, imp: Vector3, pos: Vector3) -> void:
+		records.append({"rid": rid, "imp": imp, "pos": pos})
+
+	# World point right at vert 0.
+	bf.receive_external_impulse(Vector3(5.0, 0.0, 0.0), Vector3(0.0, 10.0, 0.0), null)
+
+	# Free the BodyField now we're done — bones live until we free them.
+	bf.free()
+
+	# Assertions: 2 records, magnitudes 6.0 and 4.0, RIDs match.
+	var ok := true
+	if records.size() != 2:
+		print("[FAIL] test_receive_external_impulse_split: got %d records (expected 2)" % records.size())
+		ok = false
+	else:
+		var got3: Dictionary = {}
+		var got7: Dictionary = {}
+		for r in records:
+			if r.rid == rid3:
+				got3 = r
+			elif r.rid == rid7:
+				got7 = r
+		if got3.is_empty():
+			print("[FAIL] test_receive_external_impulse_split: no record for rid3")
+			ok = false
+		elif abs(got3.imp.y - 6.0) > 1e-5 or abs(got3.imp.x) > 1e-5 or abs(got3.imp.z) > 1e-5:
+			print("[FAIL] test_receive_external_impulse_split: rid3 impulse %s (expected (0,6,0))" % got3.imp)
+			ok = false
+		if got7.is_empty():
+			print("[FAIL] test_receive_external_impulse_split: no record for rid7")
+			ok = false
+		elif abs(got7.imp.y - 4.0) > 1e-5 or abs(got7.imp.x) > 1e-5 or abs(got7.imp.z) > 1e-5:
+			print("[FAIL] test_receive_external_impulse_split: rid7 impulse %s (expected (0,4,0))" % got7.imp)
+			ok = false
+
+	PhysicsServer3D.free_rid(rid3)
+	PhysicsServer3D.free_rid(rid7)
+
+	if not ok:
+		return false
+	print("[PASS] test_receive_external_impulse_split")
+	return true
+
+
+func test_receive_external_impulse_empty_table_noop() -> bool:
+	# Same setup as above but no set_bone_body_rids() call. Recorder must
+	# stay empty.
+	const BodyFieldScript := preload("res://addons/body_field/runtime/body_field.gd")
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+
+	var d: Resource = FleshDataScript.new()
+	d.n_tet_verts = 1
+	d.n_tet_cells = 0
+	d.n_render_verts = 0
+	d.tet_verts = PackedFloat32Array([5.0, 0.0, 0.0])
+	d.tet_cells = PackedInt32Array()
+	d.tet_skin_indices = PackedInt32Array([3, 7, 0, 0])
+	d.tet_skin_weights = PackedFloat32Array([0.6, 0.4, 0.0, 0.0])
+	d._extract_outer_faces()
+
+	var bf: Node3D = BodyFieldScript.new()
+	bf.flesh_data = d
+
+	var records: Array = []
+	bf._apply_impulse_to_bone = func(rid: RID, imp: Vector3, pos: Vector3) -> void:
+		records.append({"rid": rid, "imp": imp, "pos": pos})
+
+	bf.receive_external_impulse(Vector3(5.0, 0.0, 0.0), Vector3(0.0, 10.0, 0.0), null)
+
+	bf.free()
+
+	if records.size() != 0:
+		print("[FAIL] test_receive_external_impulse_empty_table_noop: got %d records (expected 0)" % records.size())
+		return false
+	print("[PASS] test_receive_external_impulse_empty_table_noop")
+	return true
+
+
+func test_surface_tag_defaults() -> bool:
+	# Round-trip a v3 .bin (no v3 trailer) and assert the surface-tag
+	# accessors return defaults: 0 for region id, {} for material.
+	const BodyFieldScript := preload("res://addons/body_field/runtime/body_field.gd")
+	const FleshDataScript := preload("res://addons/body_field/runtime/flesh_data.gd")
+
+	# Minimal 1-tet payload, sufficient for the loader.
+	var tet_verts := PackedFloat32Array([
+		0.0, 0.0, 0.0,
+		1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0,
+		0.0, 0.0, 1.0,
+	])
+	var tet_cells := PackedInt32Array([0, 1, 2, 3])
+	var bary_tet_idx := PackedInt32Array()
+	var bary_uvw := PackedFloat32Array()
+	var render_influence := PackedFloat32Array()
+	var tet_skin_indices := PackedInt32Array()
+	tet_skin_indices.resize(16)  # 4 verts × 4 slots, all 0
+	var tet_skin_weights := PackedFloat32Array()
+	tet_skin_weights.resize(16)
+	for v in range(4):
+		tet_skin_weights[v * 4 + 0] = 1.0  # bone 0, weight 1.0
+
+	var path := "user://test_surface_tag_defaults.bin"
+	if not _write_v3_bin(path, "surface_tag_default", 4, 1, 0,
+			tet_verts, tet_cells, bary_tet_idx, bary_uvw, render_influence,
+			tet_skin_indices, tet_skin_weights):
+		print("[FAIL] test_surface_tag_defaults: failed to write .bin")
+		return false
+	var loaded: Resource = FleshDataScript.load_bin(path)
+	_rm(path)
+	if loaded == null:
+		print("[FAIL] test_surface_tag_defaults: load_bin returned null")
+		return false
+
+	var bf: Node3D = BodyFieldScript.new()
+	bf.flesh_data = loaded
+
+	if bf.get_face_region_id(0) != 0:
+		print("[FAIL] test_surface_tag_defaults: get_face_region_id(0) = %d (expected 0)" % bf.get_face_region_id(0))
+		bf.free()
+		return false
+	var mat: Dictionary = bf.get_region_material(0)
+	if not mat.is_empty():
+		print("[FAIL] test_surface_tag_defaults: get_region_material(0) = %s (expected {})" % mat)
+		bf.free()
+		return false
+
+	bf.free()
+	print("[PASS] test_surface_tag_defaults")
 	return true
 
 
