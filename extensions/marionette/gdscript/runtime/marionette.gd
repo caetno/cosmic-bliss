@@ -997,6 +997,23 @@ func get_body_rhythm_cycle_index() -> int:
 	return core.call(&"get_body_rhythm_cycle_index")
 
 
+## Slice P10.7-min — body_strain publisher (MINIMUM). Dictionary keyed by
+## anatomical bone name; values in [0, 1]. Stub form
+## `clamp(|tracking_error| × strength, 0, 1)` per the 05-14-03 §3 contract.
+## Updated once per physics frame inside MarionetteCore::_physics_process;
+## reads are cheap (returns a copy of the internal map). Empty dict before
+## the first physics tick / when the core isn't instantiated.
+##
+## Per-bone (not per-region) by design — region grouping is deferred until
+## the Reverie consumer defines its region scheme; aggregation reads from
+## here with no migration cost.
+func get_body_strain() -> Dictionary:
+	var core: Object = _ensure_core()
+	if core == null:
+		return {}
+	return core.call(&"get_body_strain")
+
+
 # Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns
 # null (with a one-shot warning) when the GDExtension hasn't loaded the
 # class — keeps tooling that calls set_bone_target() safe in pre-build

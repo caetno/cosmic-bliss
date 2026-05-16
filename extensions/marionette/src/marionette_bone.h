@@ -123,6 +123,20 @@ public:
 			float p_bone_strength,
 			float p_global_strength) const;
 
+	// Slice P10.7-min — tracking-error magnitude in radians. Same target-
+	// composition path as the SPD torque (uses `compose_target_bone_local`
+	// on the anatomical Vector3 input, then `SPDMath::error_quaternion` /
+	// `quaternion_to_axis_angle` to get the rotation magnitude separating
+	// current from target). Returned value is `|axis × angle|` in [0, π].
+	// MarionetteCore::compute_body_strain calls this per registered bone
+	// once per `_physics_process` frame; the spec-vs-physics conflict
+	// "target is stored as anatomical angles, not a quaternion" is resolved
+	// by routing through the existing private composer (same conversion
+	// the SPD path uses, so strain reads what the controller is fighting).
+	float compute_tracking_error_radians(
+			const Quaternion &p_current_rel_parent,
+			const Vector3 &p_anatomical_target) const;
+
 	void _integrate_forces(PhysicsDirectBodyState3D *p_state) override;
 
 protected:

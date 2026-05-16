@@ -171,6 +171,10 @@ func _init() -> void:
 		_test_pin_anchor_weight_scales_force_linearly,
 		_test_clear_pin_anchors_releases,
 		_test_remove_pin_anchor_one_at_a_time,
+		_test_body_strain_zero_when_relaxed,
+		_test_body_strain_positive_under_pin,
+		_test_body_strain_clamped_at_1,
+		_test_body_strain_dictionary_keys,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -4876,3 +4880,173 @@ func _test_remove_pin_anchor_one_at_a_time() -> bool:
 		return _fail("remove_pin_anchor_one_at_a_time", "out-of-set remove perturbed count")
 	core.free()
 	return _ok("remove_pin_anchor_one_at_a_time")
+
+
+# ---------- body_strain publisher (Slice P10.7-min) -----------------------
+# Stub publisher per 05-14-03 §3:
+#   body_strain[bone] = clamp(|tracking_error| × strength, 0, 1)
+# Per-bone (not per-region) for v1 — region grouping deferred until the
+# Reverie consumer defines its region scheme. These tests pin the clamp
+# math + dictionary keying via the test seam; the physical step-N-frames
+# convergence test the slice prompt mentioned would need a live
+# PhysicalBoneSimulator3D + SceneTree, which exceeds the "tests run as
+# extends SceneTree without animations/scenes" rule — flagged for a
+# follow-up demo-scene slice (same gating as the pin-anchor 5cm test).
+
+func _test_body_strain_zero_when_relaxed() -> bool:
+	# At-target SPD (tracking_error == 0) with any strength → strain 0.
+	# Verifies the clamp floor, exercised at the pure-math seam so we
+	# don't need a registered bone or a live tick.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("body_strain_zero_when_relaxed", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	# Zero error, full strength → 0.
+	var s0: float = core.call(&"compute_strain_value", 0.0, 1.0)
+	if absf(s0) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_zero_when_relaxed", "zero-err strain=%f, expected 0" % s0)
+	# Tiny error (well below 1.0/strength threshold), strength 0 (limp)
+	# → 0 (the limp-bone case the spec explicitly calls out).
+	var s_limp: float = core.call(&"compute_strain_value", 0.5, 0.0)
+	if absf(s_limp) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_zero_when_relaxed", "limp strain=%f, expected 0" % s_limp)
+	# Negative error magnitude (defensive — production path always sends
+	# abs(axis-angle length), but the seam folds it anyway).
+	var s_neg: float = core.call(&"compute_strain_value", -0.3, 1.0)
+	if absf(s_neg - 0.3) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_zero_when_relaxed", "negative-err strain=%f, expected 0.3" % s_neg)
+	# Full publish path: with NO registered bones, compute_body_strain
+	# produces an empty dict (nothing to publish under).
+	core.call(&"compute_body_strain")
+	var d: Dictionary = core.call(&"get_body_strain")
+	if not d.is_empty():
+		core.free()
+		return _fail("body_strain_zero_when_relaxed",
+				"empty registry produced non-empty dict: %s" % d)
+	core.free()
+	return _ok("body_strain_zero_when_relaxed")
+
+
+func _test_body_strain_positive_under_pin() -> bool:
+	# The slice prompt asks for "add pin, step N frames, strain > 0.1."
+	# Without live physics in this harness we exercise the chain at the
+	# math seam: a non-aligned current-rel-parent vs an identity target
+	# produces a positive tracking error; the strain formula then yields
+	# a positive value scaled by strength. This pins that the publish
+	# pipeline (tracking-error * strength → clamp) actually flows, not
+	# that Jolt converges (which the follow-up demo-scene slice will
+	# show).
+	if not ClassDB.class_exists("MarionetteCore") or not ClassDB.class_exists("MarionetteBone"):
+		return _fail("body_strain_positive_under_pin", "GDExtension classes not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	var bone: MarionetteBone = ClassDB.instantiate("MarionetteBone")
+	# Identity anatomical basis (rows = world axes) so the composed target
+	# at anatomical_target == ZERO is the identity quaternion. Any rotated
+	# current_rel_parent then produces a non-zero tracking error equal to
+	# the rotation angle.
+	bone.anatomical_basis = Basis.IDENTITY
+	bone.archetype = 1 # HINGE — non-sided, no medial-rotation flip.
+	bone.rest_anatomical_offset = Vector3.ZERO
+	# 30° rotation around the flex axis — tracking error should be 30°
+	# (≈ 0.5236 rad). With effective strength 1.0 → strain ≈ 0.524.
+	var thirty_deg: float = deg_to_rad(30.0)
+	var q_off := Quaternion(Vector3(1, 0, 0), thirty_deg)
+	var err: float = bone.call(&"compute_tracking_error_radians", q_off, Vector3.ZERO)
+	if absf(err - thirty_deg) > 1.0e-4:
+		bone.free(); core.free()
+		return _fail("body_strain_positive_under_pin",
+				"tracking_error=%f, expected %f" % [err, thirty_deg])
+	# Now exercise the publish-pipeline scaling: same error × strength 1.0.
+	var strain_full: float = core.call(&"compute_strain_value", err, 1.0)
+	# 30° → ~0.524 strain (well above the prompt's 0.1 floor).
+	if strain_full <= 0.1:
+		bone.free(); core.free()
+		return _fail("body_strain_positive_under_pin",
+				"strain=%f at 30° + strength 1.0, expected > 0.1" % strain_full)
+	# Limp bone (strength 0) at the same deflection → 0 strain.
+	var strain_limp: float = core.call(&"compute_strain_value", err, 0.0)
+	if absf(strain_limp) > 1.0e-6:
+		bone.free(); core.free()
+		return _fail("body_strain_positive_under_pin",
+				"limp-bone strain=%f at 30°, expected 0" % strain_limp)
+	bone.free(); core.free()
+	return _ok("body_strain_positive_under_pin")
+
+
+func _test_body_strain_clamped_at_1() -> bool:
+	# Extreme deflection (60° × strength 4 = 4.19 rad-equivalent product)
+	# saturates the clamp ceiling. Verifies the upper bound; without the
+	# clamp downstream Reverie consumers would have to re-clamp themselves
+	# every read. Also verifies the boundary case at exactly 1.0.
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("body_strain_clamped_at_1", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	# Just above 1.0 → clamped to 1.0.
+	var s_high: float = core.call(&"compute_strain_value", 1.5, 1.0)
+	if absf(s_high - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_clamped_at_1", "strain at err=1.5 = %f, expected 1.0" % s_high)
+	# Far above (extreme deflection × high strength) → still 1.0.
+	var s_extreme: float = core.call(&"compute_strain_value", PI, 4.0)
+	if absf(s_extreme - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_clamped_at_1", "strain at extreme = %f, expected 1.0" % s_extreme)
+	# Exactly at 1.0 → 1.0 (boundary).
+	var s_boundary: float = core.call(&"compute_strain_value", 1.0, 1.0)
+	if absf(s_boundary - 1.0) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_clamped_at_1", "strain at boundary = %f, expected 1.0" % s_boundary)
+	# Just below 1.0 → unclamped.
+	var s_below: float = core.call(&"compute_strain_value", 0.9, 1.0)
+	if absf(s_below - 0.9) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_clamped_at_1", "strain at err=0.9 = %f, expected 0.9" % s_below)
+	core.free()
+	return _ok("body_strain_clamped_at_1")
+
+
+func _test_body_strain_dictionary_keys() -> bool:
+	# `get_body_strain` round-trip: keys present, values match what was
+	# written through the test seam. Pins the Dictionary-repackaging
+	# contract (HashMap → Dictionary preserves StringName keys; values
+	# round-trip as floats; absence of a key means "not POWERED / not
+	# registered," consistent with the dict-clear-on-rebuild policy).
+	if not ClassDB.class_exists("MarionetteCore"):
+		return _fail("body_strain_dictionary_keys", "MarionetteCore not registered")
+	var core: Object = ClassDB.instantiate("MarionetteCore")
+	# Empty before any writes.
+	var d_empty: Dictionary = core.call(&"get_body_strain")
+	if not d_empty.is_empty():
+		core.free()
+		return _fail("body_strain_dictionary_keys", "initial dict non-empty: %s" % d_empty)
+	# Write two entries via the seam.
+	core.call(&"set_strain_for_test", &"LeftElbow", 0.42)
+	core.call(&"set_strain_for_test", &"RightKnee", 0.13)
+	var d: Dictionary = core.call(&"get_body_strain")
+	if not d.has(&"LeftElbow") or not d.has(&"RightKnee"):
+		core.free()
+		return _fail("body_strain_dictionary_keys",
+				"missing expected keys; got=%s" % d.keys())
+	if absf(float(d[&"LeftElbow"]) - 0.42) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_dictionary_keys",
+				"LeftElbow value round-trip: got %f, expected 0.42" % float(d[&"LeftElbow"]))
+	if absf(float(d[&"RightKnee"]) - 0.13) > 1.0e-6:
+		core.free()
+		return _fail("body_strain_dictionary_keys",
+				"RightKnee value round-trip: got %f, expected 0.13" % float(d[&"RightKnee"]))
+	# Spurious keys must NOT appear (no aliasing through bone_targets etc).
+	if d.has(&"LeftWrist"):
+		core.free()
+		return _fail("body_strain_dictionary_keys", "unexpected key LeftWrist in dict")
+	# `clear_body_strain` drops everything.
+	core.call(&"clear_body_strain")
+	var d_after_clear: Dictionary = core.call(&"get_body_strain")
+	if not d_after_clear.is_empty():
+		core.free()
+		return _fail("body_strain_dictionary_keys",
+				"clear_body_strain did not empty dict: %s" % d_after_clear)
+	core.free()
+	return _ok("body_strain_dictionary_keys")

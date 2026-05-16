@@ -7,6 +7,7 @@
 #include <godot_cpp/templates/hash_map.hpp>
 #include <godot_cpp/templates/hash_set.hpp>
 #include <godot_cpp/variant/basis.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/vector3.hpp>
@@ -217,6 +218,45 @@ public:
 	// site.
 	void apply_pin_anchors();
 
+	// Slice P10.7-min — body_strain publisher (MINIMUM). One scalar per
+	// POWERED bone, keyed by anatomical name. The full P10.7 form
+	// (`Σ smoothstep(0.7, 1.0, required_torque[j] / max_torque[j])²`) needs
+	// per-bone torque-clamp introspection that doesn't exist yet, so this
+	// slice ships the simpler `clamp(|tracking_error| × strength, 0, 1)`
+	// stub per the 05-14-03 §3 contract — enough for Reverie to wire to
+	// when it comes online.
+	//
+	// Per-bone (not per-region) v1: region grouping is deferred until the
+	// Reverie consumer defines what regions it actually wants. Bone-level
+	// data is the safe ground floor — any region scheme aggregates from
+	// here, no migration cost.
+	//
+	// KINEMATIC bones are skipped (they follow animation perfectly, no
+	// tracking error to measure). UNPOWERED bones are skipped too (no
+	// SPD = strain undefined; effective strength would be 0 and the
+	// product would be 0 anyway, but the absence is more informative
+	// than a stream of zeros).
+	//
+	// Called from `_physics_process` AFTER `apply_pin_anchors` so the
+	// strain dictionary reflects the state the SPD substeps observed on
+	// the PRIOR physics tick (Godot orders `_physics_process` BEFORE
+	// `_integrate_forces` per the call ordering — strain is one-tick-
+	// lagged, acceptable for a stub publisher).
+	void compute_body_strain();
+	Dictionary get_body_strain() const;
+
+	// Test seam — pure-math derivation: `clamp(|err| × strength, 0, 1)`.
+	// Lets unit tests pin the clamp/scaling contract without needing
+	// registered bones or a live physics tick. `err` is in radians.
+	float compute_strain_value(float p_tracking_error_radians, float p_effective_strength) const;
+
+	// Test seam — directly populate the strain map, bypassing the bone
+	// registry walk. Matches the same shape `compute_body_strain` writes
+	// through, so the dictionary-keys / get_body_strain readout tests can
+	// run without spinning up MarionetteBone instances.
+	void set_strain_for_test(const StringName &p_bone_name, float p_strain);
+	void clear_body_strain();
+
 protected:
 	static void _bind_methods();
 
@@ -259,6 +299,11 @@ private:
 	// per physics tick from MarionetteBone's integrator; cheap HashMap
 	// lookup keyed by anatomical name (same key as `bone_targets`).
 	HashMap<StringName, PinAnchor> pin_anchors;
+
+	// Slice P10.7-min — body_strain per POWERED bone. Cleared + rebuilt
+	// every `compute_body_strain` call so dropped / re-stated bones can't
+	// keep stale entries (same hygiene as `snapshot_parent_bases`).
+	HashMap<StringName, float> body_strain_per_bone;
 };
 
 } // namespace godot

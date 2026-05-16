@@ -215,6 +215,23 @@ Vector3 MarionetteBone::compute_spd_torque_for_test_ex(
 	return torque_world;
 }
 
+// Slice P10.7-min — tracking-error magnitude in radians. Same target
+// composition path as the SPD torque (compose_target_bone_local on the
+// anatomical Vector3 then error_quaternion → axis-angle vector → length).
+// Magnitude lives in [0, π] (error_quaternion collapses the antipodal
+// pair to the half with w >= 0, so the returned axis-angle is the SHORT
+// rotation magnitude — never wraps past π). Used by
+// MarionetteCore::compute_body_strain.
+float MarionetteBone::compute_tracking_error_radians(
+		const Quaternion &p_current_rel_parent,
+		const Vector3 &p_anatomical_target) const {
+	const Quaternion target = compose_target_bone_local(p_anatomical_target);
+	const Quaternion err_q = SPDMath::error_quaternion(p_current_rel_parent, target);
+	const Vector3 err_axis_angle = SPDMath::quaternion_to_axis_angle(err_q);
+	return err_axis_angle.length();
+}
+
+
 // Slice 3b — SPD torque path. Runs only for POWERED bones; KINEMATIC /
 // UNPOWERED early-return so Jolt's default integrator (or the simulator's
 // kinematic skeleton follower) takes over.
@@ -397,6 +414,10 @@ void MarionetteBone::_bind_methods() {
 								"current_rel_parent", "anatomical_target", "omega_world",
 								"parent_world_basis", "mass", "dt", "bone_strength", "global_strength"),
 			&MarionetteBone::compute_spd_torque_for_test_ex);
+
+	ClassDB::bind_method(D_METHOD("compute_tracking_error_radians",
+								"current_rel_parent", "anatomical_target"),
+			&MarionetteBone::compute_tracking_error_radians);
 
 	BIND_ENUM_CONSTANT(STATE_KINEMATIC);
 	BIND_ENUM_CONSTANT(STATE_POWERED);
