@@ -33,6 +33,8 @@ func _run() -> void:
 		"test_receive_external_impulse_split",
 		"test_receive_external_impulse_empty_table_noop",
 		"test_surface_tag_defaults",
+		# §17.1 — BodySurfaceField core (cotan-Laplacian + Cholesky + sphere test).
+		"test_surface_field_sphere_radial",
 	]:
 		var result: bool = await call(test_name)
 		if result:
@@ -851,6 +853,130 @@ func test_surface_tag_defaults() -> bool:
 
 	bf.free()
 	print("[PASS] test_surface_tag_defaults")
+	return true
+
+
+# --- §17.1 — BodySurfaceField sphere radial-falloff -------------------
+
+func test_surface_field_sphere_radial() -> bool:
+	const BodySurfaceFieldScript := preload("res://addons/body_field/runtime/body_surface_field.gd")
+
+	# --- Build sphere ArrayMesh.
+	var sphere: SphereMesh = SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 12
+	sphere.rings = 6
+	var arrays: Array = sphere.surface_get_arrays(0)
+	if arrays.is_empty():
+		print("[FAIL] test_surface_field_sphere_radial: SphereMesh.surface_get_arrays returned empty")
+		return false
+
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	var n: int = verts.size()
+	if n < 8 or indices.size() < 12:
+		print("[FAIL] test_surface_field_sphere_radial: degenerate sphere (n=%d, idx=%d)" % [n, indices.size()])
+		return false
+
+	# Wrap into a plain ArrayMesh (the consumer-facing source_mesh
+	# shape — kasumi will pass an ArrayMesh of the body surface).
+	var amesh: ArrayMesh = ArrayMesh.new()
+	var a2: Array = []
+	a2.resize(Mesh.ARRAY_MAX)
+	a2[Mesh.ARRAY_VERTEX] = verts
+	a2[Mesh.ARRAY_INDEX] = indices
+	amesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+
+	var field: Node3D = BodySurfaceFieldScript.new()
+	field.source_mesh = amesh
+	field._ensure_factor()
+	if field.factor == null or field.factor.chol_kind == &"none":
+		print("[FAIL] test_surface_field_sphere_radial: factor build returned none")
+		field.free()
+		return false
+	if field.factor.chol_kind == &"stub":
+		print("[FAIL] test_surface_field_sphere_radial: Cholesky returned stub (non-SPD?)")
+		field.free()
+		return false
+
+	# Post-weld geometry — Godot's SphereMesh ships UV-seam + pole
+	# duplicates that the field's _ensure_factor() welds. Work in the
+	# welded vertex space from here on.
+	var welded_verts: PackedVector3Array = field.get_source_vertices()
+	var n_welded: int = welded_verts.size()
+	if n_welded < 8:
+		print("[FAIL] test_surface_field_sphere_radial: post-weld n=%d too small" % n_welded)
+		field.free()
+		return false
+
+	# Seed at welded vertex 0; diffuse one heat step.
+	var u0: PackedFloat32Array = PackedFloat32Array()
+	u0.resize(n_welded)
+	for i in range(n_welded):
+		u0[i] = 0.0
+	u0[0] = 1.0
+
+	var weights: PackedFloat32Array = field.diffuse(u0)
+	if weights.size() != n_welded:
+		print("[FAIL] test_surface_field_sphere_radial: diffuse returned %d != %d" % [weights.size(), n_welded])
+		field.free()
+		return false
+
+	# Antipode = farthest welded vertex from seed (3D distance).
+	var antipode: int = -1
+	var d_max: float = -1.0
+	for i in range(n_welded):
+		var d: float = welded_verts[0].distance_to(welded_verts[i])
+		if d > d_max:
+			d_max = d
+			antipode = i
+	if antipode < 0:
+		print("[FAIL] test_surface_field_sphere_radial: failed to find antipode")
+		field.free()
+		return false
+
+	# 1. All finite, non-negative within tolerance.
+	for i in range(n_welded):
+		if not is_finite(weights[i]):
+			print("[FAIL] test_surface_field_sphere_radial: non-finite weight at %d (%f)" % [i, weights[i]])
+			field.free()
+			return false
+		if weights[i] < -1.0e-6:
+			print("[FAIL] test_surface_field_sphere_radial: significantly negative weight at %d (%f)" % [i, weights[i]])
+			field.free()
+			return false
+
+	# 2. Peak at seed.
+	var w_max: float = -INF
+	var argmax: int = -1
+	for i in range(n_welded):
+		if weights[i] > w_max:
+			w_max = weights[i]
+			argmax = i
+	if argmax != 0:
+		print("[FAIL] test_surface_field_sphere_radial: peak at vert %d (w=%f), not seed 0 (w=%f)" % [argmax, w_max, weights[0]])
+		field.free()
+		return false
+
+	# 3. Antipode is < 10% of peak.
+	if weights[antipode] > 0.1 * weights[0]:
+		print("[FAIL] test_surface_field_sphere_radial: antipode/peak ratio too high (w[0]=%f, w[antipode=%d]=%f, ratio=%f)" % [weights[0], antipode, weights[antipode], weights[antipode] / weights[0]])
+		field.free()
+		return false
+
+	# 4. Sum positive.
+	var sum: float = 0.0
+	for i in range(n_welded):
+		sum += weights[i]
+	if sum <= 0.0 or not is_finite(sum):
+		print("[FAIL] test_surface_field_sphere_radial: weight sum non-positive (%f)" % sum)
+		field.free()
+		return false
+
+	print("[PASS] test_surface_field_sphere_radial (raw_n=%d, welded_n=%d, w[0]=%f, w[antipode]=%f, ratio=%f)" % [
+		n, n_welded, weights[0], weights[antipode], weights[antipode] / weights[0]])
+	field.free()
 	return true
 
 

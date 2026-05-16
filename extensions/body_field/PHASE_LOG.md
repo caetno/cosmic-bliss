@@ -56,3 +56,54 @@ decisions land here. Most recent slice at the bottom.
 **Next slices:**
 - B4 — Blender authoring chain (vendored under `tools/blender/body_field/`). Writes v3 .bin including the optional region material trailer per the schema frozen here.
 - TT B5 — type-1 fork against partitioned bodies. Reads `body_field_owner` meta; routes reciprocal via `receive_external_impulse`; consumes surface tags via `get_face_region_id` / `get_region_material`.
+
+---
+
+### §17.1 — BodySurfaceField core (cotan-Laplacian + Cholesky + sphere radial-falloff test)
+
+Sibling slice family inside body_field per `docs/marionette/Marionette_plan.md` §17 (the B-series slices target §18 volumetric tets; §17 is the surface field). §17.1 ships infrastructure only — the three concrete attachment subclasses are stubs whose `bake()` lands at consumer migration time (§17.5 Marionette jiggle, TT §10.4 rim authoring, Marionette §16 soft regions).
+
+**Shipped files (new):**
+- `extensions/body_field/gdscript/runtime/cotan_laplacian.gd` — Crane-style cotan-Laplacian builder + lumped Voronoi mass + vertex weld helper + topology fingerprint.
+- `extensions/body_field/gdscript/runtime/cholesky_solver.gd` — dense LLᵀ Cholesky factorization, forward/back-sub solve, and heat-method `(M + t·L) x = M·u0` diffuse step.
+- `extensions/body_field/gdscript/runtime/body_surface_field.gd` — `BodySurfaceField` Node3D with lazy factor build, `bake_all_attachments` via inspector `trigger_bake` toggle, `diffuse`, and a `diffuse_geodesic` v1 placeholder.
+- `extensions/body_field/gdscript/resources/body_surface_field_factor.gd` — cached factor resource (mass, heat_t, dense lower-triangular factor, fingerprint).
+- `extensions/body_field/gdscript/resources/surface_attachment.gd` — base resource with `attachment_name`, `host_bone`, `weight_mode`, abstract `bake(field)`.
+- `extensions/body_field/gdscript/resources/surface_jiggle_attachment.gd` — stub for §17.5.
+- `extensions/body_field/gdscript/resources/surface_orifice_rim_attachment.gd` — stub for TT §10.4.
+- `extensions/body_field/gdscript/resources/surface_soft_region_attachment.gd` — stub for Marionette §16.
+- `extensions/body_field/gdscript/debug/body_surface_field_gizmo.gd` — pre-allocated `ImmediateMesh` heat-map of one attachment's baked weights. Cool→hot color ramp (dark blue → cyan → green → magenta) avoiding orange-yellow per project gizmo-color rule.
+
+**Shipped files (modified):**
+- `extensions/body_field/tests/run_tests.gd` — `test_surface_field_sphere_radial` (icosphere via `SphereMesh`; delta at vertex 0 diffused; asserts peak at seed, antipode < 10% of peak, all finite, sum > 0).
+
+**Decisions:**
+
+1. **Dense storage + dense LLᵀ Cholesky.** Sparse Cholesky in pure GDScript is significantly more code; for v1 consumers (test sphere n≈80, kasumi body mesh n≈5k) dense is acceptable. Memory: ~n² floats. The test sphere measures w[0]=0.286, w[antipode]=0.0005 (ratio 0.002) — clean radial falloff. v1.5+ may swap to sparse if a larger consumer mesh forces it; the `BodySurfaceFieldFactor` resource is the natural seam.
+
+2. **Heat-method semantics: `(M + t·L) u = M·u0`.** Crane et al. §3.2's backward-Euler step. `L` stored as positive-semi-definite (`L[i,j] = -0.5·(cot α + cot β)` off-diagonal, row-sum positive). `M + t·L` is SPD on a well-formed mesh; Cholesky succeeds. Auto `t ≈ mean_edge_length²` when `heat_t` is unset.
+
+3. **Defensive vertex weld in `_ensure_factor()`.** Godot's `SphereMesh` ships UV-seam + pole duplicates (104 raw verts → 74 unique on a 12×6 sphere). Without welding, duplicate verts have zero adjacency in the cotan-Laplacian, leading to zero mass, zero diagonal in `M + t·L`, and a non-SPD Cholesky failure. The weld pass (`CotanLaplacian.weld_coincident_vertices`, tol=1e-5) is idempotent on already-welded inputs and protects v1.5+ hero meshes from glTF importers that split verts on UV seams. Surfaced via `get_source_vertices()` / `get_source_indices()` so consumers (gizmo, tests) operate in the welded vertex space.
+
+4. **`diffuse_geodesic` is a placeholder.** v1 returns 3D Euclidean distance from the nearest seed (chord length on a sphere, not great-circle distance, but monotonic in it). The concrete heat-method geodesic-distance pipeline (Crane et al. §3.3 — solve the heat equation, normalize the gradient, solve the Poisson equation) lands at §17.2+ when the first consumer (TT §10.4 rim authoring) needs precise geodesic falloff. v1 placeholder pushes a warning so consumers don't rely on it silently.
+
+5. **Baker mechanism: `trigger_bake` toggle on the node.** Option A from the slice prompt (vs Option B's standalone EditorScript). Setting `trigger_bake = true` in the inspector runs `bake_all_attachments()` and resets the toggle. Simple, in-line, no extra EditorScript path. EditorScript can be added later if consumers want a FileSystem-context-menu entry.
+
+6. **Three attachment subclasses ship as stubs.** Each subclass's `bake()` returns empty `PackedFloat32Array()` with a clear `push_warning` identifying the consumer-side slice that owns the concrete impl. The TYPES exist and are loadable — that's what §17.1 ships. §17.5 fills `SurfaceJiggleAttachment.bake()`; TT-side §10.4 fills `SurfaceOrificeRimAttachment.bake()`; Marionette §16 fills `SurfaceSoftRegionAttachment.bake()`.
+
+7. **Sanity gizmo color ramp.** Cool→hot (dark blue → cyan → green → magenta), explicitly avoiding the orange-yellow band per the project gizmo-color rule (Godot's default Skeleton3D gizmo eats warm hues).
+
+**Test results:**
+- `test_surface_field_sphere_radial` PASSES: peak at seed, antipode ratio 0.002 (« 0.1 threshold), all finite, sum > 0.
+- All 11 pre-existing tests still pass. `./tools/test_body_field.sh --refresh` is the canonical invocation (the `--editor --quit` refresh is mandatory after a new `class_name` lands — six new class names in this slice).
+
+**Hard-optional preserved:**
+- §17.1 lives inside body_field. No consumer migration is performed in this slice — every consumer (§17.5 jiggle, TT §10.4 rim, Marionette §16 soft regions) keeps its pre-§17 manual-authoring path live. The fallback path is the LACK of `SurfaceJiggleAttachment` / `SurfaceOrificeRimAttachment` / `SurfaceSoftRegionAttachment` in the hero scene — consumers test for their presence, not for `BodySurfaceField`'s presence directly.
+- `BodySurfaceField` may exist on a hero without any attachments — `bake_all_attachments()` then iterates an empty list (no-op). And vice versa: attachments can sit unbaked (no-op) until their consumer's migration slice opens.
+
+**Next slices (consumer-side, not body_field's responsibility):**
+- §17.5 — Marionette jiggle attachment migration: fill `SurfaceJiggleAttachment.bake()`, migrate kasumi breast jiggle, add glute attachment (previously impossible without a Blender bone).
+- TT §10.4 — orifice rim authoring migration: fill `SurfaceOrificeRimAttachment.bake()`, retire the "anchor bone in Blender" gotcha for new orifices.
+- Marionette §16 — soft-region cluster geodesic blend: fill `SurfaceSoftRegionAttachment.bake()`, swap Euclidean SDF for geodesic-on-mesh derivation.
+- §17.2 — concrete heat-method geodesic-distance pipeline (replacing the v1 Euclidean placeholder in `diffuse_geodesic`).
+- Sparse Cholesky port if kasumi body mesh size pushes the dense factor's ~100 MB up to ~hundreds of MB.
