@@ -82,7 +82,7 @@ Authoritative phase plan: `TentacleTech_Architecture.md` §13. Per-slice history
 | 3 — Mesh rendering | done |
 | 4 — Collision | done — through 4S.3 (2026-05-12) |
 | 5 — Orifice | done — 5A–5D + 5H (2026-05-04..05); 5E/5F/5G canal interior next gate |
-| 6 — Stimulus bus | blocked |
+| 6 — Stimulus bus | in-progress (minimum slice landed 2026-05-16) |
 | 7 / 7.5 — Bulgers + capsules + x-ray | blocked |
 | 8 — Multi-tentacle, advanced | blocked |
 | 9 — Polish | blocked |

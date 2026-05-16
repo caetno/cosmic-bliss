@@ -13,6 +13,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include "../solver/tentacle.h"
+#include "../stimulus_bus/stimulus_bus.h"
 
 using namespace godot;
 
@@ -1523,6 +1524,44 @@ void Orifice::_update_entry_interactions(float p_dt) {
 			// orifice on the tentacle's suppression list. Idempotent on
 			// the tentacle side (no-op if somehow already registered).
 			t->register_active_ei_orifice(this);
+
+			// Phase 6 (stimulus bus minimum) — emit PenetrationStart on
+			// fresh EI creation. `entry_point` is filled by the geometry
+			// refresh below; for the bus payload we use the cached
+			// Center-frame origin as a stand-in (the geometry refresh
+			// runs next line). Subscribers re-derive per-tick state from
+			// the EI snapshot anyway.
+			//
+			// RingTransitStart is stubbed at EI creation in this slice
+			// (single fire, ring_index=0) — per-rim-particle transit
+			// tracking is deferred to a later slice.
+			// TODO: per-rim-particle transit tracking (Phase 6 follow-up).
+			//
+			// KnotEngulfed depends on `girth_gradient_at_rim`, which
+			// isn't yet a member on EntryInteraction. Skipped here with
+			// the explicit TODO so the seam is documented.
+			// TODO: KnotEngulfed once EntryInteraction tracks
+			//       girth_gradient_at_rim (Phase 6 / §6.5 follow-up).
+			if (StimulusBus *bus = StimulusBus::get_singleton()) {
+				int64_t orifice_id = (int64_t)get_instance_id();
+				int64_t tentacle_id = (int64_t)t->get_instance_id();
+				Vector3 wp = _center_frame_cached.origin;
+
+				Dictionary pen_extra;
+				pen_extra["orifice_id"] = orifice_id;
+				pen_extra["tentacle_id"] = tentacle_id;
+				pen_extra["depth_normalized"] = 0.0f;
+				bus->emit(StimulusBus::EVENT_PenetrationStart, 1.0f, 0.0f,
+						wp, 0, (int)tentacle_id, (int)orifice_id, pen_extra);
+
+				Dictionary ring_extra;
+				ring_extra["orifice_id"] = orifice_id;
+				ring_extra["tentacle_id"] = tentacle_id;
+				ring_extra["ring_index"] = 0;
+				ring_extra["stub"] = true; // explicit: not per-rim-particle yet
+				bus->emit(StimulusBus::EVENT_RingTransitStart, 1.0f, 0.0f,
+						wp, 0, (int)tentacle_id, (int)orifice_id, ring_extra);
+			}
 		} else {
 			// Refresh the cached pointer — `_resolve_tentacles_lazy`
 			// could have re-resolved to a different Tentacle instance.
@@ -1714,6 +1753,39 @@ void Orifice::_populate_entry_interaction_pressures(float p_dt) {
 		} else {
 			ei.in_stick_phase = false;
 		}
+	}
+
+	// Phase 6 (stimulus bus minimum) — publish continuous channels on
+	// the orifice_state[orifice_id] dictionary keyed by ObjectID.
+	//   - grip_engagement: max across all active EIs (most-engaged
+	//     tentacle drives the orifice's overall grip state).
+	//   - damage_rate: per-tick aggregate radial pressure across all
+	//     active EIs as a damage-rate proxy. Pragmatic — the damage
+	//     field itself accumulates per-rim-particle above. A clean
+	//     rate signal aggregated by orifice is delivered here.
+	//   - active_tentacle_count: §8.1 listed field, surfaced as a
+	//     by-product of the same pass.
+	if (StimulusBus *bus = StimulusBus::get_singleton()) {
+		int64_t orifice_id = (int64_t)get_instance_id();
+		float max_grip = 0.0f;
+		float total_pressure = 0.0f;
+		int active_count = 0;
+		for (size_t i = 0; i < _entry_interactions.size(); i++) {
+			const EntryInteraction &ei = _entry_interactions[i];
+			if (!ei.active) continue;
+			active_count += 1;
+			if (ei.grip_engagement > max_grip) max_grip = ei.grip_engagement;
+			for (size_t l = 0; l < ei.radial_pressure_per_loop_k.size(); l++) {
+				const std::vector<float> &press_arr = ei.radial_pressure_per_loop_k[l];
+				for (size_t k = 0; k < press_arr.size(); k++) {
+					total_pressure += press_arr[k];
+				}
+			}
+		}
+		float damage_rate_published = (p_dt > 1e-6f) ? (total_pressure * damage_rate) : 0.0f;
+		bus->set_orifice_state_field(orifice_id, StringName("grip_engagement"), max_grip);
+		bus->set_orifice_state_field(orifice_id, StringName("damage_rate"), damage_rate_published);
+		bus->set_orifice_state_field(orifice_id, StringName("active_tentacle_count"), (float)active_count);
 	}
 }
 

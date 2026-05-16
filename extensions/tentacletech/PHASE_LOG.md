@@ -1019,7 +1019,49 @@ Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 s
 
 ## Phase 6 — Stimulus bus
 
-**State:** blocked (waiting on Phase 5 canal interior model).
+**State:** in-progress — minimum slice landed 2026-05-16.
+
+### Minimum slice — bus seam + 5 named events (2026-05-16)
+
+Bus class + emission seam landed. Subscribers (Sonance, Reverie) are not wired — slice value is "the seam is in place" per the §4 slice (7) of the 2026-05-14-03 ragdoll-under-tension scenario amendment.
+
+**Deliverables:**
+
+- `StimulusBus : Object` C++ class (`extensions/tentacletech/src/stimulus_bus/stimulus_bus.{h,cpp}`):
+  - `StimulusEventType` enum, all 39 §8.1 values bound as integer constants (`EVENT_PenetrationStart..EVENT_EntryRejected`) plus `EVENT_TYPE_COUNT` sentinel.
+  - Ring buffer (256 capacity, ~2s TTL at 60 Hz). `emit(...)` overwrites oldest on overflow.
+  - `get_recent_events(time_window, type_filter)` returns Array of Dictionaries by copy (snapshot pattern §15).
+  - Continuous channels keyed by orifice ObjectID: `set_orifice_state_field` / `get_orifice_state_field` / `get_orifice_state_snapshot`.
+  - Singleton install/uninstall via `install_as_singleton()` — autoload-style, RefCounted-free so the bus survives the session.
+  - `test_advance_clock(seconds)` test-only setter for time-window filter coverage without real-time waits.
+- Emission sites wired in `extensions/tentacletech/src/orifice/orifice.cpp`:
+  - `PenetrationStart` — fires at `_entry_interactions.push_back(fresh)` (line ~1520). Real emission. Carries `orifice_id`, `tentacle_id`, `depth_normalized` in `extra`.
+  - `RingTransitStart` — fires at the same site as a stub with `ring_index=0` + `stub=true` in `extra`. Per-rim-particle transit tracking deferred. `// TODO: per-rim-particle transit tracking (Phase 6 follow-up).`
+  - `KnotEngulfed` — not emitted in this slice. `EntryInteraction` doesn't yet track `girth_gradient_at_rim`. Documented at the emit site as `// TODO: KnotEngulfed once EntryInteraction tracks girth_gradient_at_rim (Phase 6 / §6.5 follow-up).`
+  - `GripEngaged` (continuous) — `orifice_state[id].grip_engagement` published each tick at the tail of `_populate_entry_interaction_pressures` as the max grip across active EIs. Real.
+  - `OrificeDamaged` (continuous) — `orifice_state[id].damage_rate` published each tick as `total_radial_pressure × damage_rate`. Pragmatic proxy; the per-rim-particle accumulated damage field is the precise quantity but a single per-orifice rate is what Sonance / Reverie consume. Real.
+  - `orifice_state[id].active_tentacle_count` also published as a §8.1-listed field by-product.
+- `extensions/tentacletech/gdscript/stimulus/stimulus_bus_autoload.gd` — autoload wrapper that instantiates the C++ singleton via `ClassDB.instantiate`. Cross-cutting registration in `project.godot`'s `[autoload]` is supervisor-side; the script just provides the seam.
+- `extensions/tentacletech/gdscript/debug/gizmo_layers/stimulus_bus_layer.gd` — minimal CMY palette overlay. Walks `get_recent_events(2.0)` per frame and draws 3-axis crosses at each event's `world_position` with fade-by-age. Color mapping: PenetrationStart=magenta, GripEngaged=cyan, RingTransitStart=green, OrificeDamaged=red, KnotEngulfed=lime-yellow, others=neutral grey. Not wired into the `TentacleDebugOverlay` aggregator in this slice — supervisor decides whether to add the toggle in the overlay scaffold.
+- Test scaffolding: `game/tests/tentacletech/test_p6_stimulus_bus.gd` — 9/9 tests. Covers ring buffer (empty/emit/wrap), time-window + type filters, continuous-channel roundtrip, PenetrationStart at EI creation + tentacle/orifice id propagation, GripEngaged continuous publish, clear-resets-state.
+
+**Acceptance:** the bus seam is alive. Subscribers (Sonance for sound, Reverie for reactions) can read events + continuous channels through public GDScript surface.
+
+**Test results (this slice):** `test_p6_stimulus_bus.gd` 9/9. Full TT suite 252/252 across 34 scripts (was 243/243 across 33).
+
+**.so size:** before 2,298,160 → after 2,355,520 (+57,360 bytes, +2.5%).
+
+**Spec divergences:** none. The implementation follows §8.1 verbatim; the enum is the full §8.1 list (so subscribers compile against the stable set) but only 5 of the 39 event types are wired at emission sites this slice. The `EVENT_TYPE_COUNT` sentinel is an impl detail not in the spec (used internally for bound-checked filters). The `EVENT_` prefix on enum constants is a code-style choice — GDScript-side they're referenced as `ClassDB.class_get_integer_constant("StimulusBus", "EVENT_PenetrationStart")` rather than `StimulusBus.PenetrationStart`. If the supervisor wants the unprefixed form, it's a single-line rename in `_bind_methods`.
+
+**Deferred (Phase 6 follow-ups):**
+- Per-rim-particle `RingTransitStart` tracking (track per-EI per-rim-particle transit count; fire as particle crosses each ring threshold). Currently single fire at EI creation.
+- `KnotEngulfed` — needs `EntryInteraction::girth_gradient_at_rim` field + edge-triggered emit when the value crosses a threshold (§6.5 `knot_factor`-related).
+- Event-form `GripEngaged` / `GripBroke` with hysteresis on `effective_grip_strength` (the continuous channel is published; the discrete threshold-crossing events are a follow-up).
+- Event-form `OrificeDamaged` at damage failure threshold crossings (the continuous `damage_rate` channel is published; the threshold event isn't).
+- Body-area abstraction §8.3 + wetness-sensitivity §8.4 + modulation channels §8.2 (Reverie's write target).
+- `EntryRejected` emission — needs the `_tentacle_crosses_entry_plane` failure branch to publish reasons (`InsufficientPressure`, `FrictionStuck`).
+- Label3D pool for the gizmo overlay (event-type text instead of color-only).
+- Wiring the stimulus bus gizmo layer into `TentacleDebugOverlay`'s toggle list.
 
 ---
 

@@ -13,6 +13,7 @@
 #include "solver/tentacle.h"
 #include "spline/catmull_spline.h"
 #include "spline/spline_data_packer.h"
+#include "stimulus_bus/stimulus_bus.h"
 
 using namespace godot;
 
@@ -30,6 +31,7 @@ void initialize_tentacletech_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(CanalCenterlineSolver);
 	GDREGISTER_CLASS(TunnelStateIntegrator);
 	GDREGISTER_CLASS(CanalReactionPass);
+	GDREGISTER_CLASS(StimulusBus);
 }
 
 void uninitialize_tentacletech_module(ModuleInitializationLevel p_level) {
