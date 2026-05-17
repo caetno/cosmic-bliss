@@ -1015,6 +1015,26 @@ Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 s
 - **Stimulus bus emission for canal-driven events** — Phase 6 / slice (7).
 - **TT-S5 per-slot μ** — slice (8).
 
+### Slice TT-S5 — 4Q-fix tension taper uses per-slot composed μ (2026-05-17)
+
+Closes audit finding TT-S5 (`docs/Cosmic_Bliss_Update_2026-05-14-02_cross_extension_audit_findings.md`) and slice 8 of the ragdoll-under-tension scenario (05-14-03 §4). Replaces the per-tentacle `friction_static` scalar at `pbd_solver.cpp:275` with the per-slot composed μ from `env_contact_static_frictions[slot]` (4S.3 surface-tag composition).
+
+**Mechanism:** the 4Q-fix tension taper picks the dominant contact slot per particle and reads its composed μ_s from the same array the friction-cone projection already uses (line 478-480). When 4S.3 hasn't been called this tick, the array is size 0 and the per-tentacle `friction_static` fallback applies — bit-for-bit equivalent to the pre-TT-S5 path, which is why all 4Q diagnostic tests pass unchanged.
+
+Per-slot μ_s of 0 is treated as "slot opted out of friction" → taper returns 1.0 (no taper). Matches the friction projection's continue-on-zero semantics (line 510).
+
+**Files modified:** `extensions/tentacletech/src/solver/pbd_solver.cpp` — replaced the single-line `const float mu_s_taper = friction_static;` with the 4-line per-slot detection block before the `compute_tension_taper` lambda; lambda now reads `taper_mu_s_arr[base + dom_slot]` when present, falls back to `mu_s_fallback = friction_static`. ~20 lines added; behavior in the no-4S.3-call case unchanged.
+
+**No tests added.** The fallback path is bit-equivalent to the pre-TT-S5 code (verified by full TT suite passing 252/252 unchanged). The per-slot path is exercised structurally by the existing `test_4s3_material_composition.gd` 7 tests (which verify the array is populated when the sibling is called); a per-region behavioral test for the taper would require a full 4Q stick-slip scenario fixture, which is heavy for the audit-driven scope. If a real scenario surfaces taper misbehavior under composed materials, add the test then.
+
+**Full TT suite:** 252/252 across 34 scripts, all rc=0 — no regression. `.so` size unchanged at 2,355,520 bytes (added C++ fits in existing padding; no .so growth).
+
+**Spec divergences:** None. Implementation follows audit-finding TT-S5 verbatim.
+
+**Architecture-doc updates:** None — the per-slot-when-composed-else-fallback contract is already documented at `pbd_solver.cpp:466-474` (the §4S.3 comment); the taper change inherits the same wording.
+
+**Deferred:** Per-region behavioral validation of the taper under real composed materials. Lands when the canal-interior or rim-with-mucosa scenario test scene stands up — until then the fallback path remains the active code path on shipped scenes (4S.3 sibling is not yet a default emission).
+
 ---
 
 ## Phase 6 — Stimulus bus

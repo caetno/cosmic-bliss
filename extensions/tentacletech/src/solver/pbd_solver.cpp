@@ -272,8 +272,23 @@ void PBDSolver::iterate(float p_dt) {
 		// This extinguishes the 4Q stick-slip cycle by capping how much
 		// elastic tension the chain can build into a static-cone-bounded
 		// contact.
-		const float mu_s_taper = friction_static;
 		const float taper_thr = tension_taper_threshold;
+		// Slice TT-S5 (2026-05-17) — per-slot μ_s. When the 4S.3 material
+		// composition sibling has been called this tick,
+		// `env_contact_static_frictions[slot]` holds the composed μ_s for
+		// the dominant contact slot. The taper now reads that value
+		// instead of the per-tentacle `friction_static` scalar so
+		// per-region surface tags (rib-sucker-mucosa composition) drive
+		// the tension cap accurately. When the sibling hasn't been
+		// called, the array is size 0 and we fall back to the
+		// per-tentacle scalar — bit-for-bit equivalent to the pre-TT-S5
+		// path. Audit-finding TT-S5 (`docs/Cosmic_Bliss_Update_2026-05-14-02_cross_extension_audit_findings.md`).
+		const float mu_s_fallback = friction_static;
+		bool taper_per_slot_materials =
+				env_contact_static_frictions.size() == total_slots;
+		const float *taper_mu_s_arr = taper_per_slot_materials
+				? env_contact_static_frictions.ptr()
+				: nullptr;
 		auto compute_tension_taper = [&](int p_particle_idx) -> float {
 			// Picks the dominant slot (max normal_lambda) for the particle
 			// and forwards to the static formula helper. Returns 1.0
@@ -291,7 +306,11 @@ void PBDSolver::iterate(float p_dt) {
 			}
 			if (dom_slot < 0) return 1.0f;
 			float tlam_mag = tlambda_arr[base + dom_slot].length();
-			return compute_tension_taper_factor(taper_thr, mu_s_taper,
+			float mu_s = taper_mu_s_arr != nullptr
+					? taper_mu_s_arr[base + dom_slot]
+					: mu_s_fallback;
+			if (mu_s <= 0.0f) return 1.0f; // slot opted out of friction
+			return compute_tension_taper_factor(taper_thr, mu_s,
 					dom_lambda, tlam_mag);
 		};
 
