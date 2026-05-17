@@ -209,14 +209,43 @@ public:
 	// can't spin up a live physics tick.
 	Vector3 compute_pin_force(const StringName &p_bone_name, const Vector3 &p_bone_world_pos) const;
 
-	// Slice P10.2-min — dispatch hook, called from `_physics_process` after
-	// `snapshot_parent_bases` and before `step_strength_ramps`. No-op in
-	// this slice; the per-bone integrator reads the pin anchor map
-	// directly from `MarionetteBone::_integrate_forces`. The hook exists
-	// so the full composer (P10.1+) has a fixed seam to plug the
-	// world-pos → anatomical conversion into without churning the call
-	// site.
-	void apply_pin_anchors();
+	// Applies every stored pin anchor as a critically-damped spring impulse
+	// directly on the target bone via `PhysicalBone3D::apply_central_impulse`.
+	// Routing OUT of `MarionetteBone::_integrate_forces` (where the prior
+	// `p_state->apply_central_impulse` site lived) because Jolt heavily
+	// throttles impulses applied via `PhysicsDirectBodyState3D` from inside
+	// a custom-integrator callback — observed empirically as ~2000× force
+	// attenuation. Calling `apply_central_impulse` on the bone NODE from
+	// outside any integrator callback is the working pattern (see
+	// `game/tests/marionette/ragdoll_physics_test.gd:899`).
+	//
+	// Called from `_physics_process` after `snapshot_parent_bases` and
+	// before `step_strength_ramps`. `p_dt` is the physics step from the
+	// owning callback so `impulse = force · dt` integrates a continuous
+	// force into a per-tick impulse — and so `Engine.time_scale = 0`
+	// (which zeros delta) implicitly pauses the spring.
+	// Maximum Δv per tick the pin spring can produce, per kg of bone
+	// mass. Cap exists because pin force is mass-independent
+	// (`F = weight · displacement`); without this clamp, the same weight
+	// that gives a chest a sane acceleration sends a finger metacarpal
+	// at orders of magnitude beyond what damping can catch — bone yeets.
+	// Lowered from 5 → 2 m/s/tick (~120 m/s² at 60 Hz) after observing
+	// chain-amplification explosions in distal finger phalanges even with
+	// the semi-implicit form catching the per-bone instability — joint-
+	// constraint transmission needs a tighter envelope.
+	static constexpr float MAX_PIN_DV_PER_TICK = 2.0f;
+
+	void apply_pin_anchors(float p_dt);
+
+	// SPD torque dispatch — iterates POWERED bones, computes the SPD torque
+	// for each via `MarionetteBone::compute_spd_torque_for_test_ex`, and
+	// applies it via `bone->apply_torque_impulse(τ · dt)`. Moved out of
+	// `MarionetteBone::_integrate_forces` for the same reason as pin
+	// (`p_state->apply_torque_impulse` is silently throttled by Jolt for
+	// PhysicalBone3D bodies inside a custom-integrator callback). Called
+	// from `_physics_process` after `apply_pin_anchors`.
+	void apply_spd_torques(float p_dt);
+
 
 	// Slice P10.7-min — body_strain publisher (MINIMUM). One scalar per
 	// POWERED bone, keyed by anatomical name. The full P10.7 form

@@ -461,6 +461,32 @@ func start_simulation() -> void:
 	# effect.
 	_apply_collision_exclusions(sim, skel)
 
+	# Re-wire every MarionetteBone to the C++ core AND re-derive
+	# `anatomical_name`. Both fields are runtime-only — `core` is a bare
+	# Object* (not a property) and `anatomical_name` IS a property but
+	# Godot omits StringName fields at their default (empty) value when
+	# serializing, so pre-built bones come up at scene-load time with
+	# `core = nullptr` and `anatomical_name = ""`.
+	#
+	# Without `core` wired, every `MarionetteCore` API silently no-ops
+	# because `registered_bones` is empty. Without `anatomical_name`,
+	# everything keyed off it — `bone_targets`, `pin_anchors`,
+	# `bone_strength_overrides`, `snapshot_pose_to_targets`,
+	# `apply_pin_anchors`, the future composer — looks up under "" and
+	# misses every bone. `_build_bone` sets `anatomical_name = profile_name`
+	# at editor time; we re-derive the same value here so runtime parity
+	# holds regardless of whether the .tscn was saved with a recent enough
+	# build path.
+	var core: Object = _ensure_core()
+	if core != null:
+		for child: Node in sim.get_children():
+			if child is MarionetteBone:
+				var b: MarionetteBone = child
+				if b.anatomical_name == StringName():
+					var pn: StringName = _resolve_profile_name(StringName(b.bone_name))
+					b.anatomical_name = pn if pn != &"" else StringName(b.bone_name)
+				b.set_core(core)
+
 	# Pick which bones go dynamic. `_dynamic_bone_names` is populated by
 	# build_ragdoll but lives in @tool memory only — it's empty after a
 	# scene reload, even though the simulator hierarchy is intact. In that

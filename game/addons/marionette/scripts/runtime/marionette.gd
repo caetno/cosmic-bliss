@@ -461,6 +461,32 @@ func start_simulation() -> void:
 	# effect.
 	_apply_collision_exclusions(sim, skel)
 
+	# Re-wire every MarionetteBone to the C++ core AND re-derive
+	# `anatomical_name`. Both fields are runtime-only — `core` is a bare
+	# Object* (not a property) and `anatomical_name` IS a property but
+	# Godot omits StringName fields at their default (empty) value when
+	# serializing, so pre-built bones come up at scene-load time with
+	# `core = nullptr` and `anatomical_name = ""`.
+	#
+	# Without `core` wired, every `MarionetteCore` API silently no-ops
+	# because `registered_bones` is empty. Without `anatomical_name`,
+	# everything keyed off it — `bone_targets`, `pin_anchors`,
+	# `bone_strength_overrides`, `snapshot_pose_to_targets`,
+	# `apply_pin_anchors`, the future composer — looks up under "" and
+	# misses every bone. `_build_bone` sets `anatomical_name = profile_name`
+	# at editor time; we re-derive the same value here so runtime parity
+	# holds regardless of whether the .tscn was saved with a recent enough
+	# build path.
+	var core: Object = _ensure_core()
+	if core != null:
+		for child: Node in sim.get_children():
+			if child is MarionetteBone:
+				var b: MarionetteBone = child
+				if b.anatomical_name == StringName():
+					var pn: StringName = _resolve_profile_name(StringName(b.bone_name))
+					b.anatomical_name = pn if pn != &"" else StringName(b.bone_name)
+				b.set_core(core)
+
 	# Pick which bones go dynamic. `_dynamic_bone_names` is populated by
 	# build_ragdoll but lives in @tool memory only — it's empty after a
 	# scene reload, even though the simulator hierarchy is intact. In that
@@ -944,6 +970,20 @@ func get_pin_anchor_count() -> int:
 	return core.call(&"get_pin_anchor_count")
 
 
+## Captures the current physical pose into SPD targets for every powered
+## MarionetteBone. The headline RMB-release feature of the pose-capture
+## scene: "the pose the ragdoll lands in becomes the new SPD hold target".
+## Each bone's `current_anatomical_pose()` (inverse of the forward SPD
+## composer) is written back via `set_bone_target`. KINEMATIC bones (no
+## SPD) and UNPOWERED bones (zero torque until re-engaged) are skipped —
+## the snapshot captures only what active muscle is currently doing.
+func snapshot_pose_to_targets() -> void:
+	var core: Object = _ensure_core()
+	if core == null:
+		return
+	core.call(&"snapshot_pose_to_targets")
+
+
 # --- Body rhythm clock (Mar-I14 / P7.10) -----------------------------------
 # Single source of truth for cyclic-evaluator time. `MarionetteCore` (C++)
 # owns the integrator in `_physics_process`; this wrapper exposes get/set
@@ -995,6 +1035,23 @@ func get_body_rhythm_cycle_index() -> int:
 	if core == null:
 		return 0
 	return core.call(&"get_body_rhythm_cycle_index")
+
+
+## Slice P10.7-min — body_strain publisher (MINIMUM). Dictionary keyed by
+## anatomical bone name; values in [0, 1]. Stub form
+## `clamp(|tracking_error| × strength, 0, 1)` per the 05-14-03 §3 contract.
+## Updated once per physics frame inside MarionetteCore::_physics_process;
+## reads are cheap (returns a copy of the internal map). Empty dict before
+## the first physics tick / when the core isn't instantiated.
+##
+## Per-bone (not per-region) by design — region grouping is deferred until
+## the Reverie consumer defines its region scheme; aggregation reads from
+## here with no migration cost.
+func get_body_strain() -> Dictionary:
+	var core: Object = _ensure_core()
+	if core == null:
+		return {}
+	return core.call(&"get_body_strain")
 
 
 # Lazy-instantiates the C++ MarionetteCore as a hidden child Node. Returns

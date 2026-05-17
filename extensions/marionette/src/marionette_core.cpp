@@ -1,6 +1,8 @@
 #include "marionette_core.h"
 
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/physics_direct_body_state3d.hpp>
+#include <godot_cpp/classes/physics_server3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -39,11 +41,20 @@ void MarionetteCore::_physics_process(double p_delta) {
 	// follow-up if visible quality requires.
 	snapshot_parent_bases();
 
-	// Slice P10.2-min — dispatch hook. Runs AFTER the parent-basis snapshot
-	// per the slice prompt's ordering constraint. No-op body in this slice;
-	// the per-bone read happens inside MarionetteBone::_integrate_forces.
-	// Future composer (P10.1) plugs world-pos → anatomical conversion here.
-	apply_pin_anchors();
+	// Pin anchors → per-tick critically-damped spring impulses, applied
+	// directly to bone nodes. Moved out of `MarionetteBone::_integrate_forces`
+	// because Jolt drops impulses applied via `PhysicsDirectBodyState3D`
+	// during a custom-integrator callback (~2000× attenuation, observed
+	// empirically). Per-tick dt threaded through so the spring integrates
+	// at the correct rate and pause-via-`Engine.time_scale = 0` works.
+	apply_pin_anchors(static_cast<float>(p_delta));
+
+	// SPD torques — same out-of-integrator dispatch as pin, same reason
+	// (Jolt throttles `p_state->apply_torque_impulse` from a custom
+	// integrator callback). Runs AFTER pin so the SPD sees the pin's
+	// just-applied velocity in its damping term — keeps the kp/kd
+	// formulation consistent with the legacy in-integrator order.
+	apply_spd_torques(static_cast<float>(p_delta));
 
 	// Slice P10.7-min — body_strain publisher. Reads the bone transforms
 	// the SPD substeps wrote during the PRIOR physics tick (Godot orders
@@ -529,14 +540,139 @@ Dictionary MarionetteCore::get_body_strain() const {
 	return out;
 }
 
-void MarionetteCore::apply_pin_anchors() {
-	// Slice P10.2-min — intentional no-op. The per-bone read site is in
-	// `MarionetteBone::_integrate_forces` (reads `compute_pin_force` once
-	// per tick, applies as `apply_central_force`). This method exists as
-	// the dispatch hook the spec ordering requires (between parent-basis
-	// snapshot and SPD target dispatch). Full-composer slice (P10.1+)
-	// plugs world-pos → anatomical conversion here so the per-bone path
-	// only needs to read `bone_targets`.
+void MarionetteCore::apply_pin_anchors(float p_dt) {
+	// For each stored pin, look up the bone by anatomical_name and apply
+	// `(spring + damping) · dt` as a central impulse to the bone node.
+	// `bone->apply_central_impulse` (NOT `p_state->apply_central_impulse`)
+	// is the working force-application path on PhysicalBone3D under Jolt;
+	// see the docstring on the declaration for the empirical history.
+	//
+	// Linear scan over registered_bones per pin keeps the data structures
+	// simple — N_bones ≈ 84, N_pins typically 1–3 (drag + a couple of
+	// composer targets at most), so ~250 ops per tick worst case.
+	if (p_dt <= 0.0f) {
+		return; // Engine.time_scale = 0 → implicit pause.
+	}
+	for (const KeyValue<StringName, PinAnchor> &e : pin_anchors) {
+		const StringName &name = e.key;
+		const PinAnchor &a = e.value;
+		MarionetteBone *target = nullptr;
+		for (MarionetteBone *b : registered_bones) {
+			if (b != nullptr && b->get_anatomical_name() == name) {
+				target = b;
+				break;
+			}
+		}
+		if (target == nullptr) {
+			continue;
+		}
+		const Vector3 bone_pos = target->get_global_position();
+		const Vector3 spring = (a.world_pos - bone_pos) * a.weight;
+		const float mass = target->get_mass();
+		const float safe_mass = mass > 0.0f ? mass : 1.0f;
+		const float k_pos = a.weight > 0.0f ? a.weight : 0.0f;
+		const float c = 2.0f * Math::sqrt(k_pos * mass);
+		const Vector3 damping = -target->get_linear_velocity() * c;
+		// Semi-implicit (Tan/Liu/Turk) form: dividing the impulse by
+		// `(1 + c·dt/m)` makes the spring/damper unconditionally stable
+		// for any stiffness/damping combination. Without it, tiny bones
+		// (finger phalanges, m ≈ 0.02–0.06 kg) blow up because
+		// `k·dt²/m > 2` puts the explicit-Euler spring into the unstable
+		// regime AND `c·dt/m > 2` makes the damping overshoot zero in
+		// one tick (reversing into amplification). Translational
+		// analogue of `SPDMath::compute_torque` — same derivation.
+		// Chain amplification (release-time explosion of intermediate /
+		// distal fingers downstream of a pinned bone) collapses too,
+		// because the per-step force exchange across joints is bounded.
+		const float stable_denom = 1.0f + c * p_dt / safe_mass;
+		Vector3 impulse = (spring + damping) * p_dt / stable_denom;
+		// Belt-and-braces per-tick Δv cap — also bounds the initial-
+		// impulse case where the user drags the cursor far from a tiny
+		// bone (semi-implicit damps oscillation but doesn't cap the
+		// first-step transient).
+		const float max_impulse = MAX_PIN_DV_PER_TICK * mass;
+		const float imp_mag = impulse.length();
+		if (imp_mag > max_impulse && max_impulse > 0.0f) {
+			impulse *= (max_impulse / imp_mag);
+		}
+		target->apply_central_impulse(impulse);
+	}
+}
+
+void MarionetteCore::apply_spd_torques(float p_dt) {
+	// Per-tick SPD torque application, mirroring `apply_pin_anchors`'s
+	// out-of-integrator dispatch. For each POWERED bone, compute the
+	// SPD torque via the existing math seam and apply as a torque impulse
+	// (τ · dt) on the bone node directly. KINEMATIC / UNPOWERED bones
+	// skipped — KINEMATIC follows the skeleton, UNPOWERED is the limp
+	// path that wants Jolt's default integrator (gravity, no SPD).
+	if (p_dt <= 0.0f) {
+		return;
+	}
+	for (MarionetteBone *bone : registered_bones) {
+		if (bone == nullptr) {
+			continue;
+		}
+		if (bone->get_current_state() != MarionetteBone::STATE_POWERED) {
+			continue;
+		}
+		const Transform3D this_world = bone->get_global_transform();
+		const Basis parent_basis = get_parent_basis_snapshot(bone, this_world.basis);
+		const Quaternion current_rel_parent =
+				Quaternion(parent_basis.transposed() * this_world.basis);
+		const StringName name = bone->get_anatomical_name();
+		const Vector3 target = get_bone_target(name);
+		const float eff_bone_strength = get_bone_strength(name, bone->get_strength());
+		// `compute_spd_torque_for_test_ex`'s "mass" parameter is actually the
+		// rotational inertia in the Tan/Liu/Turk formulation — the gain
+		// expression `kp = m·ω_n²` only produces critically-damped behavior
+		// when `m` is the rotational inertia, not the linear mass. The
+		// previous call passed bone mass (~6 kg for chest), which is ~60×
+		// larger than the bone's rotational inertia (~0.1 kg·m²) → effective
+		// `kp` was 60× the stable form, so any non-zero tracking error
+		// visibly oscillated.
+		//
+		// Query path: `body_get_param(BODY_PARAM_INERTIA)` returns the user
+		// OVERRIDE (zero if unset), NOT the auto-computed inertia Jolt
+		// actually uses for integration. The auto-computed value lives
+		// inside the body state. `body_get_direct_state` exposes that
+		// state for any body, from any context. Inverse-inertia → invert
+		// per axis to get the actual inertia diagonal.
+		float gain_scale = bone->get_mass();
+		PhysicsDirectBodyState3D *state = PhysicsServer3D::get_singleton()->body_get_direct_state(bone->get_rid());
+		if (state != nullptr) {
+			const Vector3 inv_inertia = state->get_inverse_inertia();
+			if (inv_inertia.x > 1.0e-6f && inv_inertia.y > 1.0e-6f && inv_inertia.z > 1.0e-6f) {
+				const float ix = 1.0f / inv_inertia.x;
+				const float iy = 1.0f / inv_inertia.y;
+				const float iz = 1.0f / inv_inertia.z;
+				gain_scale = (ix + iy + iz) / 3.0f;
+			}
+		}
+		const Vector3 omega = bone->get_angular_velocity();
+		Vector3 torque = bone->compute_spd_torque_for_test_ex(
+				current_rel_parent, target, omega, parent_basis, gain_scale, p_dt,
+				eff_bone_strength, effective_global_strength);
+		// Passive tendon-like tension toward anatomical rest. Always-on
+		// (not gated by global_strength) so a limp bone still drifts
+		// toward neutral instead of flopping under chain inertia.
+		// Uses the same SPD math seam as the main pass — gains scale with
+		// the same inertia factor, so the stable form holds.
+		const float passive = bone->get_passive_tension();
+		if (passive > 0.0f) {
+			torque += bone->compute_spd_torque_for_test_ex(
+					current_rel_parent, Vector3(), omega, parent_basis,
+					gain_scale, p_dt, passive, 1.0f);
+		}
+		if (torque != Vector3()) {
+			// PhysicalBone3D's NODE API exposes no `apply_torque_impulse`
+			// (only `apply_impulse(impulse, offset)`). Go through
+			// PhysicsServer3D directly — same end effect, accumulates as a
+			// torque impulse on the body for the next physics step.
+			PhysicsServer3D::get_singleton()->body_apply_torque_impulse(
+					bone->get_rid(), torque * p_dt);
+		}
+	}
 }
 
 void MarionetteCore::snapshot_pose_to_targets() {
@@ -677,7 +813,8 @@ void MarionetteCore::_bind_methods() {
 			&MarionetteCore::get_pin_anchor_weight);
 	ClassDB::bind_method(D_METHOD("compute_pin_force", "bone_name", "bone_world_pos"),
 			&MarionetteCore::compute_pin_force);
-	ClassDB::bind_method(D_METHOD("apply_pin_anchors"), &MarionetteCore::apply_pin_anchors);
+	ClassDB::bind_method(D_METHOD("apply_pin_anchors", "dt"), &MarionetteCore::apply_pin_anchors);
+	ClassDB::bind_method(D_METHOD("apply_spd_torques", "dt"), &MarionetteCore::apply_spd_torques);
 
 	ClassDB::bind_method(D_METHOD("snapshot_pose_to_targets"),
 			&MarionetteCore::snapshot_pose_to_targets);

@@ -162,8 +162,33 @@ public:
 
 	void _integrate_forces(PhysicsDirectBodyState3D *p_state) override;
 
+	// When true (default), turns off Jolt's built-in 6DOF angular AND linear
+	// springs on every axis at bone-ready time and any time the property
+	// changes. Marionette retired joint springs in favor of SPD torques
+	// (CLAUDE.md §6); existing scenes saved before that retirement still
+	// serialize `angular_spring_enabled = true` per axis and Jolt's spring
+	// then fights both SPD and pin, pulling bones back toward rest even at
+	// `global_strength = 0`. Default true so legacy scenes get the right
+	// behavior at runtime without rebuilding the ragdoll.
+	void set_disable_builtin_springs(bool p_disable);
+	bool get_disable_builtin_springs() const;
+
+	// Passive tendon-like spring toward the anatomical rest pose
+	// (Vector3.ZERO + rest_anatomical_offset). Independent of
+	// `global_strength` — applies even when active muscles are limp, so a
+	// relaxed shoulder / finger / toe drifts toward its anatomical
+	// neutral instead of swinging freely under chain inertia. Scaled as a
+	// per-bone strength multiplier just like the main SPD's
+	// `bone_strength` knob; 0 = no passive tension (default for most
+	// bones), 0.1–0.5 = subtle tendon pull, > 1 = stiffer than active
+	// muscle (rarely useful). Reads through `MarionetteCore::apply_spd_torques`
+	// which adds the passive torque on top of the main SPD pass.
+	void set_passive_tension(float p_tension);
+	float get_passive_tension() const;
+
 protected:
 	static void _bind_methods();
+	void _notification(int p_what);
 
 private:
 	Ref<Resource> bone_entry;
@@ -177,6 +202,10 @@ private:
 	bool mirror_abd = false;
 	bool is_left_side = false;
 	int archetype = -1; // -1 sentinel = not configured.
+	bool disable_builtin_springs = true;
+	float passive_tension = 0.0f;
+
+	void _apply_spring_disable();
 	Vector3 rest_anatomical_offset;
 	Basis anatomical_basis; // bone-local columns (flex, along, abd).
 

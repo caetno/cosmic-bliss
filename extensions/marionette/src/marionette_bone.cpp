@@ -341,105 +341,68 @@ Vector3 MarionetteBone::current_anatomical_pose() const {
 // powered bones; see marionette.gd). Springs were never going to coexist
 // cleanly with the SPD torque — they fight each other at the integrator
 // level.
+void MarionetteBone::set_disable_builtin_springs(bool p_disable) {
+	disable_builtin_springs = p_disable;
+	if (p_disable && is_inside_tree()) {
+		_apply_spring_disable();
+	}
+	// Note on toggling OFF: we don't re-enable springs to whatever they were
+	// before (we never captured that state). Caller wanting joint springs
+	// active needs to set `joint_constraints/<axis>/<linear|angular>_spring_enabled`
+	// explicitly — same as the previous build_ragdoll editor path.
+}
+
+bool MarionetteBone::get_disable_builtin_springs() const {
+	return disable_builtin_springs;
+}
+
+void MarionetteBone::_apply_spring_disable() {
+	// `set(StringName, Variant)` silently no-ops for unknown property paths
+	// (e.g., joint_type != 6DOF, or the joint isn't constructed yet) — safe
+	// to call unconditionally. The joint's per-axis dynamic property surface
+	// is documented at marionette.gd `_apply_joint_constraints`.
+	static const char *AXES[] = {"x", "y", "z"};
+	for (int i = 0; i < 3; ++i) {
+		const String axis = AXES[i];
+		set(StringName(String("joint_constraints/") + axis + "/angular_spring_enabled"), false);
+		set(StringName(String("joint_constraints/") + axis + "/linear_spring_enabled"), false);
+	}
+}
+
+void MarionetteBone::set_passive_tension(float p_tension) {
+	passive_tension = p_tension < 0.0f ? 0.0f : p_tension;
+}
+
+float MarionetteBone::get_passive_tension() const {
+	return passive_tension;
+}
+
+void MarionetteBone::_notification(int p_what) {
+	// NOTIFICATION_READY fires AFTER PhysicalBone3D's own _ready, which is
+	// where the 6DOF joint gets constructed. Re-applying the spring disable
+	// here covers the deserialization order where the setter ran before the
+	// joint existed (silent no-op then), plus any scenes saved without the
+	// `disable_builtin_springs` property at all (uses class default = true).
+	if (p_what == NOTIFICATION_READY && disable_builtin_springs) {
+		_apply_spring_disable();
+	}
+}
+
+
 void MarionetteBone::_integrate_forces(PhysicsDirectBodyState3D *p_state) {
-	if (current_state != STATE_POWERED) {
-		return;
-	}
-	if (core == nullptr) {
-		return; // No target cache wired up — leave body untouched.
-	}
-
-	// Snapshot once per tick (CLAUDE.md "Never" — no repeated global_transform
-	// reads inside an integration step). `p_state->get_transform()` is the
-	// body's authoritative world transform for this tick.
-	const Transform3D this_world = p_state->get_transform();
-
-	// Resolve the typed core pointer up front. We need it for both the
-	// parent-basis snapshot lookup (Mar-I6) and the bone-target cache read
-	// below; do the cast once. The raw `core` Object* was already null-checked
-	// above, but a wrong-type assignment still produces a null cast — fall
-	// back to identity-frame behavior in that edge case.
-	MarionetteCore *core_ptr = Object::cast_to<MarionetteCore>(core);
-
-	// Mar-I6 — parent basis sourced from MarionetteCore's per-frame snapshot
-	// (taken in MarionetteCore::_physics_process before SPD substeps), not a
-	// live `Node3D::get_global_transform()` read inside the integrator. The
-	// live read introduced phantom damping coupling that scales with SPD
-	// stiffness; the kasumi ragdoll-under-tension scenario sits exactly in
-	// that regime. The fallback (this_world.basis) preserves the prior root /
-	// orphan behavior — error_quaternion stays well-defined when no parent
-	// Node3D exists, and later slices add the world-anchored hip tether so
-	// the root case retires entirely. If the core cast failed (wrong-type
-	// assignment), fall back to identity-frame behavior — same as the
-	// pre-Mar-I6 code path's `parent_node == nullptr` branch.
-	const Basis parent_world_basis = (core_ptr != nullptr)
-			? core_ptr->get_parent_basis_snapshot(this, this_world.basis)
-			: this_world.basis;
-
-	// Current relative rotation, parent-local frame.
-	const Quaternion current_rel_parent =
-			Quaternion(parent_world_basis.transposed() * this_world.basis);
-
-	// Read target from the C++ cache. ZERO sentinel → identity target.
-	Vector3 anatomical_target;
-	if (core_ptr != nullptr) {
-		anatomical_target = core_ptr->get_bone_target(anatomical_name);
-	}
-
-	const float global_strength = (core_ptr != nullptr) ? core_ptr->get_global_strength() : 1.0f;
-	// Slice 4r — consult MarionetteCore for a per-bone override; fall back to
-	// the bone's own cached `strength` (which comes from the BoneEntry-derived
-	// default set at build_ragdoll). `BoneEntry` doesn't carry a strength
-	// field directly — the cached value on this bone IS the entry default.
-	const float effective_bone_strength =
-			(core_ptr != nullptr) ? core_ptr->get_bone_strength(anatomical_name, strength) : strength;
-	const float dt = p_state->get_step();
-	const float mass = get_mass();
-
-	const Vector3 torque_world = compute_spd_torque_for_test_ex(
-			current_rel_parent,
-			anatomical_target,
-			p_state->get_angular_velocity(),
-			parent_world_basis,
-			mass,
-			dt,
-			effective_bone_strength,
-			global_strength);
-
-	p_state->apply_torque(torque_world);
-
-	// Slice 5 (P5.5) — hip upward nudge. Constant central force in world +Y,
-	// attenuated by global_strength so a limp character isn't lifted by the
-	// hip's drive force. Only fires on the bone flagged as the ragdoll root
-	// (the hip — set by build_ragdoll). World-Y is fine here: gravity is also
-	// world-Y, and this is a quick lever (not a rigorous foot-IK) to keep
-	// the pelvis from sagging while the per-frame physics solver settles.
-	if (is_root && core_ptr != nullptr) {
-		const float nudge = core_ptr->get_hip_upward_nudge();
-		if (nudge != 0.0f) {
-			const float factor = core_ptr->get_global_strength_factor();
-			if (factor > 0.0f) {
-				p_state->apply_central_force(Vector3(0.0f, nudge * factor, 0.0f));
-			}
-		}
-	}
-
-	// Slice P10.2-min — pin anchor pull. Soft world-space spring:
-	// `F = weight × (world_pos − bone_world_pos)`. The bone's authoritative
-	// world position is `this_world.origin` (snapshotted at the top of this
-	// callback — no extra `get_global_transform()` read, satisfying the
-	// snapshot-discipline rule). `compute_pin_force` returns zero for bones
-	// without a pin, so the unconditional apply is cheap (one HashMap miss
-	// + a zero-magnitude force on Jolt). The pin coexists with SPD: SPD
-	// continues to drive anatomical angle; the pin biases the bone's
-	// translation toward `world_pos`. Soft target per Phase 10 commitment
-	// #2 (composer feeds SPD as soft targets, not hard constraints).
-	if (core_ptr != nullptr) {
-		const Vector3 pin_force = core_ptr->compute_pin_force(anatomical_name, this_world.origin);
-		if (pin_force != Vector3()) {
-			p_state->apply_central_force(pin_force);
-		}
-	}
+	// Empty by design (2026-05-17). SPD torque, pin anchor force, and hip
+	// nudge all USED to be applied here, but Jolt silently throttles
+	// `PhysicsDirectBodyState3D::apply_*_impulse` calls made inside a
+	// custom-integrator callback on PhysicalBone3D bodies (~2000× force
+	// attenuation, observed empirically). All three were moved into
+	// `MarionetteCore::apply_pin_anchors` / `apply_spd_torques`, which run
+	// from `MarionetteCore::_physics_process` and call
+	// `bone->apply_*_impulse(...)` on the node directly — the proven
+	// working pattern (see `game/tests/marionette/ragdoll_physics_test.gd:899`).
+	// `custom_integrator = true` is kept on POWERED bones so this callback
+	// still fires (cheap, deterministic) in case a future composer wants
+	// per-body state without a round-trip through MarionetteCore.
+	(void)p_state;
 }
 
 void MarionetteBone::_bind_methods() {
@@ -482,6 +445,20 @@ void MarionetteBone::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_archetype", "v"), &MarionetteBone::set_archetype);
 	ClassDB::bind_method(D_METHOD("get_archetype"), &MarionetteBone::get_archetype);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "archetype"), "set_archetype", "get_archetype");
+
+	ClassDB::bind_method(D_METHOD("set_disable_builtin_springs", "disable"),
+			&MarionetteBone::set_disable_builtin_springs);
+	ClassDB::bind_method(D_METHOD("get_disable_builtin_springs"),
+			&MarionetteBone::get_disable_builtin_springs);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "disable_builtin_springs"),
+			"set_disable_builtin_springs", "get_disable_builtin_springs");
+
+	ClassDB::bind_method(D_METHOD("set_passive_tension", "tension"),
+			&MarionetteBone::set_passive_tension);
+	ClassDB::bind_method(D_METHOD("get_passive_tension"),
+			&MarionetteBone::get_passive_tension);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "passive_tension"),
+			"set_passive_tension", "get_passive_tension");
 
 	ClassDB::bind_method(D_METHOD("set_rest_anatomical_offset", "v"), &MarionetteBone::set_rest_anatomical_offset);
 	ClassDB::bind_method(D_METHOD("get_rest_anatomical_offset"), &MarionetteBone::get_rest_anatomical_offset);
