@@ -101,3 +101,86 @@ introduce a code path that errors when `body_field_owner` meta is absent.
 No coordination needed before B5 starts. Scope the B5 fork against this
 shape; B3 PR lands today.
 
+### 2026-05-17 body_field
+
+**§10.4-bf — `SurfaceOrificeRimAttachment.bake()` is concrete.** The
+body_field side of the orifice-rim authoring migration from
+`Marionette_plan.md` §17 (rim row) is shipped. TT-side consumption is
+unblocked — replaces the pre-§17 "anchor bones in Blender + skin
+weights painted in Blender + the rebind trick" path.
+
+**Authoring contract (locked):**
+
+```
+# game/addons/body_field/resources/surface_orifice_rim_attachment.gd
+class_name SurfaceOrificeRimAttachment extends SurfaceAttachment
+
+@export var rim_particle_positions: PackedVector3Array    # rest positions, body-mesh local
+@export var falloff_radius_m: float = 0.02                # tight; rim is thin
+@export var falloff_curve: FalloffCurve = SMOOTHSTEP      # LINEAR | SMOOTHSTEP | GAUSSIAN
+@export var weight_mode: WeightMode = REPLACE             # set in _init; rim REPLACEs LBS
+
+# After field.bake_all_attachments() runs:
+@export var baked_per_particle_weights: PackedFloat32Array    # length n_verts * n_particles_baked, row-major
+@export var n_particles_baked: int                            # for stale-check / consumption indexing
+@export var baked_weights: PackedFloat32Array                 # length n_verts; per-vertex mask (saturating peak influence)
+```
+
+**Bake recipe** (one geodesic solve per rim particle, then per-vertex normalize):
+1. For each rim particle `p`, find its nearest welded vertex; run `field.diffuse_geodesic([seed_p])` → per-vertex geodesic distance.
+2. Per-vertex per-particle raw weight = `falloff_curve(clamp(d / falloff_radius_m, 0, 1))`.
+3. Per-vertex normalize across particles so `Σ_p w[v,p] = 1` when at least one particle reaches the vertex; zero otherwise.
+4. Per-vertex mask = saturating peak raw influence — gives consumers a smooth `[0, 1]` "rim influence" scalar for blending REPLACE-mode rim verts with LBS-mode body verts at the boundary.
+
+**TT-side consumption pattern (your slice — TT §10.4):**
+
+Per substep, for every `SurfaceOrificeRimAttachment` in the hero's
+`BodyField.attachments`:
+
+```
+const n_p = att.n_particles_baked
+if n_p != rim.particles.size():
+    push_warning("rim particle count changed since bake — re-bake needed")
+    continue   # or fall back to the rebind-trick path
+
+for each rim vertex v with att.baked_weights[v] > threshold:
+    var pos = Vector3.ZERO
+    for p in n_p:
+        pos += att.baked_per_particle_weights[v * n_p + p] * rim.particles[p].world_pos
+    # REPLACE mode: pos is the rim vertex's NEW world position (overrides skeleton-LBS).
+```
+
+Vertices outside the rim mask (`baked_weights[v] == 0`) keep their
+skeleton-LBS position. The boundary band (`0 < baked_weights[v] < 1`)
+can be lerped between LBS and rim-driven for a smooth seam if you
+want; the mask itself is the lerp parameter.
+
+**Hard-optional invariant**: hero without `BodyField` or without
+`SurfaceOrificeRimAttachment` in `attachments` keeps the rebind-trick
+path bit-for-bit unchanged. The new path activates per-attachment, not
+globally — different orifices can mix old/new during migration.
+
+**Authoring helper (your call)**: TT-side editor tool would snapshot
+the rim PBD particles' rest positions into the resource's
+`rim_particle_positions` field. Without it, the user authors positions
+by hand. v1: ship without the helper; users author positions
+themselves or scripted snapshot. v1.5: add the editor button.
+
+**Bake cost note**: one geodesic solve per rim particle. For ~16
+particles per orifice and ~5k body verts, each solve is one Cholesky
+back-sub (~25M ops). Total bake-time cost: trivial. Re-bake only
+needed when rim topology changes (particle count or rest positions),
+not per-frame.
+
+**Test results (body_field side)**: ring of 8 particles on a unit
+sphere (radius 0.4 m, smoothstep falloff). 290 welded verts, 72 (~25%)
+inside rim mask; sums normalize to 1.0 in-mask, 0.0 out-of-mask; each
+particle's nearest vertex has mask ≥ 0.5; antipode is masked out
+cleanly. See `tests/run_tests.gd::test_surface_orifice_rim_attachment_ring`.
+
+**Apply pass on TT_Architecture.md §10.4** likely needed when your
+consumption lands — flag the rebind-trick path as the no-body_field
+fallback and document the new path as the body_field-present path.
+That's an architecture-doc edit you can either bundle with your
+slice or surface as an apply-pass.
+

@@ -39,6 +39,8 @@ func _run() -> void:
 		"test_surface_field_sphere_geodesic",
 		# §17.5 — concrete SurfaceJiggleAttachment.bake().
 		"test_surface_jiggle_attachment_falloff",
+		# §10.4-bf — concrete SurfaceOrificeRimAttachment.bake().
+		"test_surface_orifice_rim_attachment_ring",
 	]:
 		var result: bool = await call(test_name)
 		if result:
@@ -1218,6 +1220,148 @@ func test_surface_jiggle_attachment_falloff() -> bool:
 
 	print("[PASS] test_surface_jiggle_attachment_falloff (n=%d, w[seed]=%f, w[antipode]=%f, radius=%f)" % [
 		n, weights[0], weights[antipode], att.falloff_radius_m])
+	field.free()
+	return true
+
+
+# --- §10.4-bf — SurfaceOrificeRimAttachment.bake() --------------------
+
+func test_surface_orifice_rim_attachment_ring() -> bool:
+	const BodySurfaceFieldScript := preload("res://addons/body_field/runtime/body_surface_field.gd")
+	const SurfaceOrificeRimAttachmentScript := preload("res://addons/body_field/resources/surface_orifice_rim_attachment.gd")
+
+	# Smooth unit sphere; the rim mock is a ring of 8 particles at
+	# latitude z ≈ 0.5 (sin⁻¹(0.5) ≈ 30° below the north pole).
+	var sphere: SphereMesh = SphereMesh.new()
+	sphere.radius = 1.0
+	sphere.height = 2.0
+	sphere.radial_segments = 24
+	sphere.rings = 12
+	var arrays: Array = sphere.surface_get_arrays(0)
+	var amesh: ArrayMesh = ArrayMesh.new()
+	var a2: Array = []
+	a2.resize(Mesh.ARRAY_MAX)
+	a2[Mesh.ARRAY_VERTEX] = arrays[Mesh.ARRAY_VERTEX]
+	a2[Mesh.ARRAY_INDEX] = arrays[Mesh.ARRAY_INDEX]
+	amesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+
+	var field: Node3D = BodySurfaceFieldScript.new()
+	field.source_mesh = amesh
+	field._ensure_factor()
+	if field.factor == null or field.factor.chol_kind != &"dense_ll" or field.factor.chol_poisson_kind != &"dense_ll":
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: factor build failed")
+		field.free()
+		return false
+
+	var welded_verts: PackedVector3Array = field.get_source_vertices()
+	var n: int = welded_verts.size()
+
+	# Build a ring of 8 particles on the sphere at latitude z = 0.5
+	# (radius √(1 - 0.5²) = √0.75 ≈ 0.866 from the polar axis).
+	const N_PARTICLES: int = 8
+	const LAT_Z: float = 0.5
+	const RING_R: float = 0.86602540378   # sqrt(1 - 0.25)
+	var rim_positions: PackedVector3Array = PackedVector3Array()
+	rim_positions.resize(N_PARTICLES)
+	for p in range(N_PARTICLES):
+		var th: float = TAU * float(p) / float(N_PARTICLES)
+		rim_positions[p] = Vector3(RING_R * cos(th), LAT_Z, RING_R * sin(th))
+
+	# Per-particle radius small enough that each particle only
+	# influences a local arc — particles are ~0.68 m apart along the
+	# ring (2π·0.866/8); radius 0.4 m gives some neighbour overlap but
+	# leaves the antipode far outside.
+	var att: SurfaceOrificeRimAttachmentScript = SurfaceOrificeRimAttachmentScript.new()
+	att.attachment_name = &"test_rim"
+	att.host_bone = &"Hips"
+	att.rim_particle_positions = rim_positions
+	att.falloff_radius_m = 0.4
+
+	var mask: PackedFloat32Array = att.bake(field)
+	if mask.size() != n:
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: mask size %d != n %d" % [mask.size(), n])
+		field.free()
+		return false
+	if att.n_particles_baked != N_PARTICLES:
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: n_particles_baked %d != %d" % [att.n_particles_baked, N_PARTICLES])
+		field.free()
+		return false
+	if att.baked_per_particle_weights.size() != n * N_PARTICLES:
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: per-particle weights size %d != %d" % [
+			att.baked_per_particle_weights.size(), n * N_PARTICLES])
+		field.free()
+		return false
+
+	# 1. All weights finite, non-negative, ≤ 1.
+	for i in range(n * N_PARTICLES):
+		var w: float = att.baked_per_particle_weights[i]
+		if not is_finite(w) or w < -1.0e-6 or w > 1.0 + 1.0e-6:
+			print("[FAIL] test_surface_orifice_rim_attachment_ring: weight[%d]=%f out of [0,1]" % [i, w])
+			field.free()
+			return false
+
+	# 2. For verts where mask > threshold, per-vertex sum across
+	#    particles = 1.0 (normalized). For mask == 0, per-vertex sum
+	#    = 0.
+	for vi in range(n):
+		var sum: float = 0.0
+		for p in range(N_PARTICLES):
+			sum += att.baked_per_particle_weights[vi * N_PARTICLES + p]
+		if mask[vi] > 1.0e-3:
+			if abs(sum - 1.0) > 1.0e-3:
+				print("[FAIL] test_surface_orifice_rim_attachment_ring: vert %d in-mask sum=%f, expected 1.0 (mask=%f)" % [vi, sum, mask[vi]])
+				field.free()
+				return false
+		else:
+			if abs(sum) > 1.0e-6:
+				print("[FAIL] test_surface_orifice_rim_attachment_ring: vert %d masked-out sum=%f, expected 0.0" % [vi, sum])
+				field.free()
+				return false
+
+	# 3. The "south pole" antipode (z = -1.0) must be masked out — it's
+	#    well outside the 0.4 m radius from any ring particle (geodesic
+	#    distance to ring is ≈ π/2 + 30° ≈ 2.1 m).
+	var south_pole: int = -1
+	var z_min: float = INF
+	for i in range(n):
+		if welded_verts[i].y < z_min:
+			z_min = welded_verts[i].y
+			south_pole = i
+	if mask[south_pole] > 1.0e-3:
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: south pole vert %d has mask=%f, expected 0" % [south_pole, mask[south_pole]])
+		field.free()
+		return false
+
+	# 4. Each rim particle's nearest welded vertex should have a high
+	#    mask (≥ 0.5) — that vert is essentially AT the particle.
+	for p in range(N_PARTICLES):
+		var nearest: int = -1
+		var d_min: float = INF
+		for vi in range(n):
+			var d: float = welded_verts[vi].distance_to(rim_positions[p])
+			if d < d_min:
+				d_min = d
+				nearest = vi
+		if mask[nearest] < 0.5:
+			print("[FAIL] test_surface_orifice_rim_attachment_ring: particle %d nearest vert %d has mask=%f < 0.5" % [p, nearest, mask[nearest]])
+			field.free()
+			return false
+
+	# 5. Count rim-influenced verts. With 8 particles × 0.4 m radius
+	#    around a unit-sphere ring, we expect a fraction of the sphere
+	#    to be rim-touched (loose bound: 5% < frac < 60%).
+	var n_in_rim: int = 0
+	for vi in range(n):
+		if mask[vi] > 1.0e-3:
+			n_in_rim += 1
+	var frac: float = float(n_in_rim) / float(n)
+	if frac < 0.05 or frac > 0.6:
+		print("[FAIL] test_surface_orifice_rim_attachment_ring: rim coverage %f outside [0.05, 0.6]" % frac)
+		field.free()
+		return false
+
+	print("[PASS] test_surface_orifice_rim_attachment_ring (n=%d, n_particles=%d, n_in_rim=%d, frac=%f)" % [
+		n, N_PARTICLES, n_in_rim, frac])
 	field.free()
 	return true
 

@@ -182,3 +182,40 @@ First concrete `SurfaceAttachment` subclass — fills the §17.1 stub for `Surfa
 - Marionette §15 amendment runtime — consume `SurfaceJiggleAttachment.baked_weights` in the render-mesh additive-offset path.
 - TT §10.4 — `SurfaceOrificeRimAttachment.bake()` (rim authoring; body_field-side concrete impl analogous to this slice).
 - Marionette §16 — `SurfaceSoftRegionAttachment.bake()` (soft-region geodesic blend).
+
+---
+
+### §10.4-bf — SurfaceOrificeRimAttachment.bake() (second consumer migration, body_field side)
+
+Body_field side of the orifice-rim authoring migration. Fills the §17.1 stub for `SurfaceOrificeRimAttachment` with multi-seed geodesic bake math. Unblocks TT §10.4's runtime consumption (TT supervisor's slice).
+
+**Shipped files (modified):**
+- `extensions/body_field/gdscript/resources/surface_orifice_rim_attachment.gd` — concrete `bake()`. Resource exports: `rim_particle_positions: PackedVector3Array` (rest positions, body-mesh local), `falloff_radius_m: float = 0.02` (tight; rim is thin), `falloff_curve: FalloffCurve` (LINEAR / SMOOTHSTEP / GAUSSIAN, default SMOOTHSTEP). Output: `baked_per_particle_weights: PackedFloat32Array` (length `n_verts * n_particles_baked`, row-major), `n_particles_baked: int`, and `baked_weights` (inherited) repurposed as a per-vertex "rim influence" mask scalar. Bake: per-particle geodesic solve → per-vertex per-particle raw falloff → per-vertex normalize across particles → saturating peak as mask.
+- `extensions/body_field/tests/run_tests.gd` — `test_surface_orifice_rim_attachment_ring`: 8-particle ring at latitude z=0.5 on a unit sphere, radius 0.4 m. Asserts in-mask sums = 1.0, out-of-mask sums = 0.0, each particle's nearest vert has mask ≥ 0.5, antipode is masked out, coverage fraction sane (~25%).
+
+**Decisions:**
+
+1. **Multi-seed bake = one geodesic solve per rim particle, then per-vertex normalize across particles.** Cholesky factor is shared (built once in §17.2), so each extra particle costs one back-sub (~O(n²) flops on a dense factor). For ~16 particles per orifice on a kasumi-class body (n≈5k), bake-time cost is ~400 M ops — sub-second; hero-load only.
+
+2. **`weight_mode = REPLACE` set in `_init()`.** The pre-§17 path used the "rebind trick" where the skinning shader fully replaced anchor-bone transforms with rim-particle positions — i.e. the rim verts were driven entirely by particles, no skeleton-LBS contribution. REPLACE preserves that semantic. (Jiggle's `weight_mode = ADDITIVE` is correct for it; both inherit from the base default of ADDITIVE, but rim overrides in `_init`.)
+
+3. **Per-vertex normalize across particles.** Without normalization, vertices near multiple particles double-count. With normalization (Σ_p w[v,p] = 1 inside the mask), the rim skins smoothly between particles — each vertex is a barycentric blend of the nearest particles. Standard rim-skinning convention.
+
+4. **Mask = saturating peak raw influence, NOT post-normalize sum.** Post-normalize the in-mask sum is exactly 1.0, which carries no information about the strength of the rim's influence at that vertex. The pre-normalize peak raw weight is the natural "rim influence" scalar: 1 at the particle, falls toward 0 at the radius. Consumers can use it as a lerp parameter to blend REPLACE-mode rim verts with LBS-mode body verts at the boundary seam.
+
+5. **`baked_per_particle_weights` packed as 1D `PackedFloat32Array` row-major.** Consumers index `[v * n_particles_baked + p]`. GPU-friendly for v1.5+ TT compute-shader consumption. The `n_particles_baked` field is a load-bearing companion — consumers MUST check it matches their current rim particle count or treat the bake as stale.
+
+6. **Authoring contract: positions as Vector3 array, not NodePath to a TT rim.** Same boundary discipline as §17.5 — body_field doesn't know about TT internals. TT supervisor can ship an editor helper that snapshots rim particle rest positions into the resource; body_field stays self-contained.
+
+**Test results:** 15/15 tests pass. Rim test: n=290 welded verts, 72 (24.8%) inside rim mask, each particle's nearest vertex has mask ≥ 0.5, antipode masked out cleanly.
+
+**Coordination:**
+- **TT §10.4** — fully unblocked. Inbox brief dropped (`.claude/inbox/tentacletech.md`, 2026-05-17 entry): authoring contract locked, consumption pattern documented (per-substep `pos = Σ_p w[v,p] × rim.particles[p].world_pos` for masked verts), `TT_Architecture.md` §10.4 apply-pass flagged.
+- **Hard-optional invariant**: hero without `BodyField` or without `SurfaceOrificeRimAttachment` in `attachments` keeps the rebind-trick path bit-for-bit. Per-attachment activation — different orifices can mix old/new during migration.
+
+**Marionette §15-amend is PARKED** (per user direction 2026-05-17): jiggle stays bone-based (breast existing path + glutes-via-future-bone-insertion); skin-jiggle via compute shader → spatial shader is the eventual track. Body_field's §17.5 (`SurfaceJiggleAttachment.bake()`) remains shipped and tested but has no current consumer.
+
+**Next:**
+- TT §10.4 — TT-side consumption (TT supervisor's slice).
+- Marionette §16 — `SurfaceSoftRegionAttachment.bake()` (third concrete bake; soft-region geodesic blend; body_field side analogous to this slice).
+- Skin-jiggle compute → spatial shader (the future track for Marionette §15-amend; out of body_field scope until designs converge).
