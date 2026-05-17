@@ -121,13 +121,13 @@ func _process(_delta: float) -> void:
 	# leave the gizmo frozen. Force a per-frame rebuild for those cases.
 	# Static-only renders still gate on the signature so an idle scene
 	# pays nothing.
-	var live_chain := show_centerline and canal.has_method("has_centerline_chain") \
+	var live_chain: bool = show_centerline and canal.has_method("has_centerline_chain") \
 			and canal.has_centerline_chain()
-	var live_walls := show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
+	var live_walls: bool = show_wall_displacement and canal.has_method("has_tunnel_state_integrator") \
 			and canal.has_tunnel_state_integrator()
-	var live_contacts := show_wall_contacts and tentacle_for_wall_contacts != null \
+	var live_contacts: bool = show_wall_contacts and tentacle_for_wall_contacts != null \
 			and tentacle_for_wall_contacts.has_method("get_canal_wall_contacts_snapshot")
-	var live_reaction := show_reaction_pass and canal.has_method("has_reaction_pass") \
+	var live_reaction: bool = show_reaction_pass and canal.has_method("has_reaction_pass") \
 			and canal.has_reaction_pass()
 	if live_chain or live_walls or live_contacts or live_reaction:
 		_rebuild()
@@ -420,7 +420,7 @@ func _draw_wall_displacement(p_spline: RefCounted) -> void:
 	if dyn_radius.size() != axial * sectors:
 		return
 
-	var have_live_chain := canal.has_method("has_centerline_chain") \
+	var have_live_chain: bool = canal.has_method("has_centerline_chain") \
 			and canal.has_centerline_chain()
 	var chain: RefCounted = canal.get_centerline_chain() if have_live_chain else null
 	var total_arc: float = 0.0
@@ -439,9 +439,11 @@ func _draw_wall_displacement(p_spline: RefCounted) -> void:
 			origin = chain.evaluate_at(s)
 			var b: Basis = chain.basis_at(s)
 			# basis_at returns columns (tangent, normal, binormal) — match
-			# _project_onto_spline / _draw_cell_grid convention.
-			normal = b.get_column(1).normalized()
-			binormal = b.get_column(2).normalized()
+			# _project_onto_spline / _draw_cell_grid convention. In GDScript
+			# `Basis.get_column(i)` isn't bound; use `.x` `.y` `.z` instead
+			# (see reference_godot_tentacletech_gotchas memory).
+			normal = b.y.normalized()
+			binormal = b.z.normalized()
 		else:
 			var s := s_norm * spline_arc
 			var t: float = p_spline.distance_to_parameter(s)
@@ -518,7 +520,7 @@ func _draw_reaction_pass(p_spline: RefCounted) -> void:
 	if reactions.size() != axial:
 		return
 
-	var have_live_chain := canal.has_method("has_centerline_chain") \
+	var have_live_chain: bool = canal.has_method("has_centerline_chain") \
 			and canal.has_centerline_chain()
 	var chain: RefCounted = canal.get_centerline_chain() if have_live_chain else null
 	var total_arc: float = 0.0

@@ -1015,6 +1015,72 @@ Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 s
 - **Stimulus bus emission for canal-driven events** — Phase 6 / slice (7).
 - **TT-S5 per-slot μ** — slice (8).
 
+### Slice — `OrificeBuilder` + `OrificeGizmoPlugin` editor authoring (2026-05-17)
+
+Visual editor-time orifice authoring via a real `EditorNode3DGizmoPlugin` with drag handles. Drop an `OrificeBuilder` node in the scene, tweak rim params from the inspector, drag handles in the viewport — the ring resizes live. Press play, the inner C++ `Orifice` is instantiated and the rim is built via `OrificeAuthoring.add_circular_rim` / `add_polygon_rim`.
+
+**Why a wrapper (not direct on `Orifice`):** `Orifice` is the C++ runtime node and doesn't carry rim-shape authoring exports. Adding them would require a C++ rebuild + binding (plus a Resource-type property). `OrificeBuilder` is a `@tool` GDScript Node3D that holds the authoring state (radius, particle count, shape mode, center offset, axis) as `@export`s and, at play-mode `_ready`, instantiates a child `Orifice` C++ node and forwards the rim. Composition pattern; no C++ touch needed.
+
+**EI signal forwarding:** `OrificeBuilder` re-emits the inner `Orifice`'s `entry_interaction_started` / `entry_interaction_ended` signals on itself. Canal subscribers (per the authoring-pass production wiring slice) can subscribe to either the wrapper or the inner orifice — both fire identically.
+
+**Files added:**
+
+- `extensions/tentacletech/gdscript/orifice/orifice_builder.gd` — `OrificeBuilder : Node3D` (~220 lines). Inspector exports: `shape_mode`, `rim_radius`, `rim_particle_count`, `rim_center_offset`, `rim_axis`, `slit_aspect_ratio`, `custom_positions`, `rest_stiffness`, `area_compliance`, `distance_compliance`, `orifice_profile`, `skeleton_path`, `bone_name`, `preview_enabled`. Public methods: `get_orifice()`, `compute_rim_positions_local()`, `compute_target_area()`. Three shape modes: CIRCLE / SLIT / POLYGON_CUSTOM. `update_gizmos()` called from every export setter so the viewport preview redraws live.
+- `extensions/tentacletech/gdscript/gizmo_plugin/orifice_gizmo.gd` — `EditorNode3DGizmoPlugin` (~250 lines). `_has_gizmo` matches by script comparison to `OrificeBuilderScript` (not class name — Godot's gizmo plugin system can't distinguish two @tool Node3D subclasses by class name alone). `_redraw` draws ring + particle dots + axis arrow + two handles. `_get_handle_value` / `_set_handle` / `_commit_handle` wire the radius + axial-offset handles with full undo/redo via `EditorUndoRedoManager`. Math helpers `_ray_plane_intersect` / `_ray_line_closest_t` are static for testability.
+- `game/tests/tentacletech/test_orifice_builder.gd` — 8 tests covering default circular rim build, slit ellipse aspect, polygon pass-through, position/area computation, EI signal forwarding, and gizmo plugin math helpers.
+
+**Files modified:**
+
+- `extensions/tentacletech/plugin.gd` — registers `OrificeGizmoPlugin` alongside `TentacleGizmoPlugin`. Passes `get_undo_redo()` to the gizmo plugin so handle drags participate in Ctrl-Z.
+- `extensions/tentacletech/gdscript/debug/canal_gizmo_overlay.gd` — drive-by fix for pre-existing parse errors flagged by the 5F.B.B agent: `var x := bool_a and bool_b` couldn't infer type when both operands lacked declared types; promoted to `var x: bool = ...`. Also replaced `Basis.get_column(1)` / `get_column(2)` with `basis.y` / `basis.z` (per `reference_godot_tentacletech_gotchas_2026-05-03` — `get_column` isn't bound to GDScript; column access is via `.x` / `.y` / `.z`). These were blocking `godot --editor --quit` (Signal 11 crash on class cache refresh); not introduced by this slice but fixed here since they prevented verification.
+
+**Handle interaction summary:**
+
+- **Handle 0 — Rim radius** (drawn at `center + plane_x * radius`): camera ray intersected with the rim plane (plane through `center`, normal `axis`); distance from center to hit = new radius. Clamped to `[5 mm, 1 m]`. Undo/redo records the old/new radius scalar.
+- **Handle 1 — Axial offset** (drawn at `center + axis * 1.5 * radius`): camera ray closest-point on the axis line through current center; the projection's t value becomes the new axial offset. Perpendicular component of `rim_center_offset` is preserved. Clamped to `[-1, 1]` m. Undo/redo records the full Vector3 `rim_center_offset` (so the perp component is restored even though only the axial scalar drove the drag).
+
+**Authoring workflow (visual, no Blender, no code):**
+
+1. Drop an `OrificeBuilder` node under the hero root.
+2. Inspector: set `host_bone_path` + `bone_name` (so the inner Orifice rides the right bone).
+3. Inspector: choose `shape_mode = CIRCLE` (default).
+4. Drag the magenta handle outward → radius grows live.
+5. Drag the cyan handle along the axis → ring shifts along the entry axis.
+6. Optional: switch to SLIT → `slit_aspect_ratio` slider exposes oval shapes.
+7. Optional: switch to POLYGON_CUSTOM → edit `custom_positions` in the inspector array editor.
+8. Press play → inner `Orifice` instantiated, rim built, EI signals fire when a tentacle penetrates, the rest of the §6.12 / §6.3 / §6.12.12 stack engages.
+
+**Tests** — 8/8 passing:
+
+1. `default_circle_builds_at_ready` — default params → 8-particle circular rim on the inner Orifice.
+2. `slit_mode_produces_ellipse` — long axis 0.08 m, short axis 0.032 m (0.4× aspect); both within 1e-4 m.
+3. `polygon_custom_passes_through` — 3-vert triangle round-trips through `compute_rim_positions_local`.
+4. `compute_rim_positions_matches_params` — circular rim with center offset and radius 0.07; worst |distance − 0.07| < 1e-5 m across all 12 particles.
+5. `compute_target_area_circle` — π × r² within 1e-4 rel err.
+6. `compute_target_area_slit` — π × a × b within 1e-4 rel err.
+7. `ei_signals_forward_to_builder` — emit on inner orifice → wrapper re-fires identically.
+8. `gizmo_plugin_instantiates_cleanly` — script preloads; static math helpers (`_ray_plane_intersect`, `_ray_line_closest_t`) produce correct results. Drag-interactive testing is editor-GUI; not headless.
+
+Full TT suite: **274/274** across 37 scripts, all rc=0 (was 266 + 8 new). `.so` unchanged (gdscript-only slice). `godot --editor --quit` now exits clean (no parse errors, no Signal 11).
+
+**Spec divergences:**
+
+- **(a) Composition wrapper instead of direct C++ binding.** Adding `rim_radius` etc. directly to `Orifice` would mean another C++ rebuild + `ADD_PROPERTY` binding + property accessors. Keeping the data on the GDScript wrapper avoids C++ churn AND lets the wrapper retire cleanly when body_field's `RimRingPrimitive` gizmo ships (per the 2026-05-13 amendment §5(b)) — `OrificeBuilder` becomes a migration shim that reads the primitive resource instead of inline exports.
+- **(b) `_has_gizmo` matches by script reference, not class name.** Godot's `Node.get_class()` returns "Node3D" for a `@tool extends Node3D` script — there's no "OrificeBuilder" class string. Compared via `p_node.get_script() == _OrificeBuilderScript` instead. Works correctly; pattern is standard for `@tool`-scripted nodes.
+- **(c) Two handles, not per-particle.** Per-particle drag handles for POLYGON_CUSTOM mode would be the natural extension. Deferred: until POLYGON_CUSTOM authoring is exercised in a real scenario, the inspector array editor is sufficient. Adding N draggable handles is a ~1-hour follow-up if the demand surfaces.
+- **(d) `canal_gizmo_overlay.gd` parse-error fixes are scope creep.** The file's pre-existing issues blocked editor refresh and were affecting verification of THIS slice. Treated as a drive-by fix (3 type-annotation tightening + `Basis.get_column` → `Basis.x/y/z`). Risk: low — narrow scope edits that match the `reference_godot_tentacletech_gotchas_2026-05-03` memory's guidance.
+
+**Cross-slice composition:** No C++ touched. `Orifice` runtime unchanged; the wrapper instantiates it as a child at play-mode `_ready`. Canal subscription path (authoring-pass production wiring slice) works against the wrapper because EI signals are forwarded. `OrificeAuthoring.add_circular_rim` / `add_polygon_rim` are the existing helpers; the builder just calls them.
+
+**Deferred:**
+
+- Per-particle drag handles for POLYGON_CUSTOM mode.
+- Shape preset library (circle preset, slit preset, vulva-shaped preset stored as `.tres`).
+- Live preview of the inner Orifice's runtime rim state in editor (would require running PBD in editor, which is heavyweight; the play-mode runtime gizmo overlay covers this).
+- Migration shim to body_field's `RimRingPrimitive` once that ships.
+
+---
+
 ### Slice — Authoring-pass production wiring (2026-05-17)
 
 Closes authoring-pass gaps 2, 3, 5 from the kasumi-ready discussion. Item 4 (`StimulusBus` autoload in `project.godot`) is cross-cutting; flagged for top-level. Item 6 (body_field N-source bake) is a sibling-extension concern, not on TT's plate.
