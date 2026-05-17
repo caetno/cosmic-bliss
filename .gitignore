@@ -39,6 +39,9 @@ game/scenes/*_local.tscn
 # Blender working directory (.blend files, exports, scratch — local-only)
 blender/
 
+# Godot engine docs (cloned reference, see docs/godot-docs.md)
+docs/godot-docs/
+
 # Image and 3D-asset binaries — local-only by default. Use `git add -f`
 # (or a negation pattern) to track a specific file when needed.
 *.png
