@@ -20,13 +20,50 @@ extends VBoxContainer
 
 const _DOCK_TITLE: String = "Muscle Test"
 
+# Dock mode (P5.8 / slice 8a). Preview = P4 kinematic-write authoring. Ragdoll
+# Test = physics active, sliders drive SPD via `Marionette.set_bone_target`
+# (slice 8c wires the slider rewire; 8a only gates the kinematic write and
+# flips physics state). Mode lives on the dock — runtime stays mode-agnostic
+# so the public Marionette API doesn't pick up an authoring concern.
+enum Mode { SKELETON3D_PREVIEW, RAGDOLL_TEST }
+
 var _selection: EditorSelection
 var _active_marionette: Marionette
 var _header: Label
+var _mode_option: OptionButton
 var _reset_all_btn: Button
 var _refresh_btn: Button
 var _scroll: ScrollContainer
 var _content: VBoxContainer
+# Global Strength slider (slice 8c). Drives `Marionette.set_global_strength`;
+# the C++ side ramps changes via `MarionetteCore::set_strength_ramp_duration`
+# so increases smooth over time and drops are instantaneous (slice 6).
+# Visible only in Ragdoll Test — in Preview, strength has no effect because
+# SPD is inactive.
+var _strength_row: HBoxContainer
+var _strength_slider: HSlider
+var _strength_value_label: Label
+# Apply-Impulse tool (slice 8d). Owned by the plugin; injected via
+# set_impulse_tool. Activation flips with Ragdoll-Test mode + the toolbar
+# checkbutton below.
+var _impulse_tool: MarionetteImpulseTool
+var _impulse_btn: CheckButton
+var _mode: int = Mode.SKELETON3D_PREVIEW
+# Cached pre-entry gravity_scale so Ragdoll-Test exit restores whatever the
+# user had dialed in. We always set zero-g on entry; the value at exit is
+# whatever Ragdoll Test left it at, but the user's intent for Preview was
+# the pre-entry number.
+var _saved_gravity_scale: float = 1.0
+# Cached pre-entry hip_upward_nudge — tether takes over anti-sag while
+# engaged, so we set 0 on engage and restore on release.
+var _saved_hip_nudge: float = 0.0
+# Whether *we* built the ragdoll on entry. Determines whether exit calls
+# `clear_ragdoll`. If the user had already built the ragdoll, we leave it
+# in place (only restore mode/gravity, not the simulator hierarchy).
+var _built_ragdoll_on_entry: bool = false
+# Hip tether instance (slice 8b). Constructed on Ragdoll-Test entry, freed
+# on exit. null in Preview.
+var _hip_tether: MarionetteHipTether
 # Bone widgets currently mounted, keyed by bone_name.
 var _bone_widgets: Dictionary[StringName, MarionetteBoneSliders] = {}
 # Cached BoneEntry per mounted widget — read every macro frame so we don't
@@ -69,6 +106,61 @@ func _build_chrome() -> void:
 	_header = Label.new()
 	_header.text = "(no Marionette selected)"
 	add_child(_header)
+
+	# Mode toggle: Skeleton3D Preview (P4 kinematic authoring) vs Ragdoll Test
+	# (physics + SPD-driven targets). Lives in the dock header so it's
+	# discoverable while a Marionette is selected.
+	var mode_row := HBoxContainer.new()
+	add_child(mode_row)
+	var mode_label := Label.new()
+	mode_label.text = "Mode:"
+	mode_row.add_child(mode_label)
+	_mode_option = OptionButton.new()
+	_mode_option.add_item("Skeleton3D Preview", Mode.SKELETON3D_PREVIEW)
+	_mode_option.add_item("Ragdoll Test", Mode.RAGDOLL_TEST)
+	_mode_option.selected = 0
+	_mode_option.tooltip_text = (
+			"Skeleton3D Preview: sliders write the skeleton pose directly.\n"
+			+ "Ragdoll Test: physics active, sliders drive SPD targets.")
+	_mode_option.item_selected.connect(_on_mode_changed)
+	_mode_option.disabled = true
+	mode_row.add_child(_mode_option)
+
+	# Global strength row — visible only in Ragdoll Test. Built once, hidden
+	# when in Preview so the layout stays stable.
+	_strength_row = HBoxContainer.new()
+	_strength_row.visible = false
+	add_child(_strength_row)
+	var strength_label := Label.new()
+	strength_label.text = "Strength:"
+	_strength_row.add_child(strength_label)
+	_strength_value_label = Label.new()
+	_strength_value_label.text = "1.00"
+	_strength_value_label.custom_minimum_size = Vector2(38, 0)
+	_strength_value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_strength_row.add_child(_strength_value_label)
+	_strength_slider = HSlider.new()
+	_strength_slider.min_value = 0.0
+	_strength_slider.max_value = 1.0
+	_strength_slider.step = 0.01
+	_strength_slider.value = 1.0
+	_strength_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_strength_slider.custom_minimum_size = Vector2(60, 0)
+	_strength_slider.tooltip_text = (
+			"Global SPD strength multiplier. 0 = limp ragdoll, 1 = actively held pose.")
+	_strength_slider.value_changed.connect(_on_global_strength_changed)
+	_strength_row.add_child(_strength_slider)
+
+	# Apply Impulse toggle — checkbutton so the active state is visible.
+	# When pressed, the plugin's `_forward_3d_gui_input` routes mouse
+	# events to the impulse tool. Lives next to the strength slider so
+	# the Ragdoll-Test affordances cluster together.
+	_impulse_btn = CheckButton.new()
+	_impulse_btn.text = "Apply Impulse"
+	_impulse_btn.tooltip_text = (
+			"Click-drag in the viewport on a MarionetteBone to apply an impulse.")
+	_impulse_btn.toggled.connect(_on_impulse_btn_toggled)
+	_strength_row.add_child(_impulse_btn)
 
 	var btn_row := HBoxContainer.new()
 	add_child(btn_row)
@@ -143,17 +235,241 @@ static func _resolve_marionette(n: Node) -> Marionette:
 func _set_active_marionette(m: Marionette) -> void:
 	if _active_marionette == m:
 		return
+	# Always exit Ragdoll Test before switching Marionettes — otherwise the
+	# previous character is left with physics on and a dangling tether (8b).
+	if _mode == Mode.RAGDOLL_TEST and _active_marionette != null:
+		_exit_mode(Mode.RAGDOLL_TEST)
+		_mode = Mode.SKELETON3D_PREVIEW
+		if _mode_option != null:
+			_mode_option.select(0)
 	_clear_content()
 	_active_marionette = m
 	if m == null:
 		_header.text = "(no Marionette selected)"
 		_reset_all_btn.disabled = true
 		_refresh_btn.disabled = true
+		if _mode_option != null:
+			_mode_option.disabled = true
+		_sync_impulse_tool_state()
 		return
 	_header.text = "Active: %s" % m.name
 	_reset_all_btn.disabled = false
 	_refresh_btn.disabled = false
+	if _mode_option != null:
+		_mode_option.disabled = false
+	# Sync strength slider with the new Marionette's live strength.
+	if _strength_slider != null:
+		var live: float = m.get_global_strength()
+		_strength_slider.set_value_no_signal(live)
+		if _strength_value_label != null:
+			_strength_value_label.text = "%.2f" % live
+	_update_strength_row_visibility()
+	_sync_impulse_tool_state()
 	_populate_for(m)
+
+
+# Public for slice 8c tests + future callers. Tracks current dock mode.
+func get_mode() -> int:
+	return _mode
+
+
+func _on_mode_changed(idx: int) -> void:
+	var new_mode: int = _mode_option.get_item_id(idx)
+	if new_mode == _mode:
+		return
+	var old_mode: int = _mode
+	# Exit old before entering new — gravity restore and clear_ragdoll need
+	# to run before we tear into build_ragdoll for the new mode.
+	_exit_mode(old_mode)
+	_mode = new_mode
+	_enter_mode(new_mode)
+	# Widgets must see the new mode before we seed SPD targets — otherwise
+	# the seed call's _apply_pose hits the Preview branch.
+	_propagate_mode_to_widgets()
+	if new_mode == Mode.RAGDOLL_TEST:
+		_seed_bone_targets_from_sliders()
+	else:
+		# Exiting Ragdoll Test — drop the impulse toggle so re-entry starts
+		# clean (otherwise a stale-pressed checkbutton would silently re-arm
+		# the tool the moment we re-enter).
+		if _impulse_btn != null:
+			_impulse_btn.set_pressed_no_signal(false)
+	_update_strength_row_visibility()
+	_sync_impulse_tool_state()
+
+
+func _on_global_strength_changed(v: float) -> void:
+	if _strength_value_label != null:
+		_strength_value_label.text = "%.2f" % v
+	if _active_marionette == null:
+		return
+	_active_marionette.set_global_strength(v)
+
+
+# Visible only in Ragdoll Test. In Preview, SPD is inactive so the slider
+# has no effect; hiding it keeps the dock chrome compact.
+func _update_strength_row_visibility() -> void:
+	if _strength_row != null:
+		_strength_row.visible = _mode == Mode.RAGDOLL_TEST
+
+
+# Slice 8c — on Ragdoll-Test entry, seed every cached anatomical target from
+# the current slider values. Without this, SPD starts with all-zero targets
+# (canonical T-pose) and the character snaps if sliders were sitting at
+# non-zero positions when the user toggled mode. Anatomical zero = rest =
+# T-pose per CLAUDE.md §2; zero-target on an A-pose rest pose would also
+# produce a snap.
+func _seed_bone_targets_from_sliders() -> void:
+	for widget: MarionetteBoneSliders in _bone_widgets.values():
+		if is_instance_valid(widget):
+			widget._apply_pose()
+
+
+func _propagate_mode_to_widgets() -> void:
+	for widget: MarionetteBoneSliders in _bone_widgets.values():
+		if is_instance_valid(widget):
+			widget.set_mode(_mode)
+
+
+# Entering Ragdoll Test: build ragdoll if needed, snapshot gravity, zero-g,
+# then propagate the mode bit to per-bone widgets (suppresses the kinematic
+# write — slice 8c adds the SPD-target rewire). Tether/strength slider/seed
+# come in 8b/8c.
+#
+# Entering Preview: no-op (the prior exit already restored the skeleton).
+func _enter_mode(mode: int) -> void:
+	if _active_marionette == null:
+		return
+	match mode:
+		Mode.RAGDOLL_TEST:
+			_built_ragdoll_on_entry = false
+			# Re-use the simulator if the user already built the ragdoll; otherwise
+			# build now. Validator (slice 7) runs as part of build_ragdoll.
+			if _find_simulator(_active_marionette) == null:
+				_active_marionette.build_ragdoll()
+				_built_ragdoll_on_entry = true
+				# Build wipes existing widget bindings — repopulate so 8c can
+				# seed SPD targets and tests see live widgets.
+				_clear_content()
+				_populate_for(_active_marionette)
+			_saved_gravity_scale = _active_marionette.get_gravity_scale()
+			_active_marionette.set_gravity_scale(0.0)
+			# Tether: locate the root MarionetteBone via the C++ core, anchor
+			# at its current world position. Build → tether → strength entry
+			# sequence — `get_root_bone` only returns non-null after bones
+			# have registered with the core (post build_ragdoll).
+			_engage_hip_tether()
+		Mode.SKELETON3D_PREVIEW:
+			pass
+
+
+# Exiting Ragdoll Test (P5.9 fold-in): clear the ragdoll if we built it on
+# entry, restore the user's gravity_scale, and reset every widget back to
+# rest pose. Rest-pose guard contract: leaving Ragdoll Test never leaves
+# the skeleton in physics-driven state.
+func _exit_mode(mode: int) -> void:
+	if _active_marionette == null:
+		return
+	match mode:
+		Mode.RAGDOLL_TEST:
+			# Release the tether before clearing the ragdoll — the joint
+			# holds a reference to the root MarionetteBone that clear_ragdoll
+			# is about to free.
+			_release_hip_tether()
+			# Restore gravity first — clear_ragdoll frees the registered bones,
+			# but set_gravity_scale only touches what's still alive.
+			_active_marionette.set_gravity_scale(_saved_gravity_scale)
+			if _built_ragdoll_on_entry:
+				_active_marionette.clear_ragdoll()
+				_built_ragdoll_on_entry = false
+				# Tear down widgets too — the bones they pointed at are gone.
+				_clear_content()
+				_populate_for(_active_marionette)
+			else:
+				# Ragdoll stays built. Reset all slider widgets back to rest;
+				# they restore Skeleton3D pose via the kinematic path (now
+				# re-enabled because mode flipped back to Preview before this
+				# call propagates).
+				for widget: MarionetteBoneSliders in _bone_widgets.values():
+					if is_instance_valid(widget):
+						widget.reset_to_rest()
+		Mode.SKELETON3D_PREVIEW:
+			pass
+
+
+# Tether construction (slice 8b). Walks the MarionetteCore to find the root
+# MarionetteBone, anchors a Generic6DOFJoint3D between it and a sibling
+# StaticBody3D. While engaged, snapshots and zeroes hip_upward_nudge so the
+# tether is the only anti-sag mechanism — otherwise nudge + tether spring
+# fight at high strength.
+func _engage_hip_tether() -> void:
+	if _active_marionette == null:
+		return
+	var hip: PhysicalBone3D = _find_root_bone(_active_marionette)
+	if hip == null:
+		push_warning("MuscleTestDock: no root MarionetteBone found; hip tether skipped")
+		return
+	_saved_hip_nudge = _active_marionette.get_hip_upward_nudge()
+	_active_marionette.set_hip_upward_nudge(0.0)
+	_hip_tether = MarionetteHipTether.new()
+	_hip_tether.engage(_active_marionette, hip)
+
+
+func _release_hip_tether() -> void:
+	if _hip_tether != null:
+		_hip_tether.release()
+		_hip_tether = null
+	if _active_marionette != null:
+		_active_marionette.set_hip_upward_nudge(_saved_hip_nudge)
+
+
+# Locates the root MarionetteBone via the C++ core. Returns null when the
+# GDExtension isn't loaded (defense against future tooling running the dock
+# without the .so).
+static func _find_root_bone(m: Marionette) -> PhysicalBone3D:
+	if m == null:
+		return null
+	var core: Object = m._ensure_core()
+	if core == null:
+		return null
+	var root: Object = core.call(&"get_root_bone")
+	if root is PhysicalBone3D:
+		return root
+	return null
+
+
+# Public accessor for tests (slice 8b verifies presence/absence by mode).
+func get_hip_tether() -> MarionetteHipTether:
+	return _hip_tether
+
+
+# Injected by plugin.gd at addon load (slice 8d). Dock owns activation
+# semantics — plugin owns lifetime + viewport-input routing.
+func set_impulse_tool(tool: MarionetteImpulseTool) -> void:
+	_impulse_tool = tool
+	_sync_impulse_tool_state()
+
+
+func get_impulse_tool() -> MarionetteImpulseTool:
+	return _impulse_tool
+
+
+func _on_impulse_btn_toggled(_pressed: bool) -> void:
+	_sync_impulse_tool_state()
+
+
+# Single source of truth for the tool's `active` flag: dock mode is
+# Ragdoll Test AND the toolbar checkbutton is on. Anything else → inactive.
+func _sync_impulse_tool_state() -> void:
+	if _impulse_tool == null:
+		return
+	var should_be_active: bool = (
+			_mode == Mode.RAGDOLL_TEST
+			and _impulse_btn != null
+			and _impulse_btn.button_pressed
+			and _active_marionette != null)
+	_impulse_tool.active = should_be_active
+	_impulse_tool.marionette = _active_marionette if should_be_active else null
 
 
 func _populate_for(m: Marionette) -> void:

@@ -7,6 +7,7 @@ var _bone_profile_inspector: MarionetteBoneProfileInspector
 var _bone_inspector: MarionetteBoneInspector
 var _marionette_inspector: MarionetteInspectorPlugin
 var _muscle_dock: MarionetteMuscleTestDock
+var _impulse_tool: MarionetteImpulseTool
 
 
 func _enter_tree() -> void:
@@ -30,6 +31,11 @@ func _enter_tree() -> void:
 	_muscle_dock = MarionetteMuscleTestDock.new()
 	add_control_to_dock(DOCK_SLOT_RIGHT_UL, _muscle_dock)
 
+	# Apply-Impulse viewport tool (slice 8d). The plugin owns the singleton
+	# and hands it to the dock; activation flips with Ragdoll-Test mode.
+	_impulse_tool = MarionetteImpulseTool.new()
+	_muscle_dock.set_impulse_tool(_impulse_tool)
+
 
 func _exit_tree() -> void:
 	if _authoring_gizmo != null:
@@ -51,3 +57,13 @@ func _exit_tree() -> void:
 		remove_control_from_docks(_muscle_dock)
 		_muscle_dock.queue_free()
 		_muscle_dock = null
+	_impulse_tool = null
+
+
+# Forward 3D viewport input to the impulse tool when it's active (Ragdoll
+# Test mode + Apply Impulse toolbar pressed). EditorPlugin's contract:
+# return AFTER_GUI_INPUT_STOP when the event is consumed.
+func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
+	if _impulse_tool != null and _impulse_tool.handle_input(camera, event):
+		return AFTER_GUI_INPUT_STOP
+	return AFTER_GUI_INPUT_PASS

@@ -1015,6 +1015,57 @@ Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 s
 - **Stimulus bus emission for canal-driven events** — Phase 6 / slice (7).
 - **TT-S5 per-slot μ** — slice (8).
 
+### Slice — `NodeCenterlineSource` Godot-native canal authoring (2026-05-17)
+
+Authoring-slice answering "how do I author a canal without Blender CP bones?" Concrete `CanalCenterlineSource` subclass that reads scene-tree `Node3D` markers as control points. No body_field dependency, no Blender script, no `<Canal>_CP_*` naming — pure Godot.
+
+**Resource fields:**
+- `control_point_paths: Array[NodePath]` — N markers, index 0 = proximal end.
+- `host_bone_names: Array[StringName]` — optional per-CP override for `auto_attach_to_nearest_bone`. Empty entry → nearest-in-3D heuristic.
+- `terminal_pin_path: NodePath` — closed-terminal sac override. Resolved against scene root (resource doesn't know its owning canal at `resolve_closed_terminal_anchor` time); use absolute path.
+
+**Virtuals implemented:**
+- `build_spline(skeleton, canal)` — collects `Node3D.global_position` per path, builds CatmullSpline. Same call shape as the bone source.
+- `refresh_anchors(skeleton, canal, fb_prox, fb_dist)` — proximal via entry-orifice helper, distal via exit-orifice helper or `resolve_closed_terminal_anchor`. Per-tick — moving entry/exit nodes propagate immediately.
+- `resolve_closed_terminal_anchor(params, skeleton, fallback)` — three-tier fallback: explicit `terminal_pin_path` Node3D → `CanalParameters.terminal_pin_bone` skeleton lookup → `terminal_position_in_host_frame`.
+
+**Bake-time `auto_attach_to_nearest_bone(canal, skeleton)`** — `@tool`-callable helper. For each control point: picks the bone (explicit `host_bone_names[i]` override or nearest-in-3D), builds a `BoneAttachment3D` under the skeleton, reparents the marker under it, preserves world position across the reparent, updates `control_point_paths[i]` to the new path. Idempotent (markers already under a `BoneAttachment3D` are skipped). After running this once at authoring time, markers follow their attached bones at runtime — the canal centerline reshapes when the skeleton animates.
+
+**Authoring workflow** (now possible end-to-end without Blender):
+
+1. Drag 4-14 `Node3D` markers into the editor under the hero root, position them along the canal axis.
+2. Assign `canal.centerline_source = NodeCenterlineSource.new()`, fill `control_point_paths` with the NodePaths.
+3. Click the "auto-attach" `@tool` button (or call from a setup script) → markers reparent under `BoneAttachment3D`s for their nearest skeleton bones.
+4. Run the scene → bones move → markers follow → centerline reshapes → canal interior dynamics respond.
+
+**Files added:**
+
+- `extensions/tentacletech/gdscript/canal/node_centerline_source.gd` — the resource (~190 lines).
+- `game/tests/tentacletech/test_node_centerline_source.gd` — 6 tests covering build_spline, refresh_anchors with moving orifice, terminal-pin-path override, bone fallback, auto-attach (parenting + position preservation + bone_idx match), empty-paths failure.
+
+**Tests** — 6/6 passing. Skeleton-bone follow-through under bone motion is NOT directly tested in headless (BoneAttachment3D needs a frame tick that doesn't happen in `_process`-only test fixtures); instead the auto-attach test verifies the parent is a `BoneAttachment3D` with the correct `bone_idx` — the "marker follows bone" behaviour is then editor-visual integration territory.
+
+Full TT suite: **258/258** across 35 scripts, all rc=0 (was 252 + 6 new). `.so` unchanged (GDScript-only slice).
+
+**Spec divergences:**
+
+- **(a) `terminal_pin_path` resolves against scene root**, not against the canal. The resource doesn't have access to the canal when `resolve_closed_terminal_anchor` is invoked from `CanalAutoBaker.bake()`. Documented as a constraint: use absolute paths like `/root/HeroRoot/PinMarker`.
+- **(b) Nearest-in-3D bone heuristic**, not skin-weight-LBS proximity (per the 2026-05-13 amendment Q3). LBS-weighted lookup belongs in body_field's gizmo plugin path; the in-3D version is the good-enough default that doesn't require body_field. Author can override per-CP via `host_bone_names`.
+- **(c) `auto_attach_to_nearest_bone` is idempotent.** Re-running it on already-attached markers is a no-op. This lets the helper be called repeatedly without producing nested `BoneAttachment3D` chains.
+
+**Cross-slice composition:** Pure addition. No edits to centerline_source.gd abstract, cp_bone_centerline_source.gd, or any other shipped source. The adapter pattern from 5F.A.0 means `Canal.centerline_source` can be either source today, or the future body_field `CanalCenterlinePrimitiveSource`, without touching the solver, the integrator, or the reaction pass.
+
+**Authoring-pass gaps remaining** (per the kasumi-ready discussion):
+
+1. ~~Godot-native canal authoring~~ — closed by this slice.
+2. **Production EI → canal binding** — Orifice EI hook calling `tentacle.register_active_canal()`.
+3. **`Canal.is_inactive()` real signal** — flip when EI count > 0.
+4. **`StimulusBus` autoload in `project.godot`** — top-level cross-cutting.
+5. **Minimal programmatic `Orifice.add_circular_rim(center, radius, N)`** convenience until body_field's `RimRingPrimitive` ships.
+6. **body_field N-source bake** for rim weight fields (separate extension; flagged for body_field supervisor).
+
+---
+
 ### Slice TT-S5 — 4Q-fix tension taper uses per-slot composed μ (2026-05-17)
 
 Closes audit finding TT-S5 (`docs/Cosmic_Bliss_Update_2026-05-14-02_cross_extension_audit_findings.md`) and slice 8 of the ragdoll-under-tension scenario (05-14-03 §4). Replaces the per-tentacle `friction_static` scalar at `pbd_solver.cpp:275` with the per-slot composed μ from `env_contact_static_frictions[slot]` (4S.3 surface-tag composition).
