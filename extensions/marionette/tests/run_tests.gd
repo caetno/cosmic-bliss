@@ -180,6 +180,11 @@ func _init() -> void:
 		_test_pose_roundtrip_known_combo,
 		_test_pose_roundtrip_left_vs_right,
 		_test_snapshot_pose_to_targets_count,
+		_test_surface_jiggle_particle_compute_target_world,
+		_test_surface_jiggle_particle_spd_step_at_target,
+		_test_surface_jiggle_particle_spd_step_pulls_toward_target,
+		_test_surface_jiggle_particle_configure_spring_primes_cache,
+		_test_marionette_build_ragdoll_spawns_surface_jiggle_particles,
 	]:
 		if test_callable.call():
 			passed += 1
@@ -5240,4 +5245,217 @@ func _test_snapshot_pose_to_targets_count() -> bool:
 		bone_obj.free()
 	core.free()
 	return _ok("snapshot_pose_to_targets_count")
+
+
+# ---------- SurfaceJiggleParticle (§17.5-S1) ----------
+
+func _test_surface_jiggle_particle_compute_target_world() -> bool:
+	# Pure helper: target_world = (skel_world * host_global * seed_in_bone_local).origin.
+	# Identity case first — seed at (0.05, 0, 0) bone-local, identity host,
+	# identity skel → target at (0.05, 0, 0).
+	var seed_in_bone_local := Transform3D(Basis.IDENTITY, Vector3(0.05, 0.0, 0.0))
+	var host_global := Transform3D.IDENTITY
+	var skel_world := Transform3D.IDENTITY
+	var target: Vector3 = SurfaceJiggleParticle._compute_target_world(host_global, skel_world, seed_in_bone_local)
+	var expected := Vector3(0.05, 0.0, 0.0)
+	if not target.is_equal_approx(expected):
+		return _fail("surface_jiggle_particle_compute_target_world",
+				"identity: got %s, expected %s" % [target, expected])
+
+	# Compose: skel translated (1, 0, 0), host translated (0, 2, 0),
+	# seed_in_bone (0, 0, 3). World expected: (1, 0, 0) + (0, 2, 0) + (0, 0, 3) = (1, 2, 3).
+	skel_world = Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 0.0))
+	host_global = Transform3D(Basis.IDENTITY, Vector3(0.0, 2.0, 0.0))
+	seed_in_bone_local = Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, 3.0))
+	target = SurfaceJiggleParticle._compute_target_world(host_global, skel_world, seed_in_bone_local)
+	expected = Vector3(1.0, 2.0, 3.0)
+	if not target.is_equal_approx(expected):
+		return _fail("surface_jiggle_particle_compute_target_world",
+				"compose: got %s, expected %s" % [target, expected])
+	return _ok("surface_jiggle_particle_compute_target_world")
+
+
+func _test_surface_jiggle_particle_spd_step_at_target() -> bool:
+	# Zero error + zero velocity → SPD produces no acceleration; position
+	# and velocity stay at their input values. Pins the trivial case so a
+	# sign-flipped error term would be caught.
+	var pos := Vector3(0.5, 0.0, 0.0)
+	var vel := Vector3.ZERO
+	var target := pos
+	var result: Array = SurfaceJiggleParticle._spd_step(pos, vel, target, 100.0, 14.0, 0.016)
+	if not (result[0] as Vector3).is_equal_approx(pos):
+		return _fail("surface_jiggle_particle_spd_step_at_target",
+				"position drifted at zero error: got %s, expected %s" % [result[0], pos])
+	if not (result[1] as Vector3).is_equal_approx(Vector3.ZERO):
+		return _fail("surface_jiggle_particle_spd_step_at_target",
+				"velocity non-zero at zero error / zero v: got %s" % str(result[1]))
+	return _ok("surface_jiggle_particle_spd_step_at_target")
+
+
+func _test_surface_jiggle_particle_spd_step_pulls_toward_target() -> bool:
+	# Particle at origin, target 0.1 m along +X, zero initial velocity. After
+	# one semi-implicit step: v_new = (stiffness * error − damping * v_old) * dt
+	# = 100 * 0.1 * 0.016 = 0.16 (+X). x_new = 0 + 0.16 * 0.016 = 0.00256 (+X).
+	# Pins direction (sign of x components) and absence of cross-axis leakage.
+	var pos := Vector3.ZERO
+	var vel := Vector3.ZERO
+	var target := Vector3(0.1, 0.0, 0.0)
+	var result: Array = SurfaceJiggleParticle._spd_step(pos, vel, target, 100.0, 14.0, 0.016)
+	var new_pos: Vector3 = result[0]
+	var new_vel: Vector3 = result[1]
+	if new_vel.x <= 0.0:
+		return _fail("surface_jiggle_particle_spd_step_pulls_toward_target",
+				"velocity should point toward target (+X), got %s" % str(new_vel))
+	if new_pos.x <= 0.0:
+		return _fail("surface_jiggle_particle_spd_step_pulls_toward_target",
+				"position should advance toward target (+X), got %s" % str(new_pos))
+	if new_pos.x >= target.x:
+		return _fail("surface_jiggle_particle_spd_step_pulls_toward_target",
+				"position overshot target in one step at sane params, got %f (target %f)" % [new_pos.x, target.x])
+	# Y, Z stay at zero — the SPD math must not couple axes.
+	if absf(new_pos.y) > 1.0e-6 or absf(new_pos.z) > 1.0e-6:
+		return _fail("surface_jiggle_particle_spd_step_pulls_toward_target",
+				"off-axis position leaked: %s" % str(new_pos))
+	if absf(new_vel.y) > 1.0e-6 or absf(new_vel.z) > 1.0e-6:
+		return _fail("surface_jiggle_particle_spd_step_pulls_toward_target",
+				"off-axis velocity leaked: %s" % str(new_vel))
+	return _ok("surface_jiggle_particle_spd_step_pulls_toward_target")
+
+
+func _test_surface_jiggle_particle_configure_spring_primes_cache() -> bool:
+	# Mirror of _test_jiggle_bone_configure_spring_primes_snapshots —
+	# configure_spring arms _spring_enabled, caches skel + host_idx, and
+	# pre-computes _seed_in_bone_local = host_rest_global⁻¹ * (IDENTITY, seed).
+	# When the synthetic skeleton's host_rest_global is IDENTITY (single bone,
+	# no parents, rest = IDENTITY), seed_in_bone_local equals (IDENTITY, seed).
+	var skel := Skeleton3D.new()
+	skel.add_bone("host")
+	root.add_child(skel)
+	skel.set_bone_rest(0, Transform3D.IDENTITY)
+	skel.reset_bone_poses()
+
+	var particle := SurfaceJiggleParticle.new()
+	root.add_child(particle)
+	var seed := Vector3(0.05, 0.10, 0.0)
+	particle.configure_spring(skel, 0, seed)
+
+	var ok_armed: bool = particle._spring_enabled
+	var ok_skel: bool = particle._skel == skel
+	var ok_host: bool = particle._host_skel_idx == 0
+	var expected_seed_in_bone := Transform3D(Basis.IDENTITY, seed)
+	var ok_seed: bool = particle._seed_in_bone_local.is_equal_approx(expected_seed_in_bone)
+
+	particle.queue_free()
+	skel.queue_free()
+
+	if not ok_armed:
+		return _fail("surface_jiggle_particle_configure_spring_primes_cache",
+				"_spring_enabled was not armed")
+	if not ok_skel:
+		return _fail("surface_jiggle_particle_configure_spring_primes_cache",
+				"_skel reference not cached")
+	if not ok_host:
+		return _fail("surface_jiggle_particle_configure_spring_primes_cache",
+				"_host_skel_idx not cached")
+	if not ok_seed:
+		return _fail("surface_jiggle_particle_configure_spring_primes_cache",
+				"_seed_in_bone_local mismatch: got %s, expected %s"
+				% [particle._seed_in_bone_local, expected_seed_in_bone])
+	return _ok("surface_jiggle_particle_configure_spring_primes_cache")
+
+
+func _test_marionette_build_ragdoll_spawns_surface_jiggle_particles() -> bool:
+	# Integration: synthetic Marionette + BodySurfaceField with two
+	# SurfaceJiggleAttachments (host_bones Hips and LeftUpperLeg) → Pass 4
+	# discovery spawns two SurfaceJiggleParticles under a SurfaceJiggleHost
+	# child of Marionette. clear_ragdoll tears the host down.
+	#
+	# BodySurfaceField / SurfaceJiggleAttachment are GDScript class_names
+	# (not GDExtension classes), so ClassDB.class_exists doesn't see them
+	# — if the parser resolved them above, they're available at runtime.
+
+	var m := _build_synthetic_marionette()
+
+	# Sibling of marionette under root — mirrors hero-scene layout.
+	var bsf := BodySurfaceField.new()
+	bsf.name = "BodySurfaceField"
+	root.add_child(bsf)
+
+	var att1 := SurfaceJiggleAttachment.new()
+	att1.attachment_name = &"belly"
+	att1.host_bone = &"Hips"
+	att1.seed_position = Vector3(0.0, 0.0, 0.05)
+	bsf.attachments.append(att1)
+
+	var att2 := SurfaceJiggleAttachment.new()
+	att2.attachment_name = &"glute_L"
+	att2.host_bone = &"LeftUpperLeg"
+	att2.seed_position = Vector3(0.05, 0.05, -0.02)
+	bsf.attachments.append(att2)
+
+	m.body_surface_field = m.get_path_to(bsf)
+	# Rebuild (idempotent — calls clear_ragdoll first) so Pass 4 sees the
+	# bound BodySurfaceField.
+	m.build_ragdoll()
+
+	var host: Node = m.get_node_or_null(NodePath("SurfaceJiggleHost"))
+	if host == null:
+		m.free()
+		bsf.queue_free()
+		return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+				"SurfaceJiggleHost container not found under Marionette")
+
+	var particles: Array[SurfaceJiggleParticle] = []
+	for c in host.get_children():
+		if c is SurfaceJiggleParticle:
+			particles.append(c)
+
+	if particles.size() != 2:
+		m.free()
+		bsf.queue_free()
+		return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+				"expected 2 SurfaceJiggleParticles, got %d" % particles.size())
+
+	# JiggleProfile is null → code default (reach=0.3, ζ=0.7).
+	# omega = TAU / 0.3; stiffness = omega²; damping = 2 * 0.7 * omega.
+	var expected_omega: float = TAU / 0.3
+	var expected_stiffness: float = expected_omega * expected_omega
+	var expected_damping: float = 2.0 * 0.7 * expected_omega
+
+	var host_bones_seen: Dictionary = {}
+	for p: SurfaceJiggleParticle in particles:
+		host_bones_seen[p.host_bone_name] = true
+		if not is_equal_approx(p.stiffness, expected_stiffness):
+			m.free()
+			bsf.queue_free()
+			return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+					"%s: stiffness=%.4f, expected %.4f" % [p.host_bone_name, p.stiffness, expected_stiffness])
+		if not is_equal_approx(p.damping, expected_damping):
+			m.free()
+			bsf.queue_free()
+			return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+					"%s: damping=%.4f, expected %.4f" % [p.host_bone_name, p.damping, expected_damping])
+		if not p._spring_enabled:
+			m.free()
+			bsf.queue_free()
+			return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+					"%s: _spring_enabled false post-build" % p.host_bone_name)
+
+	if not (host_bones_seen.has(&"Hips") and host_bones_seen.has(&"LeftUpperLeg")):
+		m.free()
+		bsf.queue_free()
+		return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+				"expected Hips + LeftUpperLeg in host_bones; got %s" % str(host_bones_seen.keys()))
+
+	# Teardown: clear_ragdoll removes SurfaceJiggleHost alongside the simulator.
+	m.clear_ragdoll()
+	if m.get_node_or_null(NodePath("SurfaceJiggleHost")) != null:
+		m.free()
+		bsf.queue_free()
+		return _fail("marionette_build_ragdoll_spawns_surface_jiggle_particles",
+				"clear_ragdoll did not free SurfaceJiggleHost")
+
+	m.free()
+	bsf.queue_free()
+	return _ok("marionette_build_ragdoll_spawns_surface_jiggle_particles")
 

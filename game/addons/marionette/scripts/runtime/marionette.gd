@@ -24,6 +24,7 @@ extends Node3D
 ## every editor frame without viewport input.
 
 const _SIMULATOR_NAME: StringName = &"MarionetteSim"
+const _SURFACE_JIGGLE_HOST_NAME: StringName = &"SurfaceJiggleHost"
 
 # Inspector layout: properties + tool buttons grouped into five sections by
 # user task (Bind, Anatomy, Collision Shapes, Build, Tune & Test). Order
@@ -135,7 +136,26 @@ const _SIMULATOR_NAME: StringName = &"MarionetteSim"
 ## Bones in BoneCollisionProfile.non_cascade_bones but missing here use
 ## the profile's default_reach_seconds / default_damping_ratio. Null
 ## profile uses hardcoded code defaults (0.3 / 0.7).
+##
+## SurfaceJiggleParticles spawned by Pass 4 (§17.5) reuse the same profile
+## via _resolve_jiggle_params(host_bone) — per-region tuning carries
+## across the two authoring paths (Blender-skeleton JiggleBone vs Godot-
+## authored SurfaceJiggleAttachment).
 @export var jiggle_profile: JiggleProfile
+
+## Optional path to a BodySurfaceField node (body_field §17). When set
+## and the node carries SurfaceJiggleAttachment resources, build_ragdoll
+## Pass 4 spawns one SurfaceJiggleParticle per attachment — a virtual
+## (pure-Node3D, no Jolt body) translation-only SPD particle that runs
+## the same physics shape as JiggleBone, but driven by an attachment's
+## host_bone + seed_position instead of a Blender-skeleton bone.
+##
+## Empty path / unresolvable / no jiggle attachments = the no-body_field
+## fallback per top-level CLAUDE.md hard-optional invariant: only
+## Blender-skeleton JiggleBones spawn (Pass 3). The two paths coexist
+## freely — see Marionette_plan.md §15 amendment 2026-05-07-02 for the
+## dual-path layering.
+@export_node_path("Node3D") var body_surface_field: NodePath
 
 @export_tool_button("Build Ragdoll", "Skeleton3D") var _build_btn: Callable = build_ragdoll
 @export_tool_button("Clear Ragdoll", "Remove") var _clear_btn: Callable = clear_ragdoll
@@ -395,6 +415,14 @@ func build_ragdoll() -> void:
 
 	_dynamic_bone_names = dynamic_bone_names
 
+	# Pass 4: SurfaceJiggleParticles from BodySurfaceField.attachments
+	# (§17.5). Pure-Node3D virtual particles — distinct from Pass 3's
+	# JiggleBone : PhysicalBone3D path. Coexist freely; per-region
+	# authoring choice. No-op when body_surface_field is unset or the
+	# resolved node carries no SurfaceJiggleAttachment entries (hard-
+	# optional invariant — top-level CLAUDE.md).
+	_spawn_surface_jiggle_particles(skel)
+
 	# Collision exclusions are intentionally NOT applied here. add_collision_exception_with
 	# writes runtime-only state on PhysicsBody3D (no serializable property exposes it),
 	# so any call here would be lost on scene save. start_simulation() re-applies the
@@ -417,26 +445,36 @@ func build_ragdoll() -> void:
 	request_gizmo_refresh()
 
 
-## Tears down the active PhysicalBoneSimulator3D under the skeleton.
-## Safe to call when no ragdoll exists. Used by Build's idempotency
-## (Build calls Clear first) and the "Clear Ragdoll" tool button.
+## Tears down the active PhysicalBoneSimulator3D under the skeleton, plus
+## the SurfaceJiggleHost container under Marionette (Pass 4 §17.5 children).
+## Safe to call when no ragdoll exists. Used by Build's idempotency (Build
+## calls Clear first) and the "Clear Ragdoll" tool button.
 func clear_ragdoll() -> void:
 	var skel: Skeleton3D = resolve_skeleton()
-	if skel == null:
-		return
-	var existing: Node = skel.get_node_or_null(NodePath(String(_SIMULATOR_NAME)))
-	if existing == null:
-		# Fall back to scanning children: a hand-renamed simulator still gets cleared.
-		for child in skel.get_children():
-			if child is PhysicalBoneSimulator3D:
-				existing = child
-				break
-	if existing == null:
-		return
-	# free() rather than queue_free() so the editor button result is immediate
-	# (subsequent build_ragdoll in the same frame doesn't see ghost children).
-	existing.get_parent().remove_child(existing)
-	existing.free()
+	if skel != null:
+		var existing: Node = skel.get_node_or_null(NodePath(String(_SIMULATOR_NAME)))
+		if existing == null:
+			# Fall back to scanning children: a hand-renamed simulator still gets cleared.
+			for child in skel.get_children():
+				if child is PhysicalBoneSimulator3D:
+					existing = child
+					break
+		if existing != null:
+			# free() rather than queue_free() so the editor button result is immediate
+			# (subsequent build_ragdoll in the same frame doesn't see ghost children).
+			existing.get_parent().remove_child(existing)
+			existing.free()
+
+	# SurfaceJiggleHost lives under Marionette (not the skeleton) since its
+	# children are pure-Node3D virtual particles, not PhysicalBone3Ds. Tear
+	# down independently of the simulator — a build that spawned only
+	# SurfaceJiggleParticles (no Powered bones) would leave no simulator at
+	# all but still want the host cleaned up.
+	var jiggle_host: Node = get_node_or_null(NodePath(String(_SURFACE_JIGGLE_HOST_NAME)))
+	if jiggle_host != null:
+		jiggle_host.get_parent().remove_child(jiggle_host)
+		jiggle_host.free()
+
 	_dynamic_bone_names.clear()
 
 
@@ -1195,6 +1233,78 @@ func _build_jiggle_bone(
 	bone.custom_integrator = true
 	bone.visible = show_physics_bones_in_editor
 	return bone
+
+
+# Pass 4 (§17.5): discovery + spawn for SurfaceJiggleAttachments. Resolves
+# the bound BodySurfaceField path, walks its attachments, and spawns one
+# SurfaceJiggleParticle per SurfaceJiggleAttachment under a fresh
+# SurfaceJiggleHost Node3D child. No-op when body_surface_field is unset,
+# unresolvable, the wrong node type, or carries no jiggle attachments —
+# hard-optional invariant (top-level CLAUDE.md).
+#
+# Tuning carries from JiggleProfile (same lookup JiggleBone uses), so a
+# region with both a Blender-bone JiggleBone (Pass 3) and a Godot-authored
+# SurfaceJiggleAttachment (Pass 4) shares reach / damping_ratio — useful
+# at migration time when the two paths are running in parallel for A/B.
+func _spawn_surface_jiggle_particles(skel: Skeleton3D) -> void:
+	if body_surface_field.is_empty():
+		return
+	var bsf_node: Node = get_node_or_null(body_surface_field)
+	if bsf_node == null:
+		push_warning("Marionette.build_ragdoll: body_surface_field path %s did not resolve — no SurfaceJiggleParticles spawned" % body_surface_field)
+		return
+	if not bsf_node is BodySurfaceField:
+		push_warning("Marionette.build_ragdoll: body_surface_field path %s is not a BodySurfaceField (got %s) — no SurfaceJiggleParticles spawned" % [body_surface_field, bsf_node.get_class()])
+		return
+	var bsf: BodySurfaceField = bsf_node as BodySurfaceField
+	if bsf.attachments.is_empty():
+		return
+
+	var host_container: Node3D = null
+	for attachment_idx in range(bsf.attachments.size()):
+		var a: SurfaceAttachment = bsf.attachments[attachment_idx]
+		if a == null:
+			continue
+		if not a is SurfaceJiggleAttachment:
+			# SurfaceOrificeRimAttachment / SurfaceSoftRegionAttachment etc.
+			# are consumed by other extensions (TT §10.4, Marionette §16).
+			continue
+		var sja: SurfaceJiggleAttachment = a as SurfaceJiggleAttachment
+		if sja.host_bone == &"":
+			push_warning("Marionette.build_ragdoll: SurfaceJiggleAttachment[%d] has no host_bone — skipped" % attachment_idx)
+			continue
+		var host_idx: int = skel.find_bone(sja.host_bone)
+		if host_idx < 0:
+			push_warning("Marionette.build_ragdoll: SurfaceJiggleAttachment[%d] host_bone '%s' not in skeleton — skipped" % [attachment_idx, sja.host_bone])
+			continue
+
+		# Lazy-create the host container on the first spawn — keeps the
+		# scene tree clean when body_surface_field is set but contains no
+		# jiggle entries (the no-op path stays no-op).
+		if host_container == null:
+			host_container = Node3D.new()
+			host_container.name = String(_SURFACE_JIGGLE_HOST_NAME)
+			add_child(host_container)
+			_set_owner_for_editor(host_container)
+
+		# Shared JiggleProfile lookup with Pass 3. Map (reach_seconds, ζ) to
+		# the mass-cancelled (stiffness=ω², damping=2ζω) the particle stores
+		# directly — particle has no Jolt body to scale, so the m factor
+		# JiggleBone applies (k = m·ω², c = 2ζωm) is dropped here.
+		var params: Vector2 = _resolve_jiggle_params(sja.host_bone)
+		var reach_seconds: float = params.x
+		var damping_ratio: float = params.y
+		var omega: float = TAU / max(reach_seconds, 0.001)
+
+		var particle := SurfaceJiggleParticle.new()
+		var particle_name: String = String(sja.attachment_name) if sja.attachment_name != &"" else "SurfaceJiggle_%s_%d" % [sja.host_bone, attachment_idx]
+		particle.name = particle_name
+		particle.host_bone_name = sja.host_bone
+		particle.stiffness = omega * omega
+		particle.damping = 2.0 * damping_ratio * omega
+		host_container.add_child(particle)
+		_set_owner_for_editor(particle)
+		particle.configure_spring(skel, host_idx, sja.seed_position)
 
 
 # Resolves (reach_seconds, damping_ratio) for `skel_bone_name`. Per-bone
