@@ -1525,6 +1525,16 @@ void Orifice::_update_entry_interactions(float p_dt) {
 			// the tentacle side (no-op if somehow already registered).
 			t->register_active_ei_orifice(this);
 
+			// Authoring-pass slice (2026-05-17) — emit lifecycle signal
+			// so Canal subscribers (entry_orifice listeners) can flip
+			// `is_inactive()` to false and call
+			// `tentacle.register_active_canal(canal, -1)`. `-1` =
+			// "test all particles" (see Tentacle::_apply_canal_wall_contacts
+			// line 1252); precise proximal tracking is a Phase 8 follow-up.
+			emit_signal("entry_interaction_started",
+					(int64_t)t->get_instance_id(),
+					t_idx);
+
 			// Phase 6 (stimulus bus minimum) — emit PenetrationStart on
 			// fresh EI creation. `entry_point` is filled by the geometry
 			// refresh below; for the bus payload we use the cached
@@ -1623,6 +1633,13 @@ void Orifice::_update_entry_interactions(float p_dt) {
 		}
 		if (t != nullptr) {
 			t->unregister_active_ei_orifice(this);
+			// Authoring-pass slice — pair with `entry_interaction_started`.
+			// Fires on the same 1→0 transition that triggered the
+			// unregister above. Subscriber's idempotent ref-count keeps
+			// multiple started/ended pairs straight when the same
+			// tentacle re-enters quickly.
+			emit_signal("entry_interaction_ended",
+					(int64_t)t->get_instance_id());
 		}
 	}
 	for (auto it = _entry_interactions.begin(); it != _entry_interactions.end();) {
@@ -1639,6 +1656,13 @@ void Orifice::_update_entry_interactions(float p_dt) {
 			}
 			if (t != nullptr) {
 				t->unregister_active_ei_orifice(this);
+				// Belt-and-suspenders: same idempotency rule as the loop
+				// above. If the EI flipped to inactive on a prior tick
+				// AND we already emitted `entry_interaction_ended` for
+				// it, the Canal subscriber's ref-count protects against
+				// the double-decrement.
+				emit_signal("entry_interaction_ended",
+						(int64_t)t->get_instance_id());
 			}
 			it = _entry_interactions.erase(it);
 		} else {
@@ -2396,4 +2420,17 @@ void Orifice::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "host_physical_bone_path",
 						 PROPERTY_HINT_NODE_PATH_VALID_TYPES, "PhysicalBone3D"),
 			"set_host_physical_bone_path", "get_host_physical_bone_path");
+
+	// EI lifecycle signals (authoring-pass slice, 2026-05-17). Emitted
+	// from `_update_entry_interactions` at EI create / destroy. Canal
+	// nodes subscribe on their entry_orifice to flip
+	// `Canal.is_inactive()` and to call
+	// `tentacle.register_active_canal` / `unregister_active_canal`,
+	// closing the production EI → canal binding gap that 5F.B.C
+	// papered over with `register_active_canal_for_test`.
+	ADD_SIGNAL(MethodInfo("entry_interaction_started",
+			PropertyInfo(Variant::INT, "tentacle_object_id"),
+			PropertyInfo(Variant::INT, "tentacle_idx")));
+	ADD_SIGNAL(MethodInfo("entry_interaction_ended",
+			PropertyInfo(Variant::INT, "tentacle_object_id")));
 }

@@ -142,10 +142,37 @@ func get_canal_id() -> int:
 @export var force_active_for_test: bool = false
 
 
-## True iff no active EntryInteraction on either orifice AND no
-## storage chain content AND no Reverie modulation. 5E always returns
-## true (placeholder — no EI machinery wired yet, no Reverie writes,
-## no storage); 5F flips the body to query each gating signal.
+## Authoring-pass slice (2026-05-17) — EI count per tentacle on the
+## entry orifice. Key = tentacle ObjectID; value = currently-active
+## EI count from that tentacle. Maintained by the
+## `_on_ei_started` / `_on_ei_ended` handlers subscribed to the
+## entry_orifice's lifecycle signals. Drives `is_inactive()` AND the
+## production `tentacle.register_active_canal` binding.
+##
+## A tentacle is in this dictionary iff the orifice currently has ≥ 1
+## EI from it. The first 0→1 transition calls
+## `tentacle.register_active_canal(self, -1)`; the last 1→0 transition
+## calls `tentacle.unregister_active_canal(self)`. Multiple EIs from
+## the same tentacle ref-count safely (a tentacle threading two
+## adjacent rim loops won't double-register).
+var _active_ei_counts: Dictionary = {}
+
+## Cached tentacle Node3D references keyed by ObjectID. Looked up via
+## `instance_from_id(object_id)` when the lifecycle signal fires, so
+## the call to `register_active_canal` doesn't have to walk the scene
+## tree each tick.
+var _tentacle_by_object_id: Dictionary = {}
+
+## Cached reference to the subscribed entry-orifice. Set in `_ready`
+## (or in `_resolve_entry_orifice_lazy` on first tick). Disconnected
+## in `_exit_tree`.
+var _subscribed_entry_orifice: Node = null
+
+
+## True iff no active EntryInteraction AND no storage chain content
+## AND no Reverie modulation. Authoring-pass slice flips the body to
+## the real EI-count signal; storage + Reverie remain placeholders
+## until 5G + 6.8 ship.
 ##
 ## Per §6.12.9: when inactive, both the centerline solver tick and
 ## the texture integration loop are skipped entirely; the shader
@@ -153,10 +180,10 @@ func get_canal_id() -> int:
 func is_inactive() -> bool:
 	if force_active_for_test:
 		return false
-	# 5E placeholder. 5F replaces with:
-	#   return _active_entry_interactions.is_empty()
-	#       and _storage_chain.is_empty()
-	#       and _reverie_modulation_zero()
+	# Real signal: any active EI on the entry orifice flips us live.
+	if not _active_ei_counts.is_empty():
+		return false
+	# TODO 5G: storage chain content + Reverie modulation gates.
 	return true
 
 
@@ -181,6 +208,97 @@ func unregister_active_canal_for_test(p_tentacle: Node) -> void:
 	p_tentacle.call("unregister_active_canal", self)
 
 
+# ─── Production EI → canal binding (authoring-pass slice) ──────────
+
+
+func _ready() -> void:
+	# Subscribe to entry-orifice lifecycle signals if reachable. Lazy
+	# fallback: `_resolve_entry_orifice_lazy()` on each tick retries
+	# subscription when the orifice arrives later in the tree
+	# (split-instantiation order).
+	_subscribe_entry_orifice()
+
+
+func _exit_tree() -> void:
+	_unsubscribe_entry_orifice()
+	# Defensively unregister from every tentacle still tracked.
+	for oid in _active_ei_counts.keys():
+		var t: Node = _tentacle_by_object_id.get(oid)
+		if t != null and t.has_method("unregister_active_canal"):
+			t.call("unregister_active_canal", self)
+	_active_ei_counts.clear()
+	_tentacle_by_object_id.clear()
+
+
+## Resolve `canal_parameters.entry_orifice_path` against the orifices
+## root and connect the EI lifecycle signals. Idempotent — safe to
+## call repeatedly. Returns true if newly subscribed this call.
+func _subscribe_entry_orifice() -> bool:
+	if _subscribed_entry_orifice != null and is_instance_valid(_subscribed_entry_orifice):
+		return false  # already subscribed
+	if canal_parameters == null or canal_parameters.entry_orifice_path.is_empty():
+		return false
+	var root: Node = get_orifices_root()
+	if root == null:
+		return false
+	var orifice: Node = root.get_node_or_null(canal_parameters.entry_orifice_path)
+	if orifice == null:
+		return false
+	# Verify the orifice exposes the signals before connecting.
+	if not orifice.has_signal("entry_interaction_started") \
+			or not orifice.has_signal("entry_interaction_ended"):
+		return false
+	orifice.entry_interaction_started.connect(_on_ei_started)
+	orifice.entry_interaction_ended.connect(_on_ei_ended)
+	_subscribed_entry_orifice = orifice
+	return true
+
+
+func _unsubscribe_entry_orifice() -> void:
+	if _subscribed_entry_orifice == null or not is_instance_valid(_subscribed_entry_orifice):
+		_subscribed_entry_orifice = null
+		return
+	var orifice: Node = _subscribed_entry_orifice
+	if orifice.has_signal("entry_interaction_started") \
+			and orifice.entry_interaction_started.is_connected(_on_ei_started):
+		orifice.entry_interaction_started.disconnect(_on_ei_started)
+	if orifice.has_signal("entry_interaction_ended") \
+			and orifice.entry_interaction_ended.is_connected(_on_ei_ended):
+		orifice.entry_interaction_ended.disconnect(_on_ei_ended)
+	_subscribed_entry_orifice = null
+
+
+func _on_ei_started(p_tentacle_object_id: int, _p_tentacle_idx: int) -> void:
+	var count: int = _active_ei_counts.get(p_tentacle_object_id, 0)
+	_active_ei_counts[p_tentacle_object_id] = count + 1
+	if count == 0:
+		# 0→1 transition for this tentacle → register on solver.
+		var t: Object = instance_from_id(p_tentacle_object_id)
+		if t == null or not (t is Node):
+			return
+		_tentacle_by_object_id[p_tentacle_object_id] = t
+		if t.has_method("register_active_canal"):
+			# proximal_idx = -1 → "test all particles" in
+			# Tentacle::_apply_canal_wall_contacts. Precise tracking is a
+			# Phase 8 follow-up.
+			t.call("register_active_canal", self, -1)
+
+
+func _on_ei_ended(p_tentacle_object_id: int) -> void:
+	var count: int = _active_ei_counts.get(p_tentacle_object_id, 0)
+	if count <= 0:
+		return  # defensive: spurious / duplicate ended signal
+	if count == 1:
+		# 1→0 transition → unregister from solver.
+		_active_ei_counts.erase(p_tentacle_object_id)
+		var t: Object = _tentacle_by_object_id.get(p_tentacle_object_id)
+		if t != null and is_instance_valid(t) and t.has_method("unregister_active_canal"):
+			t.call("unregister_active_canal", self)
+		_tentacle_by_object_id.erase(p_tentacle_object_id)
+	else:
+		_active_ei_counts[p_tentacle_object_id] = count - 1
+
+
 # ─── Per-tick driver (5F.A wires the centerline chain) ─────────────
 
 ## Per-tick driver. 5F.A wires the centerline PBD chain; texture
@@ -196,6 +314,13 @@ func unregister_active_canal_for_test(p_tentacle: Node) -> void:
 ## `centerline_source` so a moving host bone propagates into the
 ## chain; that's out of scope here.
 func tick(p_delta: float) -> void:
+	# Late-subscription retry: if the entry orifice arrives after the
+	# canal in tree order, `_ready` couldn't bind. Cheap idempotent
+	# retry per tick until subscription succeeds; once subscribed, this
+	# is a fast early-return on `is_instance_valid` check.
+	if _subscribed_entry_orifice == null \
+			or not is_instance_valid(_subscribed_entry_orifice):
+		_subscribe_entry_orifice()
 	if is_inactive():
 		return
 	if _centerline_chain == null:

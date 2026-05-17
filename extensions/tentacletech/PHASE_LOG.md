@@ -1015,6 +1015,70 @@ Full TT suite: **243/243** passing across 33 scripts (was 236 + 7 new). All 33 s
 - **Stimulus bus emission for canal-driven events** — Phase 6 / slice (7).
 - **TT-S5 per-slot μ** — slice (8).
 
+### Slice — Authoring-pass production wiring (2026-05-17)
+
+Closes authoring-pass gaps 2, 3, 5 from the kasumi-ready discussion. Item 4 (`StimulusBus` autoload in `project.godot`) is cross-cutting; flagged for top-level. Item 6 (body_field N-source bake) is a sibling-extension concern, not on TT's plate.
+
+**Authoring workflow now complete end-to-end** (programmatic + Godot-native):
+
+1. Place a `Skeleton3D` with `PhysicalBoneSimulator3D` + `PhysicalBone3D` children under the hero root.
+2. Place an `Orifice` Node3D under the hero root (or wherever `orifices_root_path` resolves).
+3. Place a `Canal` Node3D under the hero root with `entry_orifice_path` pointing at the orifice.
+4. Choose centerline source: `CPBoneCenterlineSource` (Blender) OR `NodeCenterlineSource` (Godot) — the latter shipped 2026-05-17 with `auto_attach_to_nearest_bone`.
+5. Run `CanalAutoBaker.bake(canal, mesh_inst, skel, canal_id, hero)` from a `_ready` script.
+6. Run `OrificeAuthoring.add_circular_rim(orifice, center, radius, N)` from the same script.
+7. (Optional) Wire `OrificeSuppression.apply_to_orifice(orifice, profile, skeleton)` for TT-S3.
+8. Press play. A tentacle's tip crossing the rim creates an `EntryInteraction` → `Orifice` emits `entry_interaction_started` → `Canal` flips `is_inactive()` to false and calls `tentacle.register_active_canal(self, -1)` → 5F.B.C type-3 contacts fire → 5F.B.B `tunnel_state` integrates wall pressure → §6.12.12 reaction-pass dispatches `body_apply_impulse` on the host bone → Marionette SPD resists. Bus events emit. End-to-end natural-emergence pipeline closed.
+
+**Files modified:**
+
+- `extensions/tentacletech/src/orifice/orifice.{h,cpp}` — two new signals: `entry_interaction_started(int tentacle_object_id, int tentacle_idx)` and `entry_interaction_ended(int tentacle_object_id)`. Emitted at the 0→1 and 1→0 transitions in `_update_entry_interactions` (same points as the TT-S3 `register_active_ei_orifice` calls). Both belt-and-suspenders paths (the per-tick unregister loop + the post-grace erase loop) emit the ended signal; Canal subscriber's ref-count dedupes.
+- `extensions/tentacletech/gdscript/canal/canal.gd` — new `_active_ei_counts: Dictionary` (keyed by tentacle ObjectID, value = nested EI count). `_subscribe_entry_orifice()` + `_unsubscribe_entry_orifice()` lifecycle helpers; `_on_ei_started` / `_on_ei_ended` handlers maintain the ref-count and call `tentacle.register_active_canal(self, -1)` / `unregister_active_canal(self)` on transitions. `is_inactive()` now returns `_active_ei_counts.is_empty() and not force_active_for_test` (preserving the test bypass). Late-subscription retry in `tick()` for split-instantiation order.
+
+**Files added:**
+
+- `extensions/tentacletech/gdscript/orifice/orifice_authoring.gd` — `OrificeAuthoring` static helper. `add_circular_rim(orifice, center, radius, n, ...)` builds an N-particle circle in the orifice's Center frame; `add_polygon_rim(orifice, positions, target_area, ...)` for non-circular (slit, oval, asymmetric vulva) shapes. Defaults match 5C-A authoring (stiffness 0.5, area_compliance 1e-4, distance_compliance 1e-6). Validates n ≥ 3, radius > 0, non-null orifice.
+- `game/tests/tentacletech/test_authoring_pass.gd` — 8 tests covering the signal emission, ref-count idempotency, late-subscription, and OrificeAuthoring helper correctness.
+
+**Tests** — 8/8 passing:
+
+1. `orifice_exposes_ei_lifecycle_signals` — both signals declared + can be emitted + received.
+2. `add_circular_rim_builds_n_rim_particles` — N=8 → loop has 8 rim particles.
+3. `add_circular_rim_target_area_matches_circle` — target enclosed area = π × r² within 1e-4 rel err.
+4. `add_circular_rim_rejects_bad_args` — n < 3, radius ≤ 0, null orifice all return -1 without crashing.
+5. `add_polygon_rim_passes_through` — non-circular custom positions pass through to `add_rim_loop`.
+6. `canal_is_inactive_default` — zero EIs → inactive; `force_active_for_test = true` overrides.
+7. `canal_subscribes_to_entry_orifice_at_ready` — emit `entry_interaction_started` → canal flips active; emit `entry_interaction_ended` → canal flips inactive.
+8. `canal_subscription_idempotent` — 2× start + 2× end ref-counts correctly; spurious extra end is a safe no-op.
+
+Full TT suite: **266/266** across 36 scripts, all rc=0 (was 258 + 8 new). `.so` size 2,355,520 → 2,359,616 bytes (+4,096 / +0.17% — signal registration + emit calls).
+
+**Spec divergences:**
+
+- **(a) Production `register_active_canal` passes `-1` for `proximal_particle_idx`.** Per `Tentacle::_apply_canal_wall_contacts` line 1252, `proximal_idx = -1` → "test all particles from 0"; the 4× wall_radius sanity gate filters far-away ones. Precise per-EI proximal tracking (which particle index actually crossed the rim) requires either reading `EntryInteraction.particles_in_tunnel[0]` on Orifice (not currently exposed via signal) or per-particle EI lifecycle hooks. Phase 8 follow-up.
+- **(b) Canal subscribes only to `entry_orifice_path`.** For two-opening canals (esophagus → stomach → pylorus) the exit orifice also fires EI signals — those don't currently activate the canal. Acceptable because (a) exit-side EIs are rare in current scenarios, (b) the `entry_orifice` is what gates whether a tentacle is *in* the canal in the typical case. If exit-side activation matters for a future scenario, the subscription pattern extends trivially (add `_subscribe_exit_orifice` parallel to entry).
+- **(c) `OrificeAuthoring` is a static helper, not a method on `Orifice`.** Orifice is a C++ class; adding GDScript methods would require either (1) recompiling C++ to add the convenience or (2) subclassing in GDScript (which loses the C++ behavior). Static helper keeps Orifice's surface lean and lets authors write `OrificeAuthoring.add_circular_rim(orifice, ...)` without ceremony. Once body_field's `RimRingPrimitive` gizmo ships, this helper becomes legacy / examples-only.
+- **(d) Canal subscribes in `_ready` AND retries in `tick()`.** If the orifice node is added to the scene after the canal (common when a setup script adds nodes in code order), `_ready` fires before the orifice exists. The per-tick retry adds ~1 method call per inactive canal per tick — negligible. Once subscribed, the retry is a fast early-return on `is_instance_valid`.
+
+**Cross-cutting handoff to top-level (item 4 of the kasumi-ready list):**
+
+- **`StimulusBus` autoload registration in `project.godot`.** The autoload script `gdscript/stimulus/stimulus_bus_autoload.gd` shipped in Phase 6 minimum slice (commit `d9bce1a`). It needs an entry in `project.godot`'s `[autoload]` section to register at scene init:
+  ```
+  StimulusBusAutoload="*res://addons/tentacletech/scripts/stimulus/stimulus_bus_autoload.gd"
+  ```
+  Until this lands, `StimulusBus::get_singleton()` returns null and all emit calls are no-ops. This is the only kasumi-ready gap that requires a `project.godot` edit (top-level scope per the workflow).
+
+**Deferred (no longer blocking the scenario scene):**
+
+- Precise `proximal_particle_idx` tracking per EI (Phase 8 follow-up).
+- Exit-orifice subscription for two-opening canals.
+- Visual rim skin via body_field's N-source bake (body_field-side; tracked).
+- `OrificeAutoBaker` proximity-driven `suppressed_bones` (§10.4 follow-up).
+
+**Cross-slice composition:** No tentacle / centerline solver / tunnel-state integrator / reaction-pass code touched. Canal's tick body grows by one cheap subscription-retry check; the activation gate body changes but the EARLY-RETURN path remains the same. Orifice EI machinery untouched — signals are pure additions next to the existing `register_active_ei_orifice` calls.
+
+---
+
 ### Slice — `NodeCenterlineSource` Godot-native canal authoring (2026-05-17)
 
 Authoring-slice answering "how do I author a canal without Blender CP bones?" Concrete `CanalCenterlineSource` subclass that reads scene-tree `Node3D` markers as control points. No body_field dependency, no Blender script, no `<Canal>_CP_*` naming — pure Godot.
